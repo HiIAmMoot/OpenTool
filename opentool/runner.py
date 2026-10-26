@@ -124,7 +124,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             blender_log.unlink()
         except FileNotFoundError:
             pass
-        event_handler = _EventHandler(safe_emit)
+        event_handler = _EventHandler(emit)
         file_handler = logging.FileHandler(work / 'opentool.log', mode='w', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))

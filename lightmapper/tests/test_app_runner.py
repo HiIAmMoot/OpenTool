@@ -162,6 +162,28 @@ def test_runner_ignores_raising_event_callback(tiny):
     assert run_bake(BakeRequest(tiny[0], 'level', 'room', tiny[1], True, tiny[2]), broken_emit).status == 'done'
 
 
+def test_broken_log_sink_does_not_recurse(tiny, monkeypatch):
+    tags, settings, work = tiny
+    calls = []
+
+    def broken_emit(event):
+        if event[0] == 'log' and ('one line' in event[1] or 'Could not report bake event' in event[1]):
+            calls.append(event)
+            raise RuntimeError('event sink closed')
+
+    real_bake = pipeline.bake
+
+    def log_once(*args, **kwargs):
+        logging.getLogger('lightmapper.x').info('one line')
+        return real_bake(*args, **kwargs)
+
+    monkeypatch.setattr(runner.pipeline, 'bake', log_once)
+    out = run_bake(BakeRequest(tags, 'level', 'room', settings, True, work), broken_emit)
+    assert out.status == 'done'
+    assert len(calls) <= 3
+    assert (work / 'opentool.log').stat().st_size < 50_000
+
+
 def test_runner_continues_when_follower_cannot_start(tiny, monkeypatch):
     def fail_start(self):
         raise RuntimeError('thread could not start')
