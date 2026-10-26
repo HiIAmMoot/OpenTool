@@ -38,6 +38,31 @@ def test_list_bsps(tiny):
     assert bsp_tag_path(tags, 'level', 'room') == 'room'
 
 
+def test_list_bsps_resolves_scenario_reference(tmp_path, monkeypatch):
+    import opentool.form as form
+
+    expected = tmp_path / 'resolved.scenario'
+    seen = []
+
+    class Scenario:
+        class Root:
+            @staticmethod
+            def block(name):
+                assert name == 'structure_bsps'
+                return []
+
+        root = Root()
+
+    def resolve(tags, group, scenario):
+        seen.append((tags, group, scenario))
+        return expected
+
+    monkeypatch.setattr(form, 'resolve_reference_path', resolve, raising=False)
+    monkeypatch.setattr(form, 'read_tag', lambda path: Scenario())
+    assert form.list_bsps(tmp_path, 'levels\\test\\level') == []
+    assert seen == [(tmp_path, 'scnr', 'levels\\test\\level')]
+
+
 @pytest.mark.ek
 def test_bloodgulch_has_one_bsp():
     assert list_bsps(HCEEK_TAGS, 'levels\\test\\bloodgulch\\bloodgulch') == ['bloodgulch']

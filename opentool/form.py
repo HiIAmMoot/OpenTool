@@ -1,7 +1,7 @@
 from pathlib import Path, PureWindowsPath
 
 from lightmapper.pipeline import find_bsp
-from lightmapper.tagio.tagfile import read_tag
+from lightmapper.tagio.tagfile import read_tag, resolve_reference_path
 
 
 LIT_SUFFIX = '_lit'
@@ -22,15 +22,12 @@ def scenario_tag_path(tags: Path, file: Path) -> str:
     try:
         relative = scenario.relative_to(root)
     except ValueError:
-        if str(scenario).casefold().startswith(str(root).casefold().rstrip('\\/') + str(Path('/'))):
-            relative = Path(str(scenario)[len(str(root)) + 1:])
-        else:
-            raise ValueError('The scenario has to be inside the tags folder you picked.') from None
+        raise ValueError('The scenario has to be inside the tags folder you picked.') from None
     return str(relative.with_suffix('')).replace('/', '\\')
 
 
 def list_bsps(tags: Path, scenario: str) -> list[str]:
-    tag = read_tag(Path(tags) / (scenario.replace('\\', '/') + '.scenario'))
+    tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
     return [PureWindowsPath(entry.reference('structure_bsp')[1]).name
             for entry in tag.root.block('structure_bsps')]
 

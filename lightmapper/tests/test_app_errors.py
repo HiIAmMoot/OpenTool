@@ -51,3 +51,20 @@ def test_missing_tag_names_the_file():
 
 def test_cap_error_is_not_the_generic_value_error():
     assert 'texel density' in explain(CapError('a chart exceeds page_max including padding'))
+
+
+@pytest.mark.parametrize('exc', [RuntimeError(), AssertionError(), KeyError()])
+def test_empty_exception_message_has_generic_explanation(exc):
+    assert 'The bake stopped' in explain(exc)
+
+
+def test_xatlas_message_uses_plain_sentence():
+    assert explain(RuntimeError('xatlas failed')) == 'Part of OpenTool is missing (xatlas), so unzip the download again.'
+
+
+def test_oserror_without_filename_uses_plain_fallback():
+    assert 'a file' in explain(PermissionError(13, 'denied'))
+
+
+def test_blender_error_without_work_names_work_folder():
+    assert "blender.log in the bake's work folder" in explain(BlenderError('blender exited with 1'))
