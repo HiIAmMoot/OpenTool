@@ -38,3 +38,27 @@ def test_mixed_mesh_kinds_refused():
     atlas.add_mesh(CUBE, CUBE_TRIS)
     with pytest.raises(ValueError):
         atlas.add_uv_mesh(np.zeros((3, 2), np.float32), np.array([[0, 1, 2]]))
+import os
+import sys
+
+import pytest
+
+from lightmapper import xatlas_c
+
+
+def test_frozen_loads_the_shipped_library_without_building(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    shipped = tmp_path / 'xatlas.dll'
+    shipped.write_bytes(b'')
+    os.utime(shipped, (0, 0))
+    monkeypatch.setattr(xatlas_c, '_library_path', lambda: shipped)
+    monkeypatch.setattr(xatlas_c, '_find_clang', lambda: pytest.fail('frozen must not compile'))
+    assert xatlas_c.library() == shipped
+
+
+def test_frozen_missing_library_says_unzip_again(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(xatlas_c, '_library_path', lambda: tmp_path / 'xatlas.dll')
+    monkeypatch.setattr(xatlas_c, '_find_clang', lambda: pytest.fail('frozen must not compile'))
+    with pytest.raises(RuntimeError, match='unzip the download again'):
+        xatlas_c.library()

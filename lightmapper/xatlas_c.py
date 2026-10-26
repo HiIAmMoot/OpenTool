@@ -16,6 +16,8 @@ import sys
 
 import numpy as np
 
+from . import frozen
+
 
 VENDOR = Path(__file__).resolve().parent / "vendor" / "xatlas"
 BUILD = VENDOR / "build"
@@ -127,10 +129,19 @@ def build() -> Path:
     return library
 
 
+def library() -> Path:
+    if frozen.is_frozen():
+        path = _library_path()
+        if not path.is_file():
+            raise RuntimeError('xatlas.dll is missing from the OpenTool folder; unzip the download again')
+        return path
+    return build()
+
+
 def _load():
     global _dll
     if _dll is None:
-        dll = C.CDLL(str(build()))
+        dll = C.CDLL(str(library()))
         dll.xatlasCreate.restype = C.POINTER(_Atlas)
         dll.xatlasDestroy.argtypes = [C.POINTER(_Atlas)]
         dll.xatlasAddMesh.argtypes = [C.POINTER(_Atlas), C.POINTER(_MeshDecl), C.c_uint32]
