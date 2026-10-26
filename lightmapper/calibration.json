@@ -1,0 +1,8 @@
+{
+  "w_sun": 3.141592653589793,
+  "w_emit": 1.0,
+  "w_amb": 1.0,
+  "gamma": 1.0,
+  "radiosity_mode": "coherence",
+  "radiosity_scale": 1.0
+}

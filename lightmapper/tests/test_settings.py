@@ -1,0 +1,97 @@
+import json
+from pathlib import Path
+
+import pytest
+
+from lightmapper.settings import Settings, load_settings
+
+
+def test_defaults_come_from_calibration_json():
+    s = Settings()
+    assert (s.w_sun, s.w_emit, s.w_amb, s.gamma, s.radiosity_scale) == (1, 1, 1, 1, 1)
+    assert s.radiosity_mode == 'coherence'
+    assert (s.samples, s.bounces, s.vertex_rays, s.device, s.timeout_s) == (256, 1, 4096, 'OPTIX', 7200)
+    assert s.page_max == 1024 and s.denoise and s.dither
+
+
+def test_shipped_calibration_is_tools_analytic_model(monkeypatch):
+    from math import pi
+    from lightmapper import settings
+    monkeypatch.setattr(settings, 'CALIBRATION_PATH', Path(settings.__file__).with_name('calibration.json'))
+    s = Settings()
+    assert (s.w_sun, s.w_emit, s.w_amb, s.gamma) == (pi, 1.0, 1.0, 1.0)
+    assert (s.radiosity_mode, s.radiosity_scale) == ('coherence', 1.0)
+
+
+def test_none_gives_defaults():
+    assert load_settings(None) == Settings()
+
+
+def test_blender_default_follows_environment_at_construction(monkeypatch):
+    monkeypatch.setenv('LIGHTMAPPER_BLENDER', r'C:\Apps\Blender\blender.exe')
+    assert load_settings(None).blender == r'C:\Apps\Blender\blender.exe'
+    monkeypatch.setenv('LIGHTMAPPER_BLENDER', r'C:\Other\blender.exe')
+    assert Settings().blender == r'C:\Other\blender.exe'
+
+
+def test_blender_default_without_environment(monkeypatch):
+    monkeypatch.delenv('LIGHTMAPPER_BLENDER', raising=False)
+    assert Settings().blender == r'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
+
+
+def test_blender_setting_overrides_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv('LIGHTMAPPER_BLENDER', r'C:\Other\blender.exe')
+    path = tmp_path / 'settings.json'
+    path.write_text(json.dumps({'blender': r'C:\Apps\Blender\blender.exe'}))
+    assert load_settings(path).blender == r'C:\Apps\Blender\blender.exe'
+
+
+def test_round_trip(tmp_path):
+    original = Settings(samples=8, w_sun=1.5, radiosity_mode='scaled', page_max=256, denoise=False)
+    path = tmp_path / 's.json'
+    path.write_text(original.to_json())
+    assert load_settings(path) == original
+
+
+def test_partial_file_keeps_other_defaults(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'samples': 4}))
+    s = load_settings(path)
+    assert s.samples == 4 and s.bounces == 1
+
+
+def test_unknown_key_is_an_error(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'sampels': 4}))
+    with pytest.raises(ValueError, match='sampels'):
+        load_settings(path)
+
+
+def test_bad_radiosity_mode_is_an_error():
+    with pytest.raises(ValueError):
+        Settings(radiosity_mode='bogus')
+
+
+def test_detail_level_scale_survives_a_settings_file(tmp_path):
+    assert Settings().detail_level_scale == (2.667, 1.0, 0.6, 0.03)
+    original = Settings(detail_level_scale=(2.0, 1.0, 0.5, 0.1))
+    path = tmp_path / 's.json'
+    path.write_text(original.to_json())
+    assert load_settings(path) == original
+
+
+@pytest.mark.parametrize('bad', [0, -1])
+def test_sky_grid_must_be_positive(bad):
+    with pytest.raises(ValueError, match='sky_grid'):
+        Settings(sky_grid=bad)
+
+
+def test_texel_samples_follows_samples_unless_set():
+    from lightmapper.settings import Settings
+
+    assert Settings().texel_samples is None
+    assert Settings(samples=64).resolved_texel_samples() == 9 * round(64 / 9)
+    assert Settings(samples=1024).resolved_texel_samples() == 9 * round(1024 / 9)
+    assert Settings(samples=4).resolved_texel_samples() == 9
+    assert Settings(samples=1024, texel_samples=100).resolved_texel_samples() == 100
+    assert Settings(samples=1024, texel_samples=0).resolved_texel_samples() == 0

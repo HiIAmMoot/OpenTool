@@ -1,0 +1,763 @@
+"""Exercise orchestration on synthetic tags and scenes."""
+
+from dataclasses import replace
+import importlib.util
+import json
+import struct
+
+import numpy as np
+import pytest
+
+from conftest import LIGHTMAPPER_BLENDER
+from lightmapper.blender_job import BakeResult
+from lightmapper.formats.vertices import ENV, LM, compress, pack_uncompressed, unpack_uncompressed
+from lightmapper.settings import Settings
+from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
+from lightmapper.validate import validate_bsp
+
+
+def child(parent, name):
+    return new_element(next(f.layout for f in parent.layout.fields if f.key == name))
+
+
+def api():
+    assert importlib.util.find_spec('lightmapper.pipeline') is not None, 'bake pipeline is missing'
+    from lightmapper import pipeline
+    return pipeline
+
+
+def put(tags, group, path, tag):
+    target = resolve_reference_path(tags, group, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_tag(tag, target)
+
+
+@pytest.fixture
+def tiny(tmp_path, monkeypatch):
+    tags = tmp_path / 'tags'
+    scenario, bsp, shader = new_tag('scnr'), new_tag('sbsp'), new_tag('senv')
+    ref = child(scenario.root, 'structure_bsps')
+    ref.set_reference('structure_bsp', 'sbsp', 'room')
+    scenario.root.set_block('structure_bsps', [ref])
+    page, final = child(bsp.root, 'lightmaps'), child(bsp.root, 'lightmaps')
+    final.set('bitmap', -1)
+    material = child(page, 'materials')
+    material.set_reference('shader', 'senv', 'wall')
+    env, lm = np.zeros(6, ENV), np.zeros(6, LM)
+    env['position'] = [[0, 0, 0], [4, 0, 0], [0, 4, 0], [10, 0, 0], [14, 0, 0], [10, 4, 0]]
+    env['normal'] = [0, 0, 1]
+    env['tangent'] = [1, 0, 0]
+    env['binormal'] = [0, 1, 0]
+    env['texcoord'] = [[0, 0], [1, 0], [0, 1]] * 2
+    for prefix in ('rendered_vertices', 'lightmap_vertices'):
+        material.set(prefix + '.vertex_count', 6)
+    material.set('surface_count', 2)
+    material.set_data('uncompressed_vertices', pack_uncompressed(env, lm))
+    material.set_data('compressed_vertices', compress(env, lm))
+    page.set_block('materials', [material])
+    bsp.root.set_block('lightmaps', [page, final])
+    surfaces = [child(bsp.root, 'surfaces') for _ in range(2)]
+    surfaces[0].body[:] = struct.pack('>3H', 0, 1, 2)
+    surfaces[1].body[:] = struct.pack('>3H', 3, 4, 5)
+    bsp.root.set_block('surfaces', surfaces)
+    put(tags, 'scnr', 'level', scenario)
+    put(tags, 'sbsp', 'room', bsp)
+    put(tags, 'senv', 'wall', shader)
+    pipeline = api()
+
+    def fake_blender(work, s):
+        job = json.loads((work / 'job.json').read_text())
+        with np.load(work / 'scene.npz') as scene:
+            vectors = scene['query_normal'] * (scene['query_pos'][:, 0:1] / 100 + .25)
+        return BakeResult([np.zeros((h, w, 3), np.float32) for w, h in job['pages']],
+                          vectors, np.ones(len(vectors), np.float32), 'test CPU',
+                          [np.ones((h, w), bool) for w, h in job['pages']])
+
+    monkeypatch.setattr(pipeline, 'run_blender', fake_blender)
+    return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
+
+
+def test_pipeline_outputs(tiny):
+    tags, settings, work = tiny
+    out = api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work)
+    assert validate_bsp(out.bsp_tag, out.bitmap_tag, strict_compression=True) == []
+    np.testing.assert_array_equal(np.sort(out.new_to_input), [0, 1])
+    for page in out.bsp_tag.root.block('lightmaps')[:-1]:
+        for m in page.block('materials'):
+            env, lm = unpack_uncompressed(m.data('uncompressed_vertices'),
+                                        m.get('rendered_vertices.vertex_count'), m.get('lightmap_vertices.vertex_count'))
+            expected = np.zeros((len(lm), 3), np.float32)
+            expected[:, 2] = env['position'][:, 0] / 100 + .25
+            np.testing.assert_array_equal(lm['incident_radiosity'], expected)
+    assert read_tag(tags / 'copy_level.scenario').root.block('structure_bsps')[0].reference('structure_bsp') == ('sbsp', 'copy')
+    assert read_tag(tags / 'copy.scenario_structure_bsp').root.reference('lightmaps_bitmap') == ('bitm', 'copy')
+    assert (tags / 'copy.bitmap').is_file()
+    np.testing.assert_array_equal(np.load(work / 'new_to_input.npy'), out.new_to_input)
+    with np.load(work / 'float_pages.npz', allow_pickle=False) as data:
+        assert len(data.files) == len(out.float_pages)
+        assert all(data[k].dtype == np.float32 for k in data.files)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['device'] == 'test CPU'
+    assert summary['pages'] == len(out.float_pages)
+    assert summary['seconds'] and summary['texels_per_unit'] == .25
+    assert summary['settings']['stitch_seams'] is True
+    assert summary['settings']['respect_normal_seams'] is True
+    assert summary['settings']['texel_samples'] is None
+    assert summary['texel_samples'] == settings.resolved_texel_samples()
+
+
+def test_pipeline_stitches_before_quantisation(tiny, monkeypatch):
+    from test_seams import fixture
+    from lightmapper.pages import quantise
+    from lightmapper.diff import bitmap_pages
+
+    tags, settings, work = tiny
+    pages, raw, _, _ = fixture()
+    for page in pages:
+        page.materials[0].group = 0
+    module = api()
+    monkeypatch.setattr(module, 'chart_and_pack', lambda *args: pages)
+    original = module.run_blender
+
+    def with_step(work, s):
+        result = original(work, s)
+        result.pages = [r.copy() for r in raw]
+        return result
+
+    monkeypatch.setattr(module, 'run_blender', with_step)
+    out = module.bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    for image in out.float_pages:
+        np.testing.assert_allclose(image[2, 2:11], 0.5, atol=1e-5)
+    from lightmapper.formats.vertices import decode_r5g6b5
+    for image, pixels in zip(out.float_pages, bitmap_pages(out.bitmap_tag)):
+        np.testing.assert_array_equal(pixels, decode_r5g6b5(quantise(image, settings)))
+
+
+def test_pipeline_hands_simple_parameterization_groups_to_stitching(tiny, monkeypatch):
+    tags, settings, work = tiny
+    module = api()
+    seen = []
+    original_read, original_finish = module.read_radiosity, module.finish_pages
+    monkeypatch.setattr(module, 'read_radiosity', lambda *args: replace(original_read(*args), flags=module.SIMPLE_PARAMETERIZATION))
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get('joined_groups'))
+        return original_finish(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'finish_pages', spy)
+    module.bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert seen == [{0}]
+
+
+def test_pipeline_fills_covered_hole_using_blender_written_mask(tiny, monkeypatch):
+    from lightmapper.raster import coverage
+    tags, settings, work = tiny
+    module = api()
+    original = module.run_blender
+    holes = []
+
+    def with_holes(work, s):
+        result = original(work, s)
+        with np.load(work / 'scene.npz') as scene:
+            for i, raw in enumerate(result.pages):
+                h, w = raw.shape[:2]
+                rows = scene['tri_page'] == i
+                mask, _ = coverage(scene['lm_uv'], scene['tris'][rows], scene['tri_class'][rows], w, h)
+                y, x = np.argwhere(mask)[0]
+                raw[:] = 0.7
+                raw[y, x] = 0
+                result.written[i][y, x] = False
+                holes.append((i, y, x))
+        return result
+
+    monkeypatch.setattr(module, 'run_blender', with_holes)
+    out = module.bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert holes
+    for i, y, x in holes:
+        np.testing.assert_allclose(out.float_pages[i][y, x], [0.7, 0.7, 0.7])
+
+
+@pytest.mark.parametrize('kwargs', [{'sources': 'sun'}, {'sources': 'emit'}, {'dry_run': True}])
+def test_diagnostics_write_no_tags(tiny, kwargs):
+    tags, settings, work = tiny
+    before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work, **kwargs)
+    assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
+
+
+def test_blender_failure_leaves_tags_untouched(tiny, monkeypatch):
+    from lightmapper.blender_job import BlenderError
+    tags, settings, work = tiny
+    before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
+
+    def fail(*args):
+        raise BlenderError('bake failed')
+
+    monkeypatch.setattr(api(), 'run_blender', fail)
+    with pytest.raises(BlenderError, match='bake failed'):
+        api().bake(tags, 'level', 'room', settings, work=work)
+    assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
+
+
+def test_surface_cap_refuses(tiny, monkeypatch, caplog):
+    tags, settings, work = tiny
+    module = api()
+    monkeypatch.setattr(module, 'MAX_BSP_SURFACES', 1)
+
+    def no_chart(*args):
+        raise AssertionError('charted before refusing stock cap')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, 'chart_and_pack', no_chart)
+        with pytest.raises(ValueError, match='surfaces'):
+            module.bake(tags, 'level', 'room', settings, work=work)
+    module.bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert 'surfaces' in caplog.text
+    assert not list(tags.rglob('*.lm-backup-*'))
+
+
+def test_charts_cache(tiny, monkeypatch):
+    tags, settings, work = tiny
+    module = api()
+    cache = work / 'charts.npz'
+    first = module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+
+    def no_chart(*args):
+        raise AssertionError('recharted')
+
+    monkeypatch.setattr(module, 'chart_and_pack', no_chart)
+    second = module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    np.testing.assert_array_equal(first.new_to_input, second.new_to_input)
+    with pytest.raises(AssertionError, match='recharted'):
+        module.bake(tags, 'level', 'room', replace(settings, texels_per_unit=.5), work=work, charts=cache, dry_run=True)
+    bsp_path = tags / 'room.scenario_structure_bsp'
+    bsp = read_tag(bsp_path)
+    bsp.root.set('world_bounds_x', (0.0, 1.0))
+    write_tag(bsp, bsp_path)
+    with pytest.raises(AssertionError, match='recharted'):
+        module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+
+
+@pytest.mark.parametrize('field, value', [('radiosity.detail_level', 3), ('radiosity.flags', 1)])
+def test_charts_cache_follows_chart_shader_inputs(tiny, monkeypatch, field, value):
+    tags, settings, work = tiny
+    module = api()
+    cache = work / 'charts.npz'
+    module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    shader_path = tags / 'wall.shader_environment'
+    shader = read_tag(shader_path)
+    shader.root.set(field, value)
+    write_tag(shader, shader_path)
+
+    def no_chart(*args):
+        raise AssertionError('recharted')
+
+    monkeypatch.setattr(module, 'chart_and_pack', no_chart)
+    with pytest.raises(AssertionError, match='recharted'):
+        module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+
+
+def test_backup_never_overwritten(tiny):
+    tags, settings, work = tiny
+    original = (tags / 'room.scenario_structure_bsp').read_bytes()
+    api().bake(tags, 'level', 'room', settings, work=work)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    backups = sorted(tags.glob('room.scenario_structure_bsp.lm-backup-*'))
+    assert len(backups) == 2
+    assert backups[0].read_bytes() == original
+    assert len(list(tags.glob('room.bitmap.lm-backup-*'))) == 1
+
+
+def test_copy_command(tiny):
+    from lightmapper.cli import main
+    tags, _, _ = tiny
+    from lightmapper.formats.bitmap import write_bitmap
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    bsp.root.set_reference('lightmaps_bitmap', 'bitm', 'old_bitmap')
+    write_tag(bsp, tags / 'room.scenario_structure_bsp')
+    put(tags, 'bitm', 'old_bitmap', write_bitmap([np.zeros((8, 8), np.uint16)]))
+    bitmap_bytes = (tags / 'old_bitmap.bitmap').read_bytes()
+    assert main(['copy', 'level', 'room', '--tags', str(tags), '--out-bsp', 'copies\\room', '--out-scenario', 'copies\\level']) == 0
+    copied = read_tag(tags / 'copies/room.scenario_structure_bsp')
+    assert copied.root.reference('lightmaps_bitmap') == ('bitm', 'copies\\room')
+    assert read_tag(tags / 'copies/level.scenario').root.block('structure_bsps')[0].reference('structure_bsp') == ('sbsp', 'copies\\room')
+    assert (tags / 'copies/room.bitmap').read_bytes() == bitmap_bytes
+
+
+def test_validate_command(tiny, capsys):
+    from lightmapper.cli import main
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert main(['validate', 'room', '--tags', str(tags), '--strict']) == 0
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    bsp.root.block('lightmaps')[-1].set('bitmap', 2)
+    write_tag(bsp, tags / 'room.scenario_structure_bsp')
+    assert main(['validate', str(tags / 'room.scenario_structure_bsp'), '--tags', str(tags)]) == 1
+    assert 'last element must have bitmap -1' in capsys.readouterr().out
+
+
+def test_validate_uses_tags_environment(tiny, monkeypatch):
+    from lightmapper.cli import main
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work)
+    monkeypatch.setenv('HCEEK_TAGS', str(tags))
+    assert main(['validate', 'room', '--strict']) == 0
+
+
+def test_validate_explicit_tags_override_environment(tiny, monkeypatch):
+    from lightmapper.cli import main
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work)
+    monkeypatch.setenv('HCEEK_TAGS', str(work / 'missing'))
+    assert main(['validate', 'room', '--tags', str(tags)]) == 0
+
+
+@pytest.mark.parametrize('environment', [None, ''])
+def test_validate_requires_tags_without_environment(monkeypatch, capsys, environment):
+    from lightmapper.cli import main
+    if environment is None:
+        monkeypatch.delenv('HCEEK_TAGS', raising=False)
+    else:
+        monkeypatch.setenv('HCEEK_TAGS', environment)
+    with pytest.raises(SystemExit) as error:
+        main(['validate', 'missing'])
+    assert error.value.code == 2
+    message = capsys.readouterr().err
+    assert '--tags' in message and 'HCEEK_TAGS' in message
+
+
+def test_clockwise_triangle_reaches_blender_counter_clockwise(tiny, monkeypatch):
+    tags, settings, work = tiny
+    # the fixture's normals are +z; (0, 2, 1) is the clockwise order Halo uses for a +z face
+    room = read_tag(tags / 'room.scenario_structure_bsp')
+    room.root.block('surfaces')[0].body[:] = struct.pack('>3H', 0, 2, 1)
+    put(tags, 'sbsp', 'room', room)
+    sent = {}
+    blender = api().run_blender
+
+    def spy(work, s):
+        with np.load(work / 'scene.npz') as scene:
+            sent['tris'], sent['positions'] = scene['tris'], scene['positions']
+        return blender(work, s)
+
+    monkeypatch.setattr(api(), 'run_blender', spy)
+    out = api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work)
+    p = sent['positions']
+    t = sent['tris']
+    winding = np.cross(p[t[:, 1]] - p[t[:, 0]], p[t[:, 2]] - p[t[:, 0]])
+    # the second fixture triangle is already counter-clockwise, so Blender gets it flipped
+    np.testing.assert_array_equal(winding[:, 2], np.array([16., -16.])[out.new_to_input[:2]])
+    # the tag keeps tool's order: the clockwise surface stays clockwise in the written BSP
+    written = []
+    surfaces = out.bsp_tag.root.block('surfaces')
+    for page in out.bsp_tag.root.block('lightmaps')[:-1]:
+        for m in page.block('materials'):
+            env, _ = unpack_uncompressed(m.data('uncompressed_vertices'),
+                                         m.get('rendered_vertices.vertex_count'), m.get('lightmap_vertices.vertex_count'))
+            first = m.get('surfaces')
+            for k in range(m.get('surface_count')):
+                a, b, c = struct.unpack('>3H', bytes(surfaces[first + k].body)[:6])
+                written.append((int(out.new_to_input[first + k]), env['position'][[a, b, c]]))
+    assert len(written) == 2
+    for source, corners in written:
+        z = np.cross(corners[1] - corners[0], corners[2] - corners[0])[2]
+        assert (z < 0) == (source == 0)
+
+
+def test_scene_at_stock_surface_cap(tiny):
+    from lightmapper.formats.bsp import BspGeometry, OutMaterial, OutPage, SourceGroup
+    from lightmapper.gather import ShaderRadiosity
+
+    tags, _, _ = tiny
+    materials, groups = [], []
+    total = 131072
+    for start in range(0, total, 20000):
+        count = min(20000, total - start)
+        env = np.zeros(count * 3, ENV)
+        # grid-snapped vertices exercise exact-byte query keys at the largest stock input
+        env['position'][:, 0] = np.arange(start * 3, (start + count) * 3)
+        env['normal'] = [0, 0, 1]
+        tris = np.arange(count * 3, dtype=np.uint16).reshape(-1, 3)
+        ids = np.arange(start, start + count, dtype=np.int32)[::-1].copy()
+        groups.append(SourceGroup(('senv', 'wall', 0, 0, 0), None, env, tris, ids))
+        materials.append(OutMaterial(len(groups) - 1, env, np.zeros(len(env), LM), tris, ids))
+    final = read_tag(tags / 'room.scenario_structure_bsp').root.block('lightmaps')[-1]
+    geometry = BspGeometry(groups, final, np.zeros(total, np.int16), np.array([-1], np.int16))
+    radiosity = [ShaderRadiosity(0, 0, 2., np.array([.25, .5, 1.]), np.ones(3))] * len(groups)
+    classes = np.arange(total, dtype=np.int32) % 3 - 1
+    scene, inverse, textures = api()._scene(tags, read_tag(tags / 'level.scenario'), 0,
+        geometry, [OutPage(1024, 1024, materials)], radiosity, classes)
+    assert len(scene.tris) == 131072
+    assert len(scene.positions) == 393216
+    assert scene.tris[-1].tolist() == [393213, 393215, 393214]
+    assert scene.tri_class[:3].tolist() == [0, -1, 1]
+    assert scene.query_class[:9].tolist() == [0, 0, 0, -1, -1, -1, 1, 1, 1]
+    np.testing.assert_array_equal(inverse, np.arange(393216))
+    np.testing.assert_array_equal(scene.query_inverse, inverse)
+    np.testing.assert_array_equal(scene.tri_emission, np.tile([.5, 1., 2.], (total, 1)))
+    assert scene.tri_casts_shadow.all()
+    assert not scene.tri_cutout.any()
+    assert (scene.tri_texture == -1).all() and textures.arrays() == []
+
+
+def test_scene_textures_and_occluder_scale(tiny):
+    from test_scenery import write_model, write_scenery
+    from lightmapper.formats.bitmap import write_bitmap
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import read_radiosity
+
+    tags, _, _ = tiny
+    shader = read_tag(tags / 'wall.shader_environment')
+    shader.root.set('properties.flags', 1)
+    shader.root.set_reference('diffuse.base_map', 'bitm', 'base')
+    put(tags, 'senv', 'wall', shader)
+    put(tags, 'bitm', 'base', write_bitmap([np.full((8, 8), 0xffff, np.uint16)]))
+    model_shader = new_tag('soso')
+    model_shader.root.set_reference('maps.base_map', 'bitm', 'base')
+    model_shader.root.set('maps.map_u_scale', .5)
+    model_shader.root.set('maps.map_v_scale', 4.)
+    put(tags, 'soso', 'model_shader', model_shader)
+    write_model(tags, 'model', [[(0, [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])]],
+                shaders=(('soso', 'model_shader'),), scale=(2., 3.))
+    write_scenery(tags, 'prop', 'model')
+    scenario = read_tag(tags / 'level.scenario')
+    palette = child(scenario.root, 'scenery_palette')
+    palette.set_reference('name', 'scen', 'prop')
+    scenario.root.set_block('scenery_palette', [palette])
+    placements = []
+    for mask, x in [(1, 100.), (2, 10.)]:
+        placement = child(scenario.root, 'scenery')
+        placement.set('bsp_indices', mask)
+        placement.set('placement.position', (x, 0., 0.))
+        placements.append(placement)
+    scenario.root.set_block('scenery', placements)
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    material = OutMaterial(0, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids)
+    scene, _, textures = api()._scene(tags, scenario, 1, geometry, [OutPage(8, 8, [material])],
+        [read_radiosity(tags, 'senv', 'wall')], np.array([-1, 2], np.int16))
+    np.testing.assert_array_equal(scene.tex_uv, group.env['texcoord'])
+    assert scene.tri_class.tolist() == [-1, 2]
+    assert scene.tri_cutout.tolist() == [True, True]
+    assert scene.tri_texture.tolist() == [0, 0]
+    assert scene.occ_positions.tolist() == [[10., 0., 0.], [10., 1., 0.], [11., 0., 0.]]
+    assert scene.occ_uv.tolist() == [[0., 6.], [.25, 6.], [.125, 6.]]
+    assert scene.occ_tris.tolist() == [[0, 1, 2]]
+    assert scene.occ_tri_texture.tolist() == [0]
+    assert scene.occ_tri_cutout.tolist() == [True]
+    assert scene.occ_tri_casts_shadow.tolist() == [True]
+    assert len(textures.arrays()) == 1
+    np.testing.assert_array_equal(textures.arrays()[0], np.full((8, 8, 4), 255, np.uint8))
+
+
+def test_scene_carries_the_tint_of_a_see_through_group(tiny):
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import ShaderRadiosity
+
+    tags, _, _ = tiny
+    put(tags, 'sgla', 'glass', new_tag('sgla'))
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    group.key = ('sgla', 'glass') + tuple(group.key[2:])
+    material = OutMaterial(0, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids)
+    tint = np.array([.46, .6, .66])
+    scene, _, _ = api()._scene(tags, read_tag(tags / 'level.scenario'), 0, geometry,
+        [OutPage(8, 8, [material])], [ShaderRadiosity(0, 0, 0., np.zeros(3), tint)], np.array([-1, -1], np.int16))
+    assert not scene.tri_casts_shadow.any()
+    np.testing.assert_allclose(scene.tri_tint, [tint, tint], rtol=1e-6)
+    assert scene.tri_tint.dtype == np.float32
+
+
+def test_scene_solid_group_has_no_tint_to_apply(tiny):
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import ShaderRadiosity
+
+    tags, _, _ = tiny
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    material = OutMaterial(0, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids)
+    scene, _, _ = api()._scene(tags, read_tag(tags / 'level.scenario'), 0, geometry,
+        [OutPage(8, 8, [material])], [ShaderRadiosity(0, 0, 0., np.zeros(3), np.array([.5, .5, .5]))],
+        np.array([-1, -1], np.int16))
+    assert scene.tri_casts_shadow.all()
+    np.testing.assert_array_equal(scene.tri_tint, np.ones((2, 3)))
+
+
+def put_sotr(tags, name, power, colour=(1., .5, .25)):
+    header = bytearray(64)
+    header[36:40] = b'sotr'
+    target = resolve_reference_path(tags, 'sotr', name)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(bytes(header) + struct.pack('>Hhf3f3f', 0, 0, power, *colour, 1., 1., 1.))
+
+
+def rewind_room(tags):
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    for surface, corners in zip(bsp.root.block('surfaces'), [(0, 2, 1), (3, 5, 4)]):
+        surface.body[:] = struct.pack('>3H', *corners)
+    write_tag(bsp, tags / 'room.scenario_structure_bsp')
+
+
+def add_unlit_quad(tags, shader, z=2.):
+    """A quad above the tiny room's first triangle, facing down, in the final group as shader. The room's own
+    triangles are rewound clockwise relative to their +z normals, as Halo's are, so that they face the quad."""
+    rewind_room(tags)
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    final = bsp.root.block('lightmaps')[-1]
+    material = child(final, 'materials')
+    material.set_reference('shader', 'sotr', shader)
+    env, lm = np.zeros(4, ENV), np.zeros(0, LM)
+    env['position'] = [[0, 0, z], [4, 0, z], [4, 4, z], [0, 4, z]]
+    env['normal'] = [0, 0, -1]
+    env['tangent'] = [1, 0, 0]
+    env['binormal'] = [0, 1, 0]
+    env['texcoord'] = [[0, 0], [1, 0], [1, 1], [0, 1]]
+    material.set('rendered_vertices.vertex_count', 4)
+    material.set('surfaces', len(bsp.root.block('surfaces')))
+    material.set('surface_count', 2)
+    material.set_data('uncompressed_vertices', pack_uncompressed(env, lm))
+    material.set_data('compressed_vertices', compress(env, lm))
+    final.set_block('materials', final.block('materials') + [material])
+    surfaces = bsp.root.block('surfaces')
+    for corners in [(0, 1, 2), (0, 2, 3)]:
+        surface = child(bsp.root, 'surfaces')
+        surface.body[:] = struct.pack('>3H', *corners)
+        surfaces.append(surface)
+    bsp.root.set_block('surfaces', surfaces)
+    write_tag(bsp, tags / 'room.scenario_structure_bsp')
+
+
+def scene_of(tags):
+    from lightmapper.formats.bsp import read_geometry
+    from lightmapper.gather import read_radiosity, surface_classes
+
+    scenario = read_tag(tags / 'level.scenario')
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    radiosity = [read_radiosity(tags, *g.key[:2]) for g in geometry.groups]
+    classes = surface_classes(geometry, 0)
+    return api()._scene(tags, scenario, 0, geometry, [], radiosity, classes)[0]
+
+
+def test_scene_takes_emitters_from_the_unlit_group(tiny):
+    tags, _, _ = tiny
+    put_sotr(tags, 'glow', 10., (1., .5, .25))
+    put_sotr(tags, 'dull', 0.)
+    add_unlit_quad(tags, 'glow')
+    add_unlit_quad(tags, 'dull', z=3.)
+    scene = scene_of(tags)
+    assert len(scene.occ_tris) == 2
+    np.testing.assert_allclose(scene.occ_tri_emission, [[10., 5., 2.5]] * 2)
+    assert not scene.occ_tri_casts_shadow.any()
+    np.testing.assert_array_equal(scene.occ_tri_tint, np.ones((2, 3)))
+    assert scene.occ_positions[:, 2].tolist() == [2.] * 6
+    # Halo's clockwise winding reaches Blender counter-clockwise
+    assert scene.occ_positions[:3].tolist() == [[0, 0, 2], [4, 4, 2], [4, 0, 2]]
+
+
+@pytest.mark.parametrize('corrupt', [False, True])
+def test_unreadable_unlit_shader_does_not_abort_a_bake(tiny, corrupt, caplog):
+    tags, settings, work = tiny
+    add_unlit_quad(tags, 'broken')
+    if corrupt:
+        (tags / 'broken.shader_transparent_generic').write_bytes(b'bad')
+    with caplog.at_level('WARNING'):
+        out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert len(out.float_pages) > 0
+    assert 'broken' in caplog.text and 'emission' in caplog.text
+
+
+def test_unlit_group_is_written_back_unchanged(tiny):
+    tags, settings, work = tiny
+    put_sotr(tags, 'glow', 10.)
+    add_unlit_quad(tags, 'glow')
+    before = read_tag(tags / 'room.scenario_structure_bsp').root.block('lightmaps')[-1]
+    out = api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work)
+    after = out.bsp_tag.root.block('lightmaps')[-1]
+    assert after.body == before.body
+    assert [m.body for m in after.block('materials')] == [m.body for m in before.block('materials')]
+    for old, new in zip(before.block('materials'), after.block('materials')):
+        assert old.data('uncompressed_vertices') == new.data('uncompressed_vertices')
+        assert old.data('compressed_vertices') == new.data('compressed_vertices')
+
+
+@pytest.mark.blender
+def test_unlit_emitter_lights_the_level(tiny, monkeypatch):
+    from lightmapper import blender_job
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    settings = replace(settings, samples=16, vertex_rays=8, blender=str(LIGHTMAPPER_BLENDER))
+
+    def lit(power, name):
+        put_sotr(tags, 'glow', power)
+        out = api().bake(tags, 'level', 'room', settings, out_bsp=name, out_scenario=name + '_level',
+                         work=work / name, sources='emit', dry_run=True)
+        return float(sum(page.sum() for page in out.float_pages))
+
+    add_unlit_quad(tags, 'glow')
+    assert lit(0., 'dark') == 0.
+    assert lit(10., 'glow') > 0.
+
+
+def put_scenery_over_the_room(tags, power, z=2.):
+    """A 4x4 quad prop facing down at height z, in a soso shader of the given power, placed in the room's bsp."""
+    from test_scenery import write_model, write_scenery
+
+    shader = new_tag('soso')
+    shader.root.set('radiosity.power', power)
+    shader.root.set('radiosity.color_of_emitted_light', (1., .5, .25))
+    put(tags, 'soso', 'prop_shader', shader)
+    write_model(tags, 'model', [[(0, [(0, 0, 0), (4, 0, 0), (0, 4, 0), (4, 4, 0)], [0, 1, 2, 3])]],
+                shaders=(('soso', 'prop_shader'),), scale=(1., 1.))
+    write_scenery(tags, 'prop', 'model')
+    scenario = read_tag(tags / 'level.scenario')
+    palette = child(scenario.root, 'scenery_palette')
+    palette.set_reference('name', 'scen', 'prop')
+    scenario.root.set_block('scenery_palette', [palette])
+    placement = child(scenario.root, 'scenery')
+    placement.set('bsp_indices', 1)
+    placement.set('placement.position', (0., 0., z))
+    scenario.root.set_block('scenery', [placement])
+    write_tag(scenario, tags / 'level.scenario')
+
+
+def test_scenery_takes_its_shaders_emission(tiny):
+    tags, _, _ = tiny
+    put_scenery_over_the_room(tags, 4.)
+    scene = scene_of(tags)
+    assert len(scene.occ_tris) == 2
+    np.testing.assert_allclose(scene.occ_tri_emission, [[4., 2., 1.]] * 2)
+    assert scene.occ_tri_casts_shadow.all()
+
+
+def test_non_emitting_scenery_stays_dark(tiny):
+    tags, _, _ = tiny
+    put_scenery_over_the_room(tags, 0.)
+    scene = scene_of(tags)
+    assert len(scene.occ_tris) == 2 and not scene.occ_tri_emission.any()
+
+
+@pytest.mark.blender
+def test_emissive_scenery_lights_the_level(tiny, monkeypatch):
+    from lightmapper import blender_job
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    settings = replace(settings, samples=16, vertex_rays=8, blender=str(LIGHTMAPPER_BLENDER))
+    rewind_room(tags)
+
+    def lit(power, name):
+        put_scenery_over_the_room(tags, power)
+        out = api().bake(tags, 'level', 'room', settings, out_bsp=name, out_scenario=name + '_level',
+                         work=work / name, sources='emit', dry_run=True)
+        return float(sum(page.sum() for page in out.float_pages))
+
+    assert lit(0., 'dark') == 0.
+    assert lit(10., 'glow') > 0.
+
+
+def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch):
+    import lightmapper.pages as pages
+    tags, settings, work = tiny
+    pipeline = api()
+    fake = pipeline.run_blender
+    calls = []
+    built = []
+    original_prepare = pipeline.prepare_boundaries
+
+    def prepare(*args):
+        boundary = original_prepare(*args)
+        built.append(boundary)
+        return boundary
+
+    def with_sun_lit(work, s):
+        result = fake(work, s)
+        result.vertex_sun_lit = np.ones((1, 0), bool)
+        result.edge_sun_lit = np.ones((2, 0), bool)
+        return result
+
+    def term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
+        calls.append((page, lit.shape))
+        value = 0.25 if (edge_sun_lit is not None and edge_sun_lit.shape == (2, 0)
+                         and len(built) == 1 and boundaries is built[0]) else 0
+        return np.full((height, width, 3), value, np.float32)
+
+    monkeypatch.setattr(pipeline, 'run_blender', with_sun_lit)
+    monkeypatch.setattr(pipeline, 'prepare_boundaries', prepare)
+    monkeypatch.setattr(pipeline, 'sun_term', term)
+    monkeypatch.setattr(pages, '_denoise', lambda rgb, timeout: rgb * 2)
+    out = pipeline.bake(tags, 'level', 'room', replace(settings, page_max=8, padding=1, texels_per_unit=0.75,
+                                                     denoise=True, detail_level_scale=(1, 1, 1, 1)), work=work)
+    assert calls and calls[0][1] == (1, 0)
+    assert len(out.float_pages) == 2, 'exercise sharing across pages, not just the first call'
+    assert len(built) == 1
+    assert all(page.max() == pytest.approx(0.5) for page in out.float_pages)
+
+
+def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny, monkeypatch):
+    from lightmapper.formats.bsp import OutMaterial, OutPage
+    from lightmapper.formats.bitmap_decode import decode_bitmap
+
+    tags, settings, work = tiny
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    material = bsp.root.block('lightmaps')[0].block('materials')[0]
+    env, lm = unpack_uncompressed(material.data('uncompressed_vertices'), 6, 6)
+    env['position'] = [[0, 0, 0], [4, 0, 0], [0, 4, 0], [0, 0, 0], [0, 4, 0], [4, 4, 0]]
+    material.set_data('uncompressed_vertices', pack_uncompressed(env, lm))
+    material.set_data('compressed_vertices', compress(env, lm))
+    put(tags, 'sbsp', 'room', bsp)
+
+    def chart(groups, shaders, s):
+        group = groups[0]
+        pages = []
+        for i in range(2):
+            vertices = group.tris[i]
+            uv = np.zeros(3, LM)
+            uv['texcoord'] = np.float32([[1, 1], [6, 1], [1, 6]]) / 8
+            pages.append(OutPage(8, 8, [OutMaterial(0, group.env[vertices], uv,
+                np.array([[0, 1, 2]], np.uint16), np.array([i]))]))
+        return pages
+
+    def blender(work, s):
+        with np.load(work / 'scene.npz') as scene:
+            np.testing.assert_array_equal(scene['query_inverse'], [0, 1, 2, 0, 2, 3])
+        v = np.zeros((4, 3), np.float32)
+        v[:, 2] = [0.1, 0.2, 0.3, 0.4]
+        return BakeResult([np.full((8, 8, 3), c, np.float32) for c in (0.2, 0.7)],
+                          v, np.ones(4), 'test', [np.ones((8, 8), bool)] * 2)
+
+    monkeypatch.setattr(api(), 'chart_and_pack', chart)
+    monkeypatch.setattr(api(), 'run_blender', blender)
+    out = api().bake(tags, 'level', 'room', replace(settings, dither=False, stitch_seams=False), work=work, dry_run=True)
+    expected = [[0.1, 0.2, 0.3], [0.1, 0.3, 0.4]]
+    for i, page in enumerate(out.bsp_tag.root.block('lightmaps')[:-1]):
+        m = page.block('materials')[0]
+        _, lm = unpack_uncompressed(m.data('uncompressed_vertices'), 3, 3)
+        np.testing.assert_allclose(lm['incident_radiosity'][:, 2], expected[i])
+        np.testing.assert_allclose(out.float_pages[i], (0.2, 0.7)[i])
+        np.testing.assert_allclose(decode_bitmap(out.bitmap_tag, i)[..., :3] / 255,
+                                   (0.2, 0.7)[i], atol=0.02)
+
+
+def test_scenery_radiosity_is_cached_by_shader_not_uv_scale(tiny, monkeypatch):
+    import lightmapper.pipeline as pipeline
+
+    tags, _, _ = tiny
+    put_scenery_over_the_room(tags, 4.)
+    gather = pipeline.gather_occluders
+    read = pipeline.read_radiosity
+    calls = []
+
+    def repeated(*args):
+        occ = gather(*args)
+        group, path, u, v = occ.shaders[0]
+        occ.shaders.append((group, path, u * 2, v * 2))
+        return occ
+
+    def counted(tags, group, path):
+        calls.append((group, path))
+        return read(tags, group, path)
+
+    monkeypatch.setattr(pipeline, 'gather_occluders', repeated)
+    monkeypatch.setattr(pipeline, 'read_radiosity', counted)
+    scene = scene_of(tags)
+    np.testing.assert_allclose(scene.occ_tri_emission, [[4, 2, 1]] * 2)
+    assert calls.count(('soso', 'prop_shader')) == 1
