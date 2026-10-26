@@ -24,7 +24,7 @@ from .formats.bsp import apply_layout, read_geometry
 from .formats.scenery import gather_occluders
 from .formats.vertices import ENV, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
-from .pages import finish_pages, quantise
+from .pages import DenoiseWorker, finish_pages, quantise
 from .radiosity import finalize, query_points
 from .raster import coverage
 from .settings import Settings
@@ -308,8 +308,20 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
-    float_pages = finish_pages(pages, raw_pages, masks, class_maps, ambient, s, written=result.written,
-                                joined_groups={i for i, r in enumerate(radiosity) if r.flags & SIMPLE_PARAMETERIZATION})
+    denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,
+                                         strict=choice.required and choice.oidn != 'HIP') if s.denoise else None
+    if denoise_worker is None:
+        denoise_device = 'CPU' if not s.denoise else choice.oidn
+    else:
+        denoise_device = denoise_worker.device
+        warnings.extend(denoise_worker.warnings)
+    try:
+        float_pages = finish_pages(pages, raw_pages, masks, class_maps, ambient, s, written=result.written,
+                                   joined_groups={i for i, r in enumerate(radiosity) if r.flags & SIMPLE_PARAMETERIZATION},
+                                   worker=denoise_worker)
+    finally:
+        if denoise_worker is not None:
+            denoise_worker.close()
     pixels = [quantise(finished, s) for finished in float_pages]
     for finished, mask in zip(float_pages, masks):
         clipped.append(float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.)
@@ -345,7 +357,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
-        'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device},
+        'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
+                    'denoise': denoise_device},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))
     return BakeOutput(bsp_tag, bitmap_tag, float_pages, mapping, work)

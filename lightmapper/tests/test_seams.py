@@ -183,7 +183,7 @@ def test_setting_off_reproduces_old_finishing():
 def test_stitch_after_denoise(monkeypatch):
     from lightmapper import pages as finishing
     pages, raw, masks, classes = fixture()
-    monkeypatch.setattr(finishing, '_denoise', lambda page, timeout: page * page)
+    monkeypatch.setattr(finishing, '_denoise', lambda page, timeout, worker=None: page * page)
     result = finishing.finish_pages(pages, raw, masks, classes, {}, Settings(denoise=True))
     np.testing.assert_allclose(result[0][2, 2:11], 0.34, atol=1e-5)
     np.testing.assert_allclose(result[1][2, 2:11], 0.34, atol=1e-5)

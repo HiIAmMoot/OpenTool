@@ -7,8 +7,12 @@ precision.
 
 import io
 import logging
+import os
+import struct
 import subprocess
+import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import numpy as np
 
@@ -25,8 +29,68 @@ log = logging.getLogger(__name__)
 # in its outer texels, and 0.1% off once edge texels are repeated around it
 _BORDER = 16
 
+_WORKER = """
+import ctypes, os, sys
+if os.name == 'nt':
+    for n in ('vcruntime140', 'vcruntime140_1', 'msvcp140', 'msvcp140_1', 'msvcp140_2'):
+        path = os.path.join(os.environ['SystemRoot'], 'System32', n + '.dll')
+        if os.path.exists(path):
+            ctypes.WinDLL(path)
+import io, struct
+import numpy as np, pyoidn
+def receive():
+    size = struct.unpack('<Q', sys.stdin.buffer.read(8))[0]
+    return np.load(io.BytesIO(sys.stdin.buffer.read(size)))
+def send(value):
+    out = io.BytesIO(); np.save(out, value); data = out.getvalue()
+    sys.stdout.buffer.write(struct.pack('<Q', len(data)) + data); sys.stdout.buffer.flush()
+kind = sys.argv[1]
+try:
+    if kind == 'CPU':
+        device = None
+        filt = src = dst = None
+        buffer_size = 0
+    else:
+        types = {'CUDA': pyoidn.OIDN_DEVICE_TYPE_CUDA, 'HIP': pyoidn.OIDN_DEVICE_TYPE_HIP}
+        device = pyoidn.Device(types[kind]); device.commit()
+        error = device.get_error()
+        if error: raise RuntimeError(str(error))
+        filt = pyoidn.Filter(device, 'RTLightmap')
+        filt.set_quality(pyoidn.OIDN_QUALITY_HIGH)
+        src = dst = None
+        buffer_size = 0
+    send(np.array([1], dtype=np.uint8))
+except Exception as error:
+    send(np.array([0], dtype=np.uint8))
+    print(error, file=sys.stderr, flush=True)
+    sys.exit(2)
+while True:
+    try: img = receive()
+    except Exception: break
+    if kind == 'CPU':
+        result = pyoidn.denoise(img, filter_type='RTLightmap')
+    else:
+        nbytes = img.nbytes
+        if nbytes != buffer_size:
+            if src is not None: src.release(); dst.release()
+            src = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
+            dst = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
+            buffer_size = nbytes
+        src.write(0, nbytes, img)
+        filt.set_image(pyoidn.OIDN_IMAGE_COLOR, src, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
+        filt.set_image(pyoidn.OIDN_IMAGE_OUTPUT, dst, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
+        filt.commit(); filt.execute(); device.wait()
+        result = np.empty_like(img); dst.read(0, nbytes, result)
+    send(result)
+if filt is not None: filt.release()
+if src is not None: src.release(); dst.release()
+if device is not None: device.release()
+"""
 
-def _denoise(page: np.ndarray, timeout: float) -> np.ndarray:
+
+def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
+    if worker is not None:
+        return worker.denoise(page)
     data = io.BytesIO()
     padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
     np.save(data, padded)
@@ -52,6 +116,89 @@ def _denoise(page: np.ndarray, timeout: float) -> np.ndarray:
     return result[_BORDER:-_BORDER, _BORDER:-_BORDER]
 
 
+class DenoiseWorker:
+    def __init__(self, device, timeout, process):
+        self.device, self.timeout, self.process = device, timeout, process
+        self.warnings = []
+        self.cwd = None
+        self.strict = True
+
+    @classmethod
+    def start(cls, device, timeout, strict):
+        try:
+            worker = cls._open(device, timeout)
+        except RuntimeError as error:
+            if strict:
+                raise RuntimeError(f'OIDN {device} failed: {error}') from error
+            worker = cls._open('CPU', timeout)
+            worker.warnings.append(f'OIDN {device} failed ({error}); denoising on the CPU')
+        worker.strict = strict
+        return worker
+
+    @classmethod
+    def _open(cls, device, timeout):
+        cwd = tempfile.TemporaryDirectory()
+        process = subprocess.Popen([sys.executable, '-c', _WORKER, device], stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd.name)
+        worker = cls(device, timeout, process)
+        worker.cwd = cwd
+        try:
+            head = process.stdout.read(8)
+            if len(head) != 8:
+                raise RuntimeError(process.stderr.read().decode(errors='replace')[-400:])
+            size = struct.unpack('<Q', head)[0]
+            ready = np.load(io.BytesIO(process.stdout.read(size)))
+            if not ready[0]:
+                raise RuntimeError(process.stderr.read().decode(errors='replace')[-400:])
+        except Exception:
+            process.kill(); process.wait(); cwd.cleanup()
+            raise
+        return worker
+
+    def denoise(self, page):
+        padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
+        data = io.BytesIO(); np.save(data, padded); payload = data.getvalue()
+        def exchange():
+            self.process.stdin.write(struct.pack('<Q', len(payload)) + payload); self.process.stdin.flush()
+            head = self.process.stdout.read(8)
+            if len(head) != 8: raise RuntimeError('worker exited')
+            size = struct.unpack('<Q', head)[0]
+            return np.load(io.BytesIO(self.process.stdout.read(size)))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(exchange)
+            try:
+                result = future.result(timeout=self.timeout)
+            except FutureTimeout:
+                self.process.kill()
+                self.process.wait()
+                raise RuntimeError(f'OIDN denoise timed out after {self.timeout:g} s') from None
+            except Exception as error:
+                if self.device == 'CPU' or self.strict:
+                    raise RuntimeError(f'OIDN denoise failed: {error}') from error
+                old_device = self.device
+                self.close()
+                replacement = self._open('CPU', self.timeout)
+                self.process, self.cwd, self.device = replacement.process, replacement.cwd, 'CPU'
+                self.warnings.append(f'OIDN {old_device} failed ({error}); denoising on the CPU')
+                return self.denoise(page)
+        if result.shape != padded.shape or not np.isfinite(result).all():
+            raise RuntimeError(f'OIDN denoise returned a bad result (shape {result.shape}, expected {padded.shape}, finite: {bool(np.isfinite(result).all())})')
+        return result[_BORDER:-_BORDER, _BORDER:-_BORDER]
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.stdin.close()
+            try:
+                self.process.wait(timeout=self.timeout)
+            except subprocess.TimeoutExpired:
+                self.process.kill(); self.process.wait()
+        if self.cwd is not None:
+            self.cwd.cleanup(); self.cwd = None
+
+    def __enter__(self): return self
+    def __exit__(self, *args): self.close()
+
+
 def expose(rgb: np.ndarray) -> np.ndarray:
     # tool divides a colour by its largest channel when that exceeds 1, so an
     # over-bright texel keeps its hue instead of each channel clipping alone
@@ -64,7 +211,7 @@ def tone(e: np.ndarray, gamma: float) -> np.ndarray:
     return expose(np.maximum(e, 0) ** gamma)
 
 
-def finish_float(raw, mask, cls, ambient, s, written=None) -> np.ndarray:
+def finish_float(raw, mask, cls, ambient, s, written=None, worker=None) -> np.ndarray:
     raw = np.ascontiguousarray(raw, dtype=np.float32)
     mask = np.asarray(mask, dtype=np.bool_)
     cls = np.asarray(cls, dtype=np.int16)
@@ -81,7 +228,7 @@ def finish_float(raw, mask, cls, ambient, s, written=None) -> np.ndarray:
     classes[mask] = cls[mask]
     # (an all-black page comes back from the denoiser with texels up to 0.03)
     if s.denoise and page.any():
-        page = _denoise(np.ascontiguousarray(page, dtype=np.float32), s.timeout_s)
+        page = _denoise(np.ascontiguousarray(page, dtype=np.float32), s.timeout_s, worker)
         # (the denoiser blends chart texels into the padding and past it, so
         # the padding is rebuilt from the charts' own denoised texels)
         page[~dilated] = 0
@@ -103,9 +250,9 @@ def quantise(page_f, s) -> np.ndarray:
     return encode_r5g6b5(tone(page_f, s.gamma), s.dither)
 
 
-def finish_pages(pages, raw, masks, classes, ambient, s, written=None, joined_groups=()):
+def finish_pages(pages, raw, masks, classes, ambient, s, written=None, joined_groups=(), worker=None):
     written = [None] * len(pages) if written is None else written
-    finished = [finish_float(r, m, c, ambient, s, written=w)
+    finished = [finish_float(r, m, c, ambient, s, written=w, worker=worker)
                 for r, m, c, w in zip(raw, masks, classes, written)]
     # OIDN can recreate a step, and ambient can differ across pages, so enforce
     # continuity after both in float, before the single tone/quantisation pass

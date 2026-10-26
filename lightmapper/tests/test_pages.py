@@ -2,6 +2,7 @@
 
 import io
 import subprocess
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -16,6 +17,53 @@ from lightmapper.settings import Settings
 def full_page(n=48):
     mask = np.ones((n, n), dtype=bool)
     return mask, np.zeros((n, n), dtype=np.int16)
+
+
+def noisy_page(seed=1, size=32):
+    return np.random.default_rng(seed).random((size, size, 3), dtype=np.float32)
+
+
+def test_one_worker_serves_every_page(monkeypatch):
+    calls = []
+    real_popen = pages.subprocess.Popen
+
+    def count(*args, **kwargs):
+        calls.append(args)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(pages.subprocess, 'Popen', count)
+    s = Settings(denoise=True, stitch_seams=False)
+    mask, cls = full_page(32)
+    with pages.DenoiseWorker.start('CPU', 60, strict=True) as worker:
+        pages.finish_pages([SimpleNamespace(width=32, height=32)] * 3, [noisy_page(i, 32) for i in range(3)],
+                           [mask] * 3, [cls] * 3, {}, s, worker=worker)
+    assert len(calls) == 1
+
+
+def test_worker_cpu_result_equals_the_one_off_denoise():
+    page = noisy_page(seed=1)
+    with pages.DenoiseWorker.start('CPU', 60, strict=True) as worker:
+        assert np.array_equal(worker.denoise(page), pages._denoise(page, 60))
+
+
+def test_gpu_failure_falls_back_with_a_warning_unless_strict():
+    worker = pages.DenoiseWorker.start('NOPE', 60, strict=False)
+    try:
+        assert worker.device == 'CPU' and 'denoising on the CPU' in worker.warnings[0]
+    finally:
+        worker.close()
+    with pytest.raises(RuntimeError, match='NOPE'):
+        pages.DenoiseWorker.start('NOPE', 60, strict=True)
+
+
+@pytest.mark.gpu_nvidia
+def test_gpu_denoise_matches_cpu():
+    page = noisy_page(seed=2, size=256)
+    with pages.DenoiseWorker.start('CUDA', 60, strict=True) as gpu, pages.DenoiseWorker.start('CPU', 60, strict=True) as cpu:
+        assert gpu.device == 'CUDA'
+        a, b = gpu.denoise(page), cpu.denoise(page)
+    rel = np.abs(a - b) / np.maximum(b, 1e-3)
+    assert rel.mean() <= 5e-3 and np.percentile(rel, 99) <= 2e-2
 
 
 @pytest.mark.parametrize('value', [0.05, 0.5, 4.0])
@@ -165,7 +213,8 @@ def test_intermediates_stay_float32(monkeypatch):
     seen = []
     real_dilate, real_denoise = pages.dilate, pages._denoise
     monkeypatch.setattr(pages, 'dilate', lambda *a: seen.append(('dilate', a[0].dtype)) or real_dilate(*a))
-    monkeypatch.setattr(pages, '_denoise', lambda page, timeout: seen.append(('denoise', page.dtype)) or real_denoise(page, timeout))
+    monkeypatch.setattr(pages, '_denoise', lambda page, timeout, worker=None:
+                        seen.append(('denoise', page.dtype)) or real_denoise(page, timeout, worker))
     mask, cls = full_page(16)
     raw = np.full((16, 16, 3), 0.5, np.float64)
     out = finish_float(raw, mask, cls, {0: (0.1, 0.1, 0.1)}, Settings(denoise=True))

@@ -110,6 +110,7 @@ def test_pipeline_outputs(tiny):
     assert summary['settings']['respect_normal_seams'] is True
     assert summary['settings']['texel_samples'] is None
     assert summary['texel_samples'] == settings.resolved_texel_samples()
+    assert summary['devices']['denoise'] == 'CPU'
 
 
 @pytest.fixture
@@ -841,7 +842,7 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
     monkeypatch.setattr(pipeline, 'run_blender', with_sun_lit)
     monkeypatch.setattr(pipeline, 'prepare_boundaries', prepare)
     monkeypatch.setattr(pipeline, 'sun_term', term)
-    monkeypatch.setattr(pages, '_denoise', lambda rgb, timeout: rgb * 2)
+    monkeypatch.setattr(pages, '_denoise', lambda rgb, timeout, worker=None: rgb * 2)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, page_max=8, padding=1, texels_per_unit=0.75,
                                                      denoise=True, detail_level_scale=(1, 1, 1, 1)), work=work)
     assert calls and calls[0][1] == (1, 0)
