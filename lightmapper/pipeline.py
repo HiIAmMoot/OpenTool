@@ -6,6 +6,7 @@ and dry runs keep their work products but never replace a tag.
 
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
+from typing import Callable
 import hashlib
 import json
 import logging
@@ -201,8 +202,9 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
 
 
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
-         out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
-         charts: Path | None = None, dry_run: bool = False) -> BakeOutput:
+          out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
+          charts: Path | None = None, dry_run: bool = False,
+          progress: Callable[[str], None] | None = None) -> BakeOutput:
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
@@ -213,6 +215,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         seconds[name] = now - last
         last = now
 
+    def begin(name):
+        logger.info('stage: %s', name)
+        if progress is not None:
+            progress(name)
+
+    begin('gather')
     scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
     input_file = resolve_reference_path(tags, 'sbsp', input_path)
     bsp_tag = read_tag(input_file)
@@ -234,6 +242,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     group, path = bsp_tag.root.reference('lightmaps_bitmap')
     template = read_tag(resolve_reference_path(tags, group, path)) if group == 'bitm' and path else None
     stage('gather')
+    begin('charts')
     chart_s = ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
     key = chart_cache_key(input_file, chart_s, radiosity)
     cache = Path(charts) if charts is not None else work / 'charts.npz'
@@ -242,13 +251,16 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         pages = chart_and_pack(geometry.groups, radiosity, chart_s)
         save_charts(cache, pages, key)
     stage('charts')
+    begin('scene')
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                                       s.scenery_emission)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays())
     stage('scene')
+    begin('blender')
     result = run_blender(work, s)
     stage('blender')
+    begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, masks, class_maps, utilisation, clipped = [], [], [], [], []
     job_suns = json.loads((work / 'job.json').read_text())['suns']
@@ -278,6 +290,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             material.lm['incident_radiosity'] = vectors[offset:offset + len(material.env)]
             offset += len(material.env)
     stage('finish')
+    begin('write')
     if over_cap:
         # apply_layout enforces the real cap too; a timing-only run cannot make a stock tag
         provenance = [m.surface_ids for p in pages for m in p.materials]
