@@ -13,6 +13,16 @@ OpenTool is developed alongside [OpenCE](https://github.com/OpenCommunityEdition
 
 The rest of the editing kit's work (bitmaps, models, sounds, scripts, building maps) is out of scope. Use the H1A editing kit or Invader for those.
 
+### Lightmapper examples
+
+Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool's below, baked at a higher resolution than the default (lightmap pages of 1024 pixels).
+
+![Blood Gulch: tool's lightmaps above, OpenTool's below](docs/images/bloodgulch.webp)
+
+![Rat Race: tool's lightmaps above, OpenTool's below](docs/images/ratrace.webp)
+
+![Chiron TL-34: tool's lightmaps above, OpenTool's below](docs/images/putput.webp)
+
 ## Roadmap
 
 - Done: the lightmapper, with lightmaps that closely match tool's.
@@ -22,29 +32,19 @@ The rest of the editing kit's work (bitmaps, models, sounds, scripts, building m
 
 ## Requirements
 
-For every tool:
-
-- Windows 10 or 11. OpenTool has only been run on Windows so far.
-- [Git for Windows](https://git-scm.com/downloads/win).
-- Python 3.11, tested with 3.11.7. Python 3.13 and newer can't install the pinned NumPy and Numba versions.
-- The H1A editing kit, with its tag archive extracted. Steam installs it in `<Steam library>\steamapps\common\HCEEK`. The examples use `C:\HCEEK` as a stand-in for that folder.
-
-For the lightmapper, also:
-
-- [Blender 5.2](https://www.blender.org/download/), installed. No setup inside Blender is needed.
-- An NVIDIA GPU for fast bakes. Without one, the bake runs on the CPU.
-- [LLVM](https://releases.llvm.org) and the Visual Studio Build Tools with "Desktop development with C++", to compile xatlas on the first run.
-- The Microsoft Visual C++ x64 runtime, version 14.4 or newer, for the denoiser.
+- Windows.
+- [Python 3.11](https://www.python.org/downloads/).
+- The H1A editing kit, with its tags extracted.
+- For the lightmapper: [Blender 5.2](https://www.blender.org/download/) installed, and [LLVM](https://releases.llvm.org) with the Visual Studio Build Tools ("Desktop development with C++") to compile one library on the first run. [Details](docs/lightmapper.md#requirements).
 
 ## Installing
 
-In PowerShell:
+1. Download this repository (Code, then Download ZIP) and unzip it, or `git clone` it.
+2. In PowerShell, in that folder:
 
-```powershell
-git clone https://github.com/HiIAmMoot/OpenTool.git
-cd OpenTool
-py -3.11 -m pip install -r requirements.txt
-```
+   ```powershell
+   py -3.11 -m pip install -r requirements.txt
+   ```
 
 - That's all. There is no package to install; the tools run straight from the folder.
 - The docs write `python`. If `python` on your machine isn't Python 3.11, or opens the Microsoft Store, type `py -3.11` instead.
