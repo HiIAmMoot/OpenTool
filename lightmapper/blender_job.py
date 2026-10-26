@@ -13,6 +13,7 @@ import subprocess
 import numpy as np
 
 from .settings import Settings
+from . import frozen
 
 
 BAKE_SCRIPT = Path(__file__).with_name('blender') / 'bake.py'
@@ -159,7 +160,8 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
     try:
         with open(log, 'wb') as handle:
             done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=handle,
-                                  stderr=subprocess.STDOUT, timeout=s.timeout_s)
+                                  stderr=subprocess.STDOUT, timeout=s.timeout_s,
+                                  creationflags=frozen.NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise BlenderError(f'blender timed out after {s.timeout_s} s\n{_log_tail(log)}') from None
     except OSError as error:

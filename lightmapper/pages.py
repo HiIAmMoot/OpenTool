@@ -14,6 +14,7 @@ import tempfile
 import numpy as np
 
 from .formats.vertices import encode_r5g6b5
+from . import frozen
 from .raster import dilate
 from .seams import stitch_seams
 
@@ -52,7 +53,8 @@ def _denoise(page: np.ndarray, timeout: float) -> np.ndarray:
     try:
         with tempfile.TemporaryDirectory() as cwd:
             done = subprocess.run([sys.executable, '-c', _WORKER], input=data.getvalue(),
-                                  capture_output=True, cwd=cwd, timeout=timeout)
+                                  capture_output=True, cwd=cwd, timeout=timeout,
+                                  creationflags=frozen.NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f'OIDN denoise timed out after {timeout:g} s') from None
     if done.returncode:
