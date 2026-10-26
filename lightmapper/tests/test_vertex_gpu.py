@@ -385,3 +385,31 @@ def test_more_rays_than_one_dispatch_holds_is_refused(monkeypatch, tmp_path, ven
     monkeypatch.setattr(vertex_gpu, '_dispatch', lambda *args, **kwargs: pytest.fail('dispatched over the cap'))
     with pytest.raises(GpuPassError, match='gather: vertex_rays 64 exceeds the dispatch cap 32'):
         run_vertex_pass(arrays, job, [], [np.zeros((16, 16, 3), np.float32)], device)
+
+
+def test_chunk_luminances_are_summed_in_float64(monkeypatch, tmp_path, vendor, device):
+    scene = dataclasses.replace(
+        build([full_quad(), wall_facing_minus_x(emission=(4, 4, 4))]),
+        query_pos=np.float32([[1 + 0.1 * k, 1 + 0.07 * k, 0] for k in range(20)]),
+        query_normal=np.float32([[0, 0, 1]] * 20), query_class=np.int16([0] * 20))
+    write_job(tmp_path, scene, [(16, 16)], [], {'0': [0.2, 0.3, 0.1]}, dataclasses.replace(S, vertex_rays=256), 'all')
+    with np.load(tmp_path / 'scene.npz') as data:
+        arrays = {key: data[key] for key in data.files}
+    job = json.loads((tmp_path / 'job.json').read_text())
+    real = vertex_gpu.gather_sums
+    seen = []
+
+    def checking(lum, *args):
+        got = real(lum, *args)
+        # luminances that vary per ray, summed as float64 whatever precision the kernel read back in
+        want = real(lum.astype(np.float64), *args)
+        assert lum.std() > 0 and lum.any()
+        seen.append((got, want))
+        return got
+    monkeypatch.setattr(vertex_gpu, 'gather_sums', checking)
+    monkeypatch.setattr(vertex_gpu, 'RAYS_PER_DISPATCH', 4096)
+    run_vertex_pass(arrays, job, [], [RAMP], device)
+    assert len(seen) >= 2
+    for got, want in seen:
+        np.testing.assert_allclose(got[0], want[0], rtol=1e-13, atol=0)
+        np.testing.assert_allclose(got[1], want[1], rtol=1e-13, atol=0)

@@ -306,7 +306,7 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
                 query_bitangent=_upload(device, bitangent[chunk], np.float32),
                 query_spin=_upload(device, spin[chunk], np.float32), query_class=_upload(device, cls[chunk], np.int32),
                 gather_count=len(ids[chunk]) * rays, lum_out=out))
-            lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])]
+            lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])].astype(np.float64)
         reduce(chunk, lum)
     for first in range(0, len(origins), cap):
         chunk = slice(first, first + cap)
