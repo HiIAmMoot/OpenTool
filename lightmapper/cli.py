@@ -31,6 +31,7 @@ def _blender_fallback(s):
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description='Bake stock H1A lightmaps with Blender Cycles')
     commands = parser.add_subparsers(dest='command', required=True)
+    commands.add_parser('check')
     for name in ('bake', 'copy', 'validate', 'diff', 'calibrate'):
         command = commands.add_parser(name)
         command.add_argument('--tags', type=Path, default=os.environ.get('HCEEK_TAGS') or None)
@@ -58,6 +59,12 @@ def main(argv=None) -> int:
             command.add_argument('--sources', choices=('all', 'sun', 'emit'), default='all')
             command.add_argument('--dry-run', action='store_true')
     args = parser.parse_args(argv)
+    if args.command == 'check':
+        from .check import run_checks
+        results = run_checks()
+        for name, ok, detail in results:
+            print(f'{"ok  " if ok else "FAIL"} {name}: {detail}')
+        return int(not all(ok for _, ok, _ in results))
     if args.tags is None:
         parser.error('pass --tags with the editing-kit tags folder, or set HCEEK_TAGS')
     logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
