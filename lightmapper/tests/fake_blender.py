@@ -32,7 +32,7 @@ def main():
         arrays[f'written_{i}'][0, i] = False
     arrays['vertex_vector'] = query_pos[:, [1, 2, 0]] * 2
     arrays['vertex_irradiance'] = (query_pos.sum(axis=1) + query_class).astype(np.float32)
-    arrays['device'] = np.array(job['device'] + '-FAKE')
+    arrays['device'] = np.array(('+'.join(job['cycles_devices']) or 'CPU') + '-FAKE')
     np.savez(job_path.with_name(job['out']), **arrays)
     if mode == 'fail':
         # a result is on disk, so only the exit code can tell the run failed

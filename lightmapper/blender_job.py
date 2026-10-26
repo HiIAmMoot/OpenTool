@@ -13,6 +13,7 @@ import subprocess
 import numpy as np
 
 from .settings import Settings
+from .gpu import DeviceChoice, HIPRT, choose
 from . import frozen
 
 
@@ -80,9 +81,12 @@ class BakeResult:
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
-              s: Settings, sources: str = 'all', textures: list | None = None) -> Path:
+              s: Settings, sources: str = 'all', textures: list | None = None,
+              choice: DeviceChoice | None = None) -> Path:
     if sources not in SOURCES:
         raise ValueError(f'sources must be one of {SOURCES}, not {sources!r}')
+    if choice is None:
+        choice = choose(s.device, None)
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -136,7 +140,10 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'albedo_fallback': s.albedo_fallback,
         'vertex_rays': s.vertex_rays,
         'seed': s.seed,
-        'device': s.device,
+        'device': choice.setting,
+        'cycles_devices': list(choice.cycles),
+        'cycles_required': choice.required,
+        'hiprt': HIPRT,
     }
     path = work / 'job.json'
     path.write_text(json.dumps(job, indent=2))

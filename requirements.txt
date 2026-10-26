@@ -3,4 +3,5 @@ numpy==1.26.4
 scipy==1.11.4
 numba==0.59.0
 pyoidn==2.5.1.0
+slangpy==0.43.1
 pillow==10.2.0

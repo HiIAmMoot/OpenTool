@@ -33,11 +33,29 @@ def neutral_calibration(tmp_path_factory, monkeypatch):
 def pytest_configure(config):
     config.addinivalue_line("markers", "ek: requires H1A editing kit tags")
     config.addinivalue_line("markers", "blender: requires Blender 5.2")
+    config.addinivalue_line('markers', 'gpu_nvidia: requires NVIDIA GPU with ray queries')
+    config.addinivalue_line('markers', 'gpu_amd: requires AMD GPU with ray queries')
 
 
 def pytest_collection_modifyitems(items):
+    gpu_markers = {'gpu_nvidia': (0x10DE, 'NVIDIA'), 'gpu_amd': (0x1002, 'AMD')}
+    if any(marker in item.keywords for item in items for marker in gpu_markers):
+        from lightmapper import gpu
+        adapters, reason = gpu.list_adapters()
+        reason = reason or ', '.join(a.name for a in adapters) or 'no adapters seen'
+        for item in items:
+            for marker, (vendor_id, name) in gpu_markers.items():
+                if marker in item.keywords and not any(a.vendor_id == vendor_id and a.ray_query for a in adapters):
+                    item.add_marker(pytest.mark.skip(reason=f'no {name} GPU with ray queries ({reason})'))
     for item in items:
         if "ek" in item.keywords and (HCEEK_TAGS is None or not HCEEK_TAGS.is_dir()):
             item.add_marker(pytest.mark.skip(reason="HCEEK_TAGS is unavailable"))
         if "blender" in item.keywords and not LIGHTMAPPER_BLENDER.is_file():
             item.add_marker(pytest.mark.skip(reason="LIGHTMAPPER_BLENDER is unavailable"))
+
+
+@pytest.fixture(autouse=True)
+def unprobed_device_choice(request, monkeypatch):
+    if not any(marker in request.node.keywords for marker in ('gpu_nvidia', 'gpu_amd')):
+        from lightmapper import gpu
+        monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, None))

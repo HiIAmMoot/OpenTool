@@ -37,12 +37,10 @@ def log(message):
     print(f'[bake] {message}', flush=True)
 
 
-def pick_device(wanted):
+def pick_device(kinds: list[str], required: bool, hiprt: bool) -> str:
     """Enable every device of the first working GPU type; the name of what was used, 'CPU' when none."""
     prefs = bpy.context.preferences.addons['cycles'].preferences
-    # the wanted type is the first choice and the fallback only goes down the list from there
-    order = list(DEVICE_TYPES[DEVICE_TYPES.index(wanted):]) if wanted in DEVICE_TYPES else []
-    for kind in order:
+    for kind in kinds:
         try:
             prefs.compute_device_type = kind
         except TypeError:
@@ -53,9 +51,13 @@ def pick_device(wanted):
             continue
         for device in prefs.devices:
             device.use = device.type == kind
+        if kind == 'HIP' and hasattr(prefs, 'use_hiprt'):
+            prefs.use_hiprt = hiprt
         bpy.context.scene.cycles.device = 'GPU'
         return kind
-    if wanted != 'CPU':
+    if required and kinds:
+        raise RuntimeError(f'cycles: none of {kinds} is available')
+    if kinds:
         log('WARNING: no GPU device found, baking on the CPU')
     bpy.context.scene.cycles.device = 'CPU'
     return 'CPU'
@@ -78,7 +80,10 @@ def setup_scene(job):
     background.inputs['Color'].default_value = (0, 0, 0, 1)
     background.inputs['Strength'].default_value = 0
     scene.world = world
-    return scene, pick_device(job['device'])
+    wanted = job.get('device', 'OPTIX')
+    kinds = list(DEVICE_TYPES[DEVICE_TYPES.index(wanted):]) if wanted in DEVICE_TYPES else []
+    return scene, pick_device(job.get('cycles_devices', kinds), job.get('cycles_required', False),
+                              job.get('hiprt', False))
 
 
 def make_images(textures_path, pages, masked=False):

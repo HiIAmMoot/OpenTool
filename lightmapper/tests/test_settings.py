@@ -10,7 +10,7 @@ def test_defaults_come_from_calibration_json():
     s = Settings()
     assert (s.w_sun, s.w_emit, s.w_amb, s.gamma, s.radiosity_scale) == (1, 1, 1, 1, 1)
     assert s.radiosity_mode == 'coherence'
-    assert (s.samples, s.bounces, s.vertex_rays, s.device, s.timeout_s) == (256, 1, 4096, 'OPTIX', 7200)
+    assert (s.samples, s.bounces, s.vertex_rays, s.device, s.timeout_s) == (256, 1, 4096, 'auto', 7200)
     assert s.page_max == 1024 and s.denoise and s.dither
 
 
@@ -19,6 +19,18 @@ def test_seed_defaults_to_zero_and_stays_in_range():
     for bad in (-1, 1000):
         with pytest.raises(ValueError, match='seed'):
             Settings(seed=bad)
+
+
+@pytest.mark.parametrize('value,expected', [
+    ('auto', 'auto'), ('NVIDIA', 'nvidia'), ('amd', 'amd'), ('cpu', 'cpu'),
+    ('OPTIX', 'nvidia'), ('CUDA', 'nvidia'), ('HIP', 'amd'), ('CPU', 'cpu')])
+def test_legacy_device_values_map_to_vendors(value, expected):
+    assert Settings(device=value).device == expected
+
+
+def test_unknown_device_names_the_allowed_values():
+    with pytest.raises(ValueError, match='auto, nvidia, amd, cpu'):
+        Settings(device='intel')
 
 
 def test_shipped_calibration_is_tools_analytic_model(monkeypatch):

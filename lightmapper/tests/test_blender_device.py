@@ -51,10 +51,10 @@ def test_device_order(monkeypatch):
                                                   (['CUDA', 'HIP'], 'CUDA'), ([], 'CPU')])
 def test_pick_device_walks_the_order(available, expected, monkeypatch):
     bake, scene = load_bake(monkeypatch, available)
-    assert bake.pick_device('OPTIX') == expected
+    assert bake.pick_device(['OPTIX', 'CUDA', 'HIP', 'ONEAPI'], False, False) == expected
     assert scene.cycles.device == ('CPU' if expected == 'CPU' else 'GPU')
 
 
 def test_cpu_wanted_stays_on_cpu(monkeypatch):
     bake, _ = load_bake(monkeypatch, ['HIP'])
-    assert bake.pick_device('CPU') == 'CPU'
+    assert bake.pick_device([], False, False) == 'CPU'

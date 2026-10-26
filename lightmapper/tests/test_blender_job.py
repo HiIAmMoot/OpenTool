@@ -75,7 +75,7 @@ def test_write_job_files_load_back(tmp_path):
     job, s = job_for(tmp_path, samples=12, device='CUDA')
     assert job['version'] == 1 and job['scene'] == 'scene.npz' and job['out'] == 'out.npz'
     assert job['pages'] == [[16, 8]]
-    assert (job['samples'], job['bounces'], job['vertex_rays'], job['device']) == (12, 1, 4096, 'CUDA')
+    assert (job['samples'], job['bounces'], job['vertex_rays'], job['device']) == (12, 1, 4096, 'nvidia')
     assert (job['albedo_scale'], job['albedo_fallback']) == (1.0, 0.5)
     scene = make_scene()
     with np.load(tmp_path / 'scene.npz') as data:
@@ -98,7 +98,8 @@ def test_write_job_files_load_back(tmp_path):
         np.testing.assert_array_equal(data['edge_offsets'], [0])
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
-        'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed'])
+        'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
+        'cycles_devices', 'cycles_required', 'hiprt'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -195,7 +196,7 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     np.testing.assert_array_equal(result.vertex_vector, qp[:, [1, 2, 0]] * 2)
     np.testing.assert_allclose(result.vertex_irradiance, [2.0, 8.0, 0.25])
     assert result.vertex_vector.dtype == np.float32 and result.vertex_irradiance.dtype == np.float32
-    assert result.device == 'OPTIX-FAKE'
+    assert result.device == 'OPTIX+CUDA+HIP-FAKE'
     assert hasattr(result, 'written'), 'written masks were not returned'
     for i, (w, h) in enumerate([(16, 8), (4, 4)]):
         expected = np.ones((h, w), bool)
@@ -261,3 +262,19 @@ def test_job_carries_the_resolved_edge_texel_target(tmp_path):
 def test_job_carries_the_seed(tmp_path):
     write_job(tmp_path, make_scene(), [(8, 8)], [], {}, Settings(seed=7))
     assert json.loads((tmp_path / 'job.json').read_text())['seed'] == 7
+
+
+def test_unprobed_auto_is_todays_job(tmp_path):
+    write_job(tmp_path, make_scene(), [(8, 8)], [], {}, Settings())
+    job = json.loads((tmp_path / 'job.json').read_text())
+    assert (job['device'], job['cycles_devices'], job['cycles_required'], job['hiprt']) == (
+        'auto', ['OPTIX', 'CUDA', 'HIP'], False, False)
+
+
+def test_job_uses_the_supplied_choice(tmp_path):
+    from lightmapper.gpu import Adapter, choose
+    choice = choose('amd', [Adapter('Radeon', 0x1002, (2,), 'vulkan', True)])
+    write_job(tmp_path, make_scene(), [(8, 8)], [], {}, Settings(device='amd'), choice=choice)
+    job = json.loads((tmp_path / 'job.json').read_text())
+    assert (job['device'], job['cycles_devices'], job['cycles_required'], job['hiprt']) == (
+        'amd', ['HIP'], True, False)

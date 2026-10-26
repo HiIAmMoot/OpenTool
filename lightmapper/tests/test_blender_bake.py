@@ -1,13 +1,15 @@
 """Real Blender bakes of tiny scenes: orientation, shadows, light linking, emission, glass, cut-outs, bounce."""
 
 import os
+import json
+from dataclasses import replace
 from pathlib import Path
 import subprocess
 
 import numpy as np
 import pytest
 
-from lightmapper.blender_job import BAKE_SCRIPT, Scene, run_blender, write_job
+from lightmapper.blender_job import BAKE_SCRIPT, BlenderError, Scene, run_blender, write_job
 from lightmapper.gather import Sun
 from lightmapper.settings import Settings
 
@@ -178,7 +180,41 @@ def test_lit_quad_and_orientation(tmp_path):
     page = result.pages[0]
     assert page.shape == (16, 16, 3)
     assert page[:8, :8].mean() > 0 and page[8:, :].max() == 0 and page[:, 8:].max() == 0
-    assert result.device in ('OPTIX', 'CUDA', 'CPU')
+    assert result.device in ('OPTIX', 'CUDA', 'HIP', 'CPU')
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kinds,expected', [
+    pytest.param(['OPTIX', 'CUDA'], ('OPTIX', 'CUDA'), marks=pytest.mark.gpu_nvidia),
+    pytest.param(['HIP'], ('HIP',), marks=pytest.mark.gpu_amd),
+    ([], ('CPU',))])
+def test_cycles_bakes_on_the_chosen_vendor(tmp_path, kinds, expected):
+    from lightmapper.gpu import choose
+    s = Settings(samples=8, vertex_rays=1)
+    choice = replace(choose('auto', None), cycles=tuple(kinds), required=bool(kinds))
+    write_job(tmp_path, build([full_quad()]), [(16, 16)], [sun()], {}, s, choice=choice)
+    result = run_blender(tmp_path, s)
+    assert result.device in expected and result.pages[0][2:-2, 2:-2].mean() > 0
+
+
+@pytest.mark.blender
+def test_cpu_setting_bakes_on_the_cpu_without_a_warning(tmp_path):
+    s = Settings(device='cpu', samples=8, vertex_rays=1)
+    write_job(tmp_path, build([full_quad()]), [(16, 16)], [sun()], {}, s)
+    result = run_blender(tmp_path, s)
+    assert result.device == 'CPU' and result.pages[0][2:-2, 2:-2].mean() > 0
+    assert 'no GPU device found' not in (tmp_path / 'blender.log').read_text()
+
+
+@pytest.mark.blender
+def test_required_cycles_device_that_is_missing_fails_the_bake(tmp_path):
+    s = Settings(samples=8, vertex_rays=1)
+    path = write_job(tmp_path, build([full_quad()]), [(16, 16)], [sun()], {}, s)
+    job = json.loads(path.read_text())
+    job.update(cycles_devices=['NOPE'], cycles_required=True, hiprt=False)
+    path.write_text(json.dumps(job))
+    with pytest.raises(BlenderError, match='none of'):
+        run_blender(tmp_path, s)
 
 
 @pytest.mark.blender

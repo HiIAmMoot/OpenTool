@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 
 from .charts import ChartSettings
+from . import gpu
 
 
 CALIBRATION_PATH = Path(__file__).with_name('calibration.json')
@@ -53,7 +54,7 @@ class Settings(ChartSettings):
     # how far a plane-away face's sun reaches in from its lit boundary: tool's final-quality floor for the mesh cells
     # its radiosity refines to near a shadow edge (non-emissive, detail level 0)
     reach: float = 0.225
-    device: str = 'OPTIX'
+    device: str = 'auto'
     blender: str = field(default_factory=lambda: os.environ.get('LIGHTMAPPER_BLENDER', DEFAULT_BLENDER))
     timeout_s: int | None = 7200  # None means no limit, which the app uses because a CPU bake can take hours
     w_sun: float = _calibrated('w_sun')
@@ -65,6 +66,7 @@ class Settings(ChartSettings):
 
     def __post_init__(self):
         super().__post_init__()
+        self.device = gpu.normalise_device(self.device)
         if self.seed < 0 or self.seed > 999:
             raise ValueError(f'seed must be between 0 and 999, not {self.seed}')
         if self.sky_grid < 1:
