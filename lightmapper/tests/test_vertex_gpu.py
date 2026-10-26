@@ -2,18 +2,20 @@
 Blender (vertex_driver.py)."""
 
 import ast
+import dataclasses
 import json
 
 import numpy as np
 import pytest
 
-from lightmapper import vertex_gpu
+from lightmapper import gpu, vertex_gpu
+from lightmapper.blender_job import write_job
 from lightmapper.sun_facing import sun_facing_queries
-from lightmapper.vertex_gpu import (GOLDEN_FRACTION, SEED_SPIN, edge_rays, gather_sums, hemisphere, query_frames,
-                                    sun_rays)
+from lightmapper.vertex_gpu import (GOLDEN_FRACTION, GROUP_SIZE, SEED_SPIN, GpuPassError, edge_rays, gather_sums,
+                                    hemisphere, load_and_run, query_frames, run_vertex_pass, sun_rays)
 from conftest import LIGHTMAPPER_BLENDER
-from test_blender_bake import UP, build, floor, quad, sun
-from test_vertex_pass import run_driver
+from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
+from test_vertex_pass import AMBIENT, FULL_UV, S, roof, run_driver, wall_facing_minus_x
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -112,3 +114,246 @@ def test_sun_and_edge_ray_lists_are_the_rays_the_cpu_pass_casts(tmp_path):
     assert cpu['sun_lit'][query, sun_index].tolist() == [True]
     assert cpu['edge_sun_lit'].shape == (len(scene['edge_pos']), len(suns))
     assert not cpu['edge_sun_lit'][:, 1].any()
+
+
+# ---------- the GPU pass against the CPU pass, one scene at a time
+
+VENDORS = {'nvidia': 0x10DE, 'amd': 0x1002}
+RAMP = (np.arange(16)[None, :, None] * 0.25 + np.arange(16)[:, None, None] * 0.1
+        + np.arange(3) * 0.05).astype(np.float32)
+
+
+@pytest.fixture(params=[pytest.param('nvidia', marks=pytest.mark.gpu_nvidia),
+                        pytest.param('amd', marks=pytest.mark.gpu_amd)])
+def vendor(request):
+    return request.param
+
+
+def adapter_for(vendor):
+    adapters, _ = gpu.list_adapters()
+    return next(a for a in adapters if a.vendor_id == VENDORS[vendor] and a.ray_query)
+
+
+def cpu_and_gpu(tmp_path, vendor, **kwargs):
+    cpu = run_driver(tmp_path, **kwargs)
+    with np.load(tmp_path / 'pages.npz') as data:
+        pages = [data[f'page_{i}'] for i in range(len(data.files))]
+    return cpu, load_and_run(tmp_path, pages, adapter_for(vendor))
+
+
+def alpha_texture(alpha, holes=False):
+    texels = np.full((4, 4, 4), 255, np.uint8)
+    texels[:, :, 3] = alpha
+    if holes:
+        texels[1:3, 1:3, 3] = 0
+    return texels
+
+
+def negative_uv_wall():
+    corners = [(3, 0, 0), (3, 4, 0), (3, 4, 4), (3, 0, 4)]
+    tex = [(-1.3, -1.3), (-0.2, -1.3), (-0.2, -0.2), (-1.3, -0.2)]
+    return dict(quad=quad(corners[::-1], (-1, 0, 0), FULL_UV[::-1], tex[::-1]), texture=0)
+
+
+def overhanging_slab():
+    m = np.float64([1, 0, -0.054])
+    m /= np.linalg.norm(m)
+    t2 = np.float64([0.054, 0, 1])
+    t2 /= np.linalg.norm(t2)
+    origin = np.float64([2, 2, 0])
+    corners = [origin + a * np.float64([0, 1, 0]) + b * t2 for a, b in ((-2, 0), (2, 0), (2, 2), (-2, 2))]
+    return dict(quad=quad(corners, tuple(m)))
+
+
+def edge_receivers():
+    high = list(floor(0, 4, 0, 4))
+    high[3] = np.tile(np.float32(UP), (4, 1))
+    wall = quad([(0, 0, 0), (0, 4, 0), (0, 4, -4), (0, 0, -4)], UP)
+    return [dict(quad=high, casts=False), dict(quad=wall, casts=False)]
+
+
+COVER = dict(quad=floor(-50, 50, -50, 50, z=1.0))
+GREY = np.uint8([[[128, 128, 128, 255]] * 2] * 2)
+RANDOM_TEXELS = np.random.default_rng(3).integers(0, 256, (4, 4, 4)).astype(np.uint8)
+CASES = {   # name -> run_driver kwargs, the scenes of test_vertex_pass.py
+    'sun_only': dict(receivers=[full_quad()], suns=[sun(UP, strength=3.0)]),
+    'emissive_wall': dict(receivers=[full_quad(), wall_facing_minus_x(emission=(4, 4, 4))], query=((1, 2, 0),),
+                          pages=[RAMP]),
+    'emit_only_front': dict(receivers=[full_quad()], occluders=[
+        dict(quad=floor(0, 4, 0, 4, z=1.0, up=False), casts=False, emission=(4, 4, 4))]),
+    'emit_only_back': dict(receivers=[full_quad()], occluders=[
+        dict(quad=floor(0, 4, 0, 4, z=1.0, up=True), casts=False, emission=(4, 4, 4))]),
+    'cutout_hole': dict(receivers=[full_quad()], suns=[sun(UP)], textures=[alpha_texture(255, holes=True)],
+                        occluders=[dict(quad=floor(0, 4, 0, 4, z=1.0), texture=0, cutout=True)]),
+    'cutout_filled': dict(receivers=[full_quad()], suns=[sun(UP)], textures=[alpha_texture(255)],
+                          occluders=[dict(quad=floor(0, 4, 0, 4, z=1.0), texture=0, cutout=True)]),
+    'glass_tint_0': dict(receivers=[full_quad(), dict(quad=floor(-1, 5, -1, 5, z=1.0), casts=False, tint=(0, 0, 0))],
+                         suns=[sun(UP, strength=3.0)]),
+    'glass_tint_half': dict(receivers=[full_quad(), dict(quad=floor(-1, 5, -1, 5, z=1.0), casts=False,
+                                                         tint=(0.5, 0.25, 0.75))], suns=[sun(UP, strength=3.0)]),
+    'indoor_receiver': dict(receivers=[roof(-1)], ambient=AMBIENT, query=((0, 0, 0),), cls=0),
+    'indoor_occluder': dict(receivers=[full_quad()], ambient=AMBIENT, occluders=[COVER], cls=-1),
+    'zero_normal': dict(receivers=[full_quad()], suns=[sun(UP, strength=3.0)], ambient=AMBIENT,
+                        query=((1, 1, 0), (2, 2, 0)), normals=[(0, 0, 0), (0, 0, 1)]),
+    'overhanging_slab': dict(receivers=[full_quad()], suns=[sun((1, 0, 1), strength=3.0)],
+                             occluders=[overhanging_slab()]),
+    'grey_albedo': dict(receivers=[dict(wall_facing_minus_x(), texture=0)], query=((1, 2, 0),), textures=[GREY],
+                        pages=[np.ones((16, 16, 3), np.float32)]),
+    'edge_queries': dict(receivers=edge_receivers(), suns=[sun((0.8, 0, 0.6))], normal=(0, 0, 0)),
+    'seed_1': dict(receivers=[full_quad(), wall_facing_minus_x(emission=(4, 4, 4))], query=((1, 2, 0), (2, 1, 0)),
+                   seed=1, rays=256, pages=[RAMP], suns=[sun((1, 0.3, 2.6))]),
+    'texture_negative_uv': dict(receivers=[full_quad(), negative_uv_wall()], query=((1, 2, 0),),
+                                textures=[RANDOM_TEXELS], pages=[RAMP]),
+}
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('case', CASES)
+def test_gpu_matches_cpu_on_the_vertex_pass_scenes(tmp_path, vendor, case):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **CASES[case])
+    assert result.rays == int(cpu['rays'])
+    np.testing.assert_allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-4, atol=1e-5)
+    assert np.array_equal(result.sun_lit, cpu['sun_lit']) and np.array_equal(result.edge_sun_lit, cpu['edge_sun_lit'])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('panes,lit', [(8, False), (9, True)])
+def test_pass_limit_stops_after_nine_hits(tmp_path, vendor, panes, lit):
+    # panes clear (tint 1, not casting) stacked under a solid roof, sun straight up: eight passed panes leave the
+    # roof as the ninth hit (shadow); nine use up the loop and the ray counts as escaped, on both passes
+    stack = [dict(quad=floor(-1, 5, -1, 5, z=0.1 * (k + 1)), casts=False) for k in range(panes)]
+    roof_slab = dict(quad=floor(-1, 5, -1, 5, z=2.0))
+    cpu, result = cpu_and_gpu(tmp_path, vendor, receivers=[full_quad()], occluders=stack + [roof_slab],
+                              suns=[sun(UP, strength=3.0)])
+    assert (result.irradiance[0] > 0) == lit == (cpu['irradiance'][0] > 0)
+
+
+def textured_room():
+    south = quad([(0, 0, 0), (0, 0, 4), (8, 0, 4), (8, 0, 0)], (0, 1, 0))
+    north = quad([(8, 8, 0), (8, 8, 4), (0, 8, 4), (0, 8, 0)], (0, -1, 0))
+    west = quad([(0, 0, 0), (0, 8, 0), (0, 8, 4), (0, 0, 4)], (1, 0, 0))
+    east = quad([(8, 0, 0), (8, 8, 0), (8, 8, 4), (8, 0, 4)][::-1], (-1, 0, 0), CORNERS_UV[::-1])
+    receivers = [dict(quad=floor(0, 8, 0, 8), texture=0, page=0),
+                 # the ceiling stops short of x 3 to 5: the window the suns come through
+                 dict(quad=floor(0, 3, 0, 8, z=4, up=False), texture=0, page=0),
+                 dict(quad=floor(5, 8, 0, 8, z=4, up=False), texture=0, page=0)]
+    receivers += [dict(quad=w, texture=1, page=1) for w in (south, north, west, east)]
+    occluders = [dict(quad=floor(3, 5, 3, 5, z=2, up=False), casts=False, emission=(4, 4, 4)),
+                 dict(quad=floor(0.85, 4.15, 0.85, 4.15, z=3), texture=2, cutout=True)]
+    grid = np.linspace(1, 7, 6)
+    floor_q = [(x, y, 0.0) for x in grid for y in grid]
+    wall_q = ([(0.0, y, z) for y in np.linspace(1, 7, 7) for z in (1.0, 3.0)]
+              + [(x, 0.0, z) for x in np.linspace(1, 7, 7) for z in (1.0, 3.0)])
+    normals = [(0, 0, 1)] * len(floor_q) + [(1, 0, 0)] * 14 + [(0, 1, 0)] * 14
+    rng = np.random.default_rng(11)
+    textures = [rng.integers(0, 256, (8, 8, 4)).astype(np.uint8) for _ in range(2)]
+    for texture in textures:
+        texture[:, :, 3] = 255
+    textures.append(alpha_texture(255, holes=True))
+    pages = [(rng.random((16, 16, 3)) * 2).astype(np.float32), (rng.random((8, 32, 3)) * 2).astype(np.float32)]
+    return dict(receivers=receivers, occluders=occluders, query=floor_q + wall_q, normals=normals, textures=textures,
+                pages=pages, suns=[sun((0.3, 0, 1), strength=3.0), sun((-0.2, 0.3, 1), strength=2.0)],
+                ambient={'0': [0.2, 0.25, 0.3]}, rays=256, seed=0)
+
+
+@pytest.mark.blender
+def test_gpu_matches_cpu_on_a_textured_room(tmp_path, vendor):
+    # a closed 8x8x4 box of textured receivers on two pages with a non-constant page image, an emissive and a
+    # cut-out occluder, two suns through a window, 64 queries on the floor and walls, 256 rays, seed 0
+    scene = textured_room()
+    assert len(scene['query']) == 64
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **scene)
+    rel = np.abs(result.irradiance - cpu['irradiance']) / np.maximum(cpu['irradiance'], 1e-6)
+    assert cpu['irradiance'].min() > 0
+    assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
+    assert result.rays == int(cpu['rays']) and np.array_equal(result.sun_lit, cpu['sun_lit'])
+    assert result.sun_lit.any()
+
+
+def write_bare_scene(work, queries=True, triangles=True):
+    scene = build([full_quad()])
+    if not triangles:
+        scene = dataclasses.replace(
+            scene, positions=scene.positions[:0], normals=scene.normals[:0], lm_uv=scene.lm_uv[:0],
+            tex_uv=scene.tex_uv[:0], tris=scene.tris[:0], tri_page=scene.tri_page[:0], tri_class=scene.tri_class[:0],
+            tri_casts_shadow=scene.tri_casts_shadow[:0], tri_emission=scene.tri_emission[:0],
+            tri_texture=scene.tri_texture[:0], tri_cutout=scene.tri_cutout[:0], tri_tint=scene.tri_tint[:0])
+    if not queries:
+        scene = dataclasses.replace(scene, query_pos=scene.query_pos[:0], query_normal=scene.query_normal[:0],
+                                    query_class=scene.query_class[:0])
+    write_job(work, scene, [(16, 16), (8, 8)], [sun(UP, strength=3.0)], {'0': [0.2, 0.2, 0.2]},
+              dataclasses.replace(S, vertex_rays=64), 'all')
+    return [np.zeros((16, 16, 3), np.float32), np.ones((8, 8, 3), np.float32)]
+
+
+@pytest.mark.blender
+def test_gpu_pass_with_empty_parts(tmp_path, vendor, monkeypatch):
+    # no occluders, no textures, no edge points, a second page with no receivers; then no triangles at all (both
+    # kernels skipped, _dispatch never called); then no queries at all
+    adapter = adapter_for(vendor)
+    cpu, result = cpu_and_gpu(tmp_path / 'parts', vendor, receivers=[full_quad()], suns=[sun(UP, strength=3.0)],
+                              ambient={'0': [0.2] * 3}, pages=[RAMP, np.ones((8, 8, 3), np.float32)])
+    assert result.rays == int(cpu['rays']) and np.allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
+    cpu, result = cpu_and_gpu(tmp_path / 'no_suns', vendor, receivers=[full_quad()])
+    assert result.rays == int(cpu['rays']) and np.allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(vertex_gpu, '_dispatch', lambda *args, **kwargs: pytest.fail('a kernel ran without triangles'))
+        pages = write_bare_scene(tmp_path / 'no_triangles', triangles=False)
+        bare = load_and_run(tmp_path / 'no_triangles', pages, adapter)
+    assert bare.rays == 64 + 1 and bare.sun_lit.tolist() == [[True]]
+    np.testing.assert_allclose(bare.irradiance, [3.0 + np.pi * 0.2], rtol=1e-6)
+    np.testing.assert_allclose(bare.vector, [[0, 0, 3.0 + np.pi * 0.2]], rtol=1e-6)
+
+    pages = write_bare_scene(tmp_path / 'no_queries', queries=False)
+    empty = load_and_run(tmp_path / 'no_queries', pages, adapter)
+    assert empty.vector.shape == (0, 3) and empty.irradiance.shape == (0,) and empty.rays == 0
+    assert empty.sun_lit.shape == (0, 1)
+
+
+def scene_folder(tmp_path, queries, suns):
+    scene = build([full_quad()])
+    positions = [[1 + 2 * (k % 7) / 7, 1 + (k % 5) * 0.4, 0] for k in range(queries)]
+    scene = dataclasses.replace(scene, query_pos=np.float32(positions), query_normal=np.float32([[0, 0, 1]] * queries),
+                                query_class=np.int16([0] * queries))
+    write_job(tmp_path, scene, [(16, 16)], suns, {}, dataclasses.replace(S, vertex_rays=64), 'all')
+    with np.load(tmp_path / 'scene.npz') as data:
+        arrays = {key: data[key] for key in data.files}
+    return arrays, json.loads((tmp_path / 'job.json').read_text())
+
+
+@pytest.fixture
+def device(vendor):
+    opened = gpu.open_device(adapter_for(vendor))
+    yield opened
+    opened.close()
+
+
+def test_dispatches_stay_under_the_ray_budget(monkeypatch, tmp_path, vendor, device):
+    monkeypatch.setattr(vertex_gpu, 'RAYS_PER_DISPATCH', 4096)
+    queries = 3 * 4096 // 64 + 1
+    suns = [sun((0.01 * k, 0.02, 1.0)) for k in range(64)]
+    arrays, job = scene_folder(tmp_path, queries, suns)
+    seen = []
+    real = vertex_gpu._dispatch
+
+    def recording(kernel, count, **kwargs):
+        seen.append(count)
+        return real(kernel, count, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', recording)
+    result = run_vertex_pass(arrays, job, [], [np.zeros((16, 16, 3), np.float32)], device)
+    cap = min(4096, device.info.limits.max_compute_dispatch_thread_groups.x * GROUP_SIZE)
+    assert vertex_gpu.dispatch_cap(device) == cap
+    assert max(seen) <= cap and len(seen) >= 8
+    assert result.rays == queries * 64 + queries * 64
+
+
+def test_slangpy_failure_becomes_a_gpu_pass_error(monkeypatch, tmp_path, vendor, device):
+    arrays, job = scene_folder(tmp_path, 2, [sun(UP)])
+
+    def refuse(*args, **kwargs):
+        raise RuntimeError('out of memory')
+    monkeypatch.setattr(vertex_gpu, '_create_buffer', refuse)
+    with pytest.raises(GpuPassError, match='upload: out of memory'):
+        run_vertex_pass(arrays, job, [], [np.zeros((16, 16, 3), np.float32)], device)
