@@ -54,7 +54,7 @@ class Settings(ChartSettings):
     reach: float = 0.225
     device: str = 'OPTIX'
     blender: str = field(default_factory=lambda: os.environ.get('LIGHTMAPPER_BLENDER', DEFAULT_BLENDER))
-    timeout_s: int = 7200
+    timeout_s: int | None = 7200  # None means no limit, which the app uses because a CPU bake can take hours
     w_sun: float = _calibrated('w_sun')
     w_emit: float = _calibrated('w_emit')
     w_amb: float = _calibrated('w_amb')

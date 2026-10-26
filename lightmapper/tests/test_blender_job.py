@@ -208,6 +208,13 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     assert args[4] == '--python' and args[5].endswith('bake.py') and args[6:] == ['--', str(work / 'job.json')]
 
 
+def test_run_blender_without_timeout(tmp_path, fake):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake, timeout_s=None)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    run_blender(work, s)
+
+
 def test_blender_failure_raises(tmp_path, fake, monkeypatch):
     work = tmp_path / 'work'
     s = Settings(blender=fake)

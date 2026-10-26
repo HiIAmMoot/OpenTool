@@ -27,6 +27,12 @@ def test_none_gives_defaults():
     assert load_settings(None) == Settings()
 
 
+def test_settings_file_accepts_null_timeout(tmp_path):
+    p = tmp_path / 's.json'
+    p.write_text('{"timeout_s": null}')
+    assert load_settings(p).timeout_s is None
+
+
 def test_blender_default_follows_environment_at_construction(monkeypatch):
     monkeypatch.setenv('LIGHTMAPPER_BLENDER', r'C:\Apps\Blender\blender.exe')
     assert load_settings(None).blender == r'C:\Apps\Blender\blender.exe'
