@@ -357,3 +357,31 @@ def test_slangpy_failure_becomes_a_gpu_pass_error(monkeypatch, tmp_path, vendor,
     monkeypatch.setattr(vertex_gpu, '_create_buffer', refuse)
     with pytest.raises(GpuPassError, match='upload: out of memory'):
         run_vertex_pass(arrays, job, [], [np.zeros((16, 16, 3), np.float32)], device)
+
+
+def test_chunks_are_reduced_as_they_land(monkeypatch, tmp_path, vendor, device):
+    queries = 70
+    arrays, job = scene_folder(tmp_path, queries, [sun((0.2, 0.1, 1.0))])
+    pages = [np.zeros((16, 16, 3), np.float32)]
+    whole = run_vertex_pass(arrays, job, [], pages, device)
+    monkeypatch.setattr(vertex_gpu, 'RAYS_PER_DISPATCH', 4096)
+    held = []
+    real = vertex_gpu.gather_sums
+
+    def recording(lum, *args):
+        held.append(lum.shape)
+        return real(lum, *args)
+    monkeypatch.setattr(vertex_gpu, 'gather_sums', recording)
+    chunked = run_vertex_pass(arrays, job, [], pages, device)
+    # no ray matrix larger than one dispatch's queries is ever held
+    assert len(held) >= 2 and max(rows for rows, _ in held) <= 4096 // 64
+    assert np.array_equal(chunked.vector, whole.vector) and np.array_equal(chunked.irradiance, whole.irradiance)
+    assert np.array_equal(chunked.sun_lit, whole.sun_lit) and chunked.rays == whole.rays
+
+
+def test_more_rays_than_one_dispatch_holds_is_refused(monkeypatch, tmp_path, vendor, device):
+    arrays, job = scene_folder(tmp_path, 2, [sun(UP)])
+    monkeypatch.setattr(vertex_gpu, 'RAYS_PER_DISPATCH', 32)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', lambda *args, **kwargs: pytest.fail('dispatched over the cap'))
+    with pytest.raises(GpuPassError, match='gather: vertex_rays 64 exceeds the dispatch cap 32'):
+        run_vertex_pass(arrays, job, [], [np.zeros((16, 16, 3), np.float32)], device)

@@ -222,7 +222,7 @@ def _build_world(device, vertices, indices, vertex_count, index_count):
     sizes = device.get_acceleration_structure_sizes(bottom_desc)
     bottom = device.create_acceleration_structure(kind=spy.AccelerationStructureKind.bottom_level,
                                                   size=sizes.acceleration_structure_size)
-    scratch = device.create_buffer(size=sizes.scratch_size, usage=spy.BufferUsage.unordered_access)
+    scratch = _create_buffer(device, size=sizes.scratch_size, usage=spy.BufferUsage.unordered_access)
     encoder = device.create_command_encoder()
     encoder.build_acceleration_structure(desc=bottom_desc, dst=bottom, src=None, scratch_buffer=scratch)
     device.submit_command_buffer(encoder.finish())
@@ -236,7 +236,7 @@ def _build_world(device, vertices, indices, vertex_count, index_count):
     sizes = device.get_acceleration_structure_sizes(top_desc)
     top = device.create_acceleration_structure(kind=spy.AccelerationStructureKind.top_level,
                                                size=sizes.acceleration_structure_size)
-    scratch_top = device.create_buffer(size=sizes.scratch_size, usage=spy.BufferUsage.unordered_access)
+    scratch_top = _create_buffer(device, size=sizes.scratch_size, usage=spy.BufferUsage.unordered_access)
     encoder = device.create_command_encoder()
     encoder.build_acceleration_structure(desc=top_desc, dst=top, src=None, scratch_buffer=scratch_top)
     device.submit_command_buffer(encoder.finish())
@@ -260,15 +260,18 @@ def _ambient_of(table, cls):
     return table[np.clip(cls + 1, 0, None)] * (cls >= -1)[:, None]
 
 
-def _trace(device, arrays, table, job, hemi, queries, shadow_rays):
-    """(lum per usable query and ray, carried rgb and escaped per shadow ray) from the kernels."""
+def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
+    """(carried rgb, escaped) per shadow ray from the kernels; each gather dispatch's luminances go to
+    reduce(chunk, lum) as they land, so no matrix of every ray's luminance is ever held."""
     rays = int(job['vertex_rays'])
     ids, pos, n, tangent, bitangent, spin, cls = queries
     origins, dirs = shadow_rays
-    lum = np.zeros((len(ids), rays))
     carried, escaped = np.ones((len(origins), 3)), np.ones(len(origins), bool)
     if not len(arrays['tris']):
-        return lum, carried, escaped
+        return carried, escaped
+    cap = dispatch_cap(device)
+    if rays > cap:
+        raise GpuPassError(f'gather: vertex_rays {rays} exceeds the dispatch cap {cap}')
     with _stage('upload'):
         vertices = _upload(device, arrays['positions'], np.float32)
         indices = _upload(device, arrays['tris'].reshape(-1), np.uint32)
@@ -287,12 +290,11 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays):
     with _stage('build'):
         shared['world'], keep = _build_world(device, vertices, indices, len(arrays['positions']), arrays['tris'].size)
         gather, shadow = _kernels(device)
-    cap = dispatch_cap(device)
     with _stage('gather'):
         hemisphere_buffers = dict(hemi_phi=_upload(device, hemi[0], np.float32),
                                   hemi_r=_upload(device, hemi[1], np.float32),
                                   hemi_h=_upload(device, hemi[2], np.float32), rays=rays)
-    step = max(1, cap // rays)
+    step = cap // rays
     for first in range(0, len(ids), step):
         chunk = slice(first, first + step)
         with _stage('gather'):
@@ -304,7 +306,8 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays):
                 query_bitangent=_upload(device, bitangent[chunk], np.float32),
                 query_spin=_upload(device, spin[chunk], np.float32), query_class=_upload(device, cls[chunk], np.int32),
                 gather_count=len(ids[chunk]) * rays, lum_out=out))
-            lum[chunk] = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])]
+            lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])]
+        reduce(chunk, lum)
     for first in range(0, len(origins), cap):
         chunk = slice(first, first + cap)
         with _stage('shadow'):
@@ -315,7 +318,7 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays):
             result = _read(device, out, np.float32).reshape(-1, 4)[:len(origins[chunk])]
         carried[chunk], escaped[chunk] = result[:, :3], result[:, 3] > 0.5
     del keep
-    return lum, carried, escaped
+    return carried, escaped
 
 
 def run_vertex_pass(scene, job, textures, pages, device):
@@ -336,14 +339,16 @@ def run_vertex_pass(scene, job, textures, pages, device):
         edge = edge_sun = np.empty(0, np.int64)
         edge_origin = edge_dir = np.empty((0, 3))
     ids = np.flatnonzero(usable)
-    traced, carried, escaped = _trace(
+    vector, irradiance = np.zeros((queries, 3)), np.zeros(queries)
+
+    def reduce(chunk, lum):
+        rows = ids[chunk]
+        vector[rows], irradiance[rows] = gather_sums(lum, phi, r, local[:, 2], n[rows], tangent[rows],
+                                                     bitangent[rows], spin[rows])
+    carried, escaped = _trace(
         device, arrays, table, job, (phi, r, local[:, 2]),
         (ids, scene['query_pos'][ids], n[ids], tangent[ids], bitangent[ids], spin[ids], qcls[ids]),
-        (np.concatenate([sun_origin, edge_origin]), np.concatenate([sun_dir, edge_dir])))
-
-    lum = np.zeros((queries, rays))
-    lum[ids] = traced
-    vector, irradiance = gather_sums(lum, phi, r, local[:, 2], n, tangent, bitangent, spin)
+        (np.concatenate([sun_origin, edge_origin]), np.concatenate([sun_dir, edge_dir])), reduce)
     # (the pass works in pi x tool units, the sun's strength carries pi and a gathered hit has no 1/pi, so the
     # ambient that tool adds as lum x normal takes pi too)
     flat = np.pi * (_ambient_of(table, qcls) @ LUMA) * usable
