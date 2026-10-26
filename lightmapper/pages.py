@@ -8,35 +8,17 @@ precision.
 import io
 import logging
 import subprocess
-import sys
 import tempfile
 
 import numpy as np
 
 from .formats.vertices import encode_r5g6b5
 from . import frozen
+from . import denoise_worker
 from .raster import dilate
 from .seams import stitch_seams
 
 log = logging.getLogger(__name__)
-
-
-# a fresh interpreter loads the system's C++ runtime before anything else: OIDN
-# needs the new msvcp140/vcruntime140, and once numpy or numba have loaded the
-# 2019 copy that sits beside Anaconda's python.exe the device creation in this
-# process dies with an access violation
-_WORKER = """
-import ctypes, os, sys
-if os.name == 'nt':
-    for n in ('vcruntime140', 'vcruntime140_1', 'msvcp140', 'msvcp140_1', 'msvcp140_2'):
-        path = os.path.join(os.environ['SystemRoot'], 'System32', n + '.dll')
-        if os.path.exists(path):
-            ctypes.WinDLL(path)
-import io
-import numpy as np, pyoidn
-img = np.load(io.BytesIO(sys.stdin.buffer.read()))
-np.save(sys.stdout.buffer, pyoidn.denoise(img, filter_type='RTLightmap'))
-"""
 
 
 # the network misreads a page's border: a constant page comes back up to 13% off
@@ -52,7 +34,7 @@ def _denoise(page: np.ndarray, timeout: float) -> np.ndarray:
                        '(vcruntime140/msvcp140 14.4x) is the usual cause')
     try:
         with tempfile.TemporaryDirectory() as cwd:
-            done = subprocess.run([sys.executable, '-c', _WORKER], input=data.getvalue(),
+            done = subprocess.run(denoise_worker.worker_command(), input=data.getvalue(),
                                   capture_output=True, cwd=cwd, timeout=timeout,
                                   creationflags=frozen.NO_WINDOW)
     except subprocess.TimeoutExpired:

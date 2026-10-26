@@ -1,0 +1,77 @@
+import io
+import os
+from pathlib import Path
+import subprocess
+import sys
+import types
+
+import numpy as np
+import pytest
+
+from lightmapper import denoise_worker, entry
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def test_source_worker_runs_lightmap_py(monkeypatch):
+    monkeypatch.delattr(sys, 'frozen', raising=False)
+    command = denoise_worker.worker_command()
+    assert command[0] == sys.executable and command[1].endswith('lightmap.py') and command[2] == '--denoise-worker'
+
+
+def test_frozen_worker_is_the_console_exe(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    assert denoise_worker.worker_command() == [str(tmp_path / 'OpenTool-cli.exe'), '--denoise-worker']
+
+
+def test_frozen_runtime_comes_from_the_bundle(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path), raising=False)
+    assert denoise_worker.runtime_dll_dir() == tmp_path
+
+
+@pytest.mark.skipif(os.name != 'nt', reason='Windows runtime')
+def test_source_runtime_comes_from_system32(monkeypatch):
+    monkeypatch.delattr(sys, 'frozen', raising=False)
+    assert denoise_worker.runtime_dll_dir() == Path(os.environ['SystemRoot']) / 'System32'
+
+
+def test_worker_round_trip_through_the_real_command():
+    page = np.full((40, 40, 3), .5, np.float32)
+    src = io.BytesIO()
+    np.save(src, page)
+    done = subprocess.run(denoise_worker.worker_command(), input=src.getvalue(), capture_output=True, timeout=120)
+    assert done.returncode == 0, done.stderr.decode(errors='replace')
+    out = np.load(io.BytesIO(done.stdout))
+    assert out.shape == page.shape and np.allclose(out, .5, atol=.02)
+
+
+def test_main_pipes_npy_through_pyoidn(monkeypatch):
+    fake = types.SimpleNamespace(denoise=lambda img, filter_type: img * 2 if filter_type == 'RTLightmap' else None)
+    monkeypatch.setitem(sys.modules, 'pyoidn', fake)
+    monkeypatch.setattr(denoise_worker, 'runtime_dll_dir', lambda: Path('nowhere'))
+    page = np.full((4, 4, 3), .5, np.float32)
+    src, dst = io.BytesIO(), io.BytesIO()
+    np.save(src, page)
+    src.seek(0)
+    assert denoise_worker.main(src, dst) == 0
+    dst.seek(0)
+    np.testing.assert_array_equal(np.load(dst), page * 2)
+
+
+def test_entry_routes_the_worker_flag(monkeypatch):
+    monkeypatch.setattr(denoise_worker, 'main', lambda: 7)
+    assert entry.cli_entry(['--denoise-worker']) == 7
+
+
+def test_entry_routes_commands_to_cli(monkeypatch):
+    from lightmapper import cli
+    monkeypatch.setattr(cli, 'main', lambda argv: len(argv))
+    assert entry.cli_entry(['validate', 'x']) == 2
+
+
+def test_entry_does_not_load_numpy():
+    code = 'import sys; import lightmapper.entry; print("numpy" in sys.modules)'
+    out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=REPO).stdout
+    assert out.strip() == 'False'
