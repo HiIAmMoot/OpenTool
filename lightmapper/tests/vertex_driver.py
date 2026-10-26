@@ -1,6 +1,7 @@
 """Runs inside Blender (blender -b --python vertex_driver.py -- dir): drives bake.py's vertex pass on the arrays in dir
 with the page images given, so tests can pin the pass without a Cycles bake. dir holds scene.npz, job.json,
-textures.npz, pages.npz and optionally probe.json (rays to trace one by one instead of the whole pass).
+textures.npz, pages.npz and optionally probe.json (rays to trace one by one instead of the whole pass) or an
+empty file sun_facing (bake.sun_facing_queries on the scene, written to sun_facing.npz).
 """
 
 import importlib.util
@@ -38,9 +39,12 @@ def main():
             out['radiance'].append(tracer.radiance(tri, loc, np.float64(direction), cls) if tri >= 0 else np.nan)
         np.savez(os.path.join(root, 'probe.npz'), **{k: np.array(v) for k, v in out.items()})
         return
+    if os.path.exists(os.path.join(root, 'sun_facing')):
+        np.savez(os.path.join(root, 'sun_facing.npz'), facing=bake.sun_facing_queries(scene, job['suns']))
+        return
     vector, irradiance, rays = tracer.run()
     np.savez(os.path.join(root, 'vp.npz'), vector=vector, irradiance=irradiance, rays=rays,
-             edge_sun_lit=tracer.edge_sun_lit)
+             edge_sun_lit=tracer.edge_sun_lit, sun_lit=tracer.sun_lit)
 
 
 main()

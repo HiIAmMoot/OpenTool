@@ -28,9 +28,10 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
-               normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0):
+               normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
+               sun_facing=False):
     scene = dataclasses.replace(
-        build(receivers, occluders), query_pos=np.float32(query),
+        build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
     pages = pages or [np.zeros((16, 16, 3), np.float32)]
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed)
@@ -42,6 +43,8 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
         del job['seed']
         job_path.write_text(json.dumps(job, indent=2))
     np.savez(tmp_path / 'pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
+    if sun_facing:
+        (tmp_path / 'sun_facing').write_text('')
     if probes is not None:
         (tmp_path / 'probe.json').write_text(json.dumps(probes))
     env = dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent))
@@ -49,7 +52,7 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                            '--python', DRIVER, '--', str(tmp_path)], capture_output=True, text=True, env=env,
                           stdin=subprocess.DEVNULL)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
-    return np.load(tmp_path / ('probe.npz' if probes is not None else 'vp.npz'))
+    return np.load(tmp_path / ('sun_facing.npz' if sun_facing else 'probe.npz' if probes is not None else 'vp.npz'))
 
 
 @pytest.mark.blender
