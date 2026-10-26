@@ -1,22 +1,8 @@
-# Settings
+# Lightmapper settings
 
-Pass settings to `bake` or `calibrate` as a JSON file with `--settings file.json`. Keys are the setting names below, and an unknown key is an error. Anything you leave out keeps its default. The settings a bake used are saved in its `summary.json`.
+Pass settings to `bake` or `calibrate` as a JSON file with `--settings file.json`; the [lightmapper guide](lightmapper.md#settings) has an example. Keys are the setting names below, and an unknown key is an error. Anything you leave out keeps its default. The settings a bake used are saved in its `summary.json`.
 
-```json
-{
-  "texels_per_unit": 8,
-  "page_max": 1024,
-  "blender": "C:\\Apps\\Blender 5.2\\blender.exe"
-}
-```
-
-The defaults aim for tool's final-quality lighting, with scenery emission enabled as an extra source. Changing settings trades bake time and memory for sharper or cleaner lighting.
-
-Save the example as `settings.json`, replace the Blender path with your install path, and use it from the checkout in PowerShell:
-
-```powershell
-python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch_ot bloodgulch_ot --settings settings.json --work bake\bloodgulch
-```
+The defaults aim for tool's final-quality lighting, plus light from scenery shaders, which tool does not have. Changing settings trades bake time and memory for sharper or cleaner lighting.
 
 ## Charts and pages
 

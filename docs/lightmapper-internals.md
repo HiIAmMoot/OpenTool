@@ -1,6 +1,6 @@
 # How the lightmapper works
 
-This page follows one bake in the order `lightmapper/pipeline.py` runs it. The work folder keeps stage products for inspection. There is no option to stop after an arbitrary stage, and some products are saved only at the end.
+This page follows one bake in the order `lightmapper/pipeline.py` runs it. Most stages leave their output in the work folder, so you can inspect it after the bake. For how to run a bake, see the [lightmapper guide](lightmapper.md).
 
 ## What tool's lightmaps are
 
@@ -9,7 +9,7 @@ A Halo CE structure BSP keeps its static lighting in two places:
 - Lightmap pages are stored in a `bitmap` tag: 16-bit `r5g6b5` images, no mipmaps, power-of-two sides. Each page is drawn with a set of "materials" in the BSP, one per shader and page.
 - Every lightmapped vertex has a second, 20-byte vertex next to its normal one, holding its lightmap UV and an `incident_radiosity` vector. That vector is the direction and strength of the light arriving at the vertex. The game uses it to light objects standing on the surface (which way the Chief's shadow falls, how bright he is) and for bump mapping.
 
-The lightmapper fills both in the stock layout. Output has been tested with the H1A editing kit and in OpenCE in game; other renderers and workflows have not all been checked.
+The lightmapper fills both in the stock layout. So far its output has been tested with the H1A editing kit and in game in OpenCE.
 
 ## 1. Reading the level
 
@@ -33,7 +33,7 @@ Every lightmapped surface needs its own place on a page (`charts.py`). For each 
 
 All charts of the level are then packed onto as few pages as possible, and among layouts with the same page count, the one with the least area wins. Pages are at most `page_max` texels on a side. All pieces of one shader group on a page become one material, split at the configured vertex and surface caps (64,000 vertices and 20,000 surfaces by default). The default limits refuse over 127 pages or 2,048 materials on a page. Keep these configurable caps at or below stock values.
 
-The layout is cached in `charts.npz`, keyed on the input BSP's bytes, chart settings and shader radiosity flags and detail levels. Reuse needs the same `--work` folder or an explicit `--charts` file and unchanged key inputs. A normal in-place bake changes the input BSP and invalidates the previous key. Dry runs, diagnostic source passes and bakes to a different `--out-bsp` can reuse it on the next run. Without either cache option, a new timestamped work folder normally has no cache.
+The layout is saved in `charts.npz`, together with a key made from the input BSP file, the chart settings and the shaders' radiosity fields. A later bake reuses it only when it finds the file (same `--work` folder, or `--charts`) and the key still matches. A normal bake rewrites its input BSP, so the next bake of that level charts again. Dry runs, the diagnostic `--sources` passes and bakes to a different `--out-bsp` leave the input alone, so their layout can be reused.
 
 ## 3. Building the scene
 
@@ -57,7 +57,7 @@ In Blender the script:
 2. Adds the sun lamps and links each one to the receivers it may light.
 3. Bakes each page with Cycles at three times its resolution, as a 3 by 3 grid of samples per texel, and averages the samples that land on a surface. It bakes incoming light: direct, indirect and emission. `bounces` controls indirect light and defaults to one bounce. The game multiplies in the surface's own colour when it draws.
 4. Bakes again where a texel at a chart's edge owns only a few of its nine samples, until it has about as many samples as a texel in the middle of a chart. Without this, small charts come out noisy.
-5. Casts `vertex_rays` rays per unique query (4,096 by default) to measure where light comes from. Matching position and normal bytes share one query, whose light class is chosen by surface votes; sun-shadow rays are added separately. This vertex pass runs on the CPU with Blender's ray tracer and takes most of the bake time.
+5. Casts `vertex_rays` rays (4,096 by default) from every lightmapped vertex to measure where its light comes from. Vertices at the same position with the same normal are measured once. This vertex pass runs on the CPU with Blender's ray tracer and takes most of the bake time.
 
 By default, page baking tries OptiX where Blender supports it, then CUDA, then the CPU. The `device` setting can select CUDA directly or force CPU baking.
 
@@ -82,14 +82,11 @@ The per-vertex results become the `incident_radiosity` vectors (`radiosity.py`).
 - the old file is kept as `<name>.lm-backup-<date>-<time>`, and backups are never overwritten;
 - `--dry-run` and diagnostic bakes (`--sources sun` or `emit`) write no tags at all.
 
-After a successful bake the work folder also holds `summary.json` (settings, page sizes, how full each page is, and stage timings), `float_pages.npz` before encoding, and `new_to_input.npy`, which `diff` uses to pair surface orders. `out.npz` holds Blender's raw output. Backups accumulate beside tags in the tags folder and can be deleted once they are no longer needed.
+After a successful bake the work folder also holds `summary.json` (settings, page sizes, how full each page is, and stage timings), the pages before encoding in `float_pages.npz`, Blender's raw output in `out.npz`, and `new_to_input.npy`, which `diff` uses to pair the old and new surface order.
 
 ## The other commands
 
 - `copy` writes a renamed copy of a scenario, its BSP and its lightmap bitmap. Both output options are required; `--out-bsp` names the bitmap too.
 - `validate` checks stock limits and layout: page count, dimensions and format, material and vertex counts, surface ranges, vertex buffer sizes, lightmap UVs in [0, 1], finite normal, binormal, tangent and incident-vector components within ±1.005, cluster and leaf surface references, bitmap sequence count and pixel offsets, and the final `-1` lightmap entry. No output means it passed. `--strict` also checks byte-exact vertex recompression and the lightmap buffer type; some retail tags fail these extra checks.
-- `diff` compares lightmaps surface by surface, with one bilinear sample at each surface's UV centre, and vectors corner by corner. Surfaces with less than one texel of area in either layout are dropped. It reports correlation, brightness per material and light-direction differences. The README explains the metrics.
-- `validate` and `diff` accept existing BSP file paths as well as relative tag paths. Both still use `--tags` or `HCEEK_TAGS` for referenced bitmaps.
-- `calibrate` fits light-source weights against a bake made by tool. The shipped `calibration.json` contains an analytic model of tool's lighting; fitting is only needed for experiments.
-
-`--sources all` is a normal bake. `--sources sun` isolates sky lights and `--sources emit` isolates shader emission. Both diagnostic passes omit ambient and write no tags. Successful commands exit 0; validation problems or failed calibration acceptance exit 1. Argument errors exit 2. `diff` does not fail its exit code on a poor comparison.
+- `diff` compares two lightmaps of the same level surface by surface, with one bilinear sample at each surface's UV centre, and compares the light vectors corner by corner. Surfaces smaller than one texel in either version are left out. The [guide](lightmapper.md#how-close-it-gets-to-tool) explains its numbers.
+- `calibrate` fits the light-source weights to a bake made by tool. The shipped `calibration.json` holds tool's own lighting model, so fitting is only needed for experiments.

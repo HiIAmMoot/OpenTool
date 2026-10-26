@@ -32,7 +32,7 @@ Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BL
 
 - Match the code around you: plain functions, numpy arrays, dataclasses for settings.
 - Comments explain hidden constraints, workarounds or the reason for copying a behaviour from tool. Leave out comments that repeat the code.
-- New settings get a default that keeps the current output, an entry in `docs/settings.md`, and a test.
+- New settings get a default that keeps the current output, an entry in `docs/lightmapper-settings.md`, and a test.
 
 ## Commits and pull requests
 
