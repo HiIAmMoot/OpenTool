@@ -49,7 +49,33 @@ python -m pip install -r requirements.txt
 
 The tools run straight from the checkout; there is no package to install. If PowerShell refuses to run the activation script, call `.\.venv\Scripts\python.exe` wherever the docs say `python`.
 
-Then follow the tool's own guide, starting with [the lightmapper](docs/lightmapper.md#baking-a-level).
+## How to use
+
+### Lightmapper
+
+You don't need to set anything up in Blender. Install Blender 5.2 and the lightmapper starts it in the background, builds the scene from your tags, bakes, and closes it again. If Blender is not in its standard folder, set `LIGHTMAPPER_BLENDER` to the path of `blender.exe`.
+
+This bakes Blood Gulch into new tags, so the original level stays as it is:
+
+```powershell
+python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch bloodgulch --out-bsp levels\test\bloodgulch\bloodgulch_lit --out-scenario levels\test\bloodgulch\bloodgulch_lit --work bake\bloodgulch
+```
+
+| Part | What to put there |
+|---|---|
+| `--tags "C:\HCEEK\tags"` | The editing kit's `tags` folder. You can set `HCEEK_TAGS` once instead. |
+| `levels\test\bloodgulch\bloodgulch` | The scenario to light, as a tag path relative to the tags folder, without the extension. |
+| `bloodgulch` | The name of the BSP inside that scenario. Most multiplayer levels have one, named like the level. |
+| `--out-bsp levels\...\bloodgulch_lit` | Where to write the lit BSP and its lightmap bitmap. Leave it out to overwrite the original BSP; the old file is kept as a backup. |
+| `--out-scenario levels\...\bloodgulch_lit` | Where to write a scenario that uses the new BSP. Build this one to play the result. |
+| `--work bake\bloodgulch` | A folder for the bake's working files and its `summary.json`. Optional. |
+
+Two more options you will often want:
+
+- `--settings settings.json` changes how the bake looks, for example `{"texels_per_unit": 8}` for sharper shadows. See the [settings](docs/lightmapper-settings.md).
+- `--dry-run` runs the whole bake but writes no tags.
+
+Then build the map as usual, for example with `.\tool.exe build-cache-file levels\test\bloodgulch\bloodgulch_lit remastered` from the editing kit's folder. The [lightmapper guide](docs/lightmapper.md) covers the other commands: `copy`, `validate` to check the result against the stock format, and `diff` to compare it with tool's lightmaps.
 
 ## Running the tests
 
