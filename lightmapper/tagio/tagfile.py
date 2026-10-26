@@ -18,6 +18,9 @@ import zlib
 
 from .layout import Layout, load_group, group_version
 
+# tag paths are bytes in the writer's Windows code page, not ASCII; latin-1 keeps every byte through a read and
+# write, and names bytes from 0xa0 up as cp1252 does, so such paths also find their files
+PATH_ENCODING = "latin-1"
 
 _GROUP_EXTENSIONS = {
     "sbsp": "scenario_structure_bsp", "bitm": "bitmap", "scnr": "scenario",
@@ -82,7 +85,7 @@ class Element:
         group = bytes(self.body[field.offset:field.offset + 4])
         path = self._children[key]
         return (None if group == b"\xff" * 4 else group.decode("ascii"),
-                path[:-1].decode("ascii") if path else "")
+                path[:-1].decode(PATH_ENCODING) if path else "")
 
     def set_reference(self, key, group: str | None, path: str):
         field = self._check_kind(key, "reference")
@@ -90,7 +93,7 @@ class Element:
         if len(fourcc) != 4:
             raise ValueError("reference group must have four characters")
         self.body[field.offset:field.offset + 4] = fourcc
-        self._children[key] = path.encode("ascii") + b"\0" if path else b""
+        self._children[key] = path.encode(PATH_ENCODING) + b"\0" if path else b""
 
     def _check_kind(self, key, kind):
         field = self._fields[key]

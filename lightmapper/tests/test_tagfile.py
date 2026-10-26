@@ -100,6 +100,20 @@ def test_values_data_references_and_deep_copy(tmp_path):
     assert back.block("lightmaps")[0].get("bitmap") == -1
 
 
+def test_non_ascii_reference_path_round_trips(tmp_path):
+    from lightmapper.textures import shader_texture
+    tag = tagfile.new_tag("senv")
+    tag.root.set_reference("diffuse.base_map", "bitm", "levels\\test\\·rock\\base")
+    path = tmp_path / "levels" / "test" / "rock.shader_environment"
+    path.parent.mkdir(parents=True)
+    tagfile.write_tag(tag, path)
+    assert b"\\\xb7rock\\base\x00" in path.read_bytes()
+    back = tagfile.read_tag(path)
+    assert back.root.reference("diffuse.base_map") == ("bitm", "levels\\test\\·rock\\base")
+    assert tagfile.tag_bytes(back) == path.read_bytes()
+    assert shader_texture(tmp_path, "senv", "levels\\test\\rock").albedo == "levels\\test\\·rock\\base"
+
+
 def test_preserves_raw_bodies_and_header_words(tmp_path):
     root = bytearray(108)
     struct.pack_into(">iiiii", root, 28, 3, 11, 12, 13, 14)
