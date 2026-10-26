@@ -66,6 +66,7 @@ def test_summary_is_json_ready():
 
 def test_probe_choice_cpu_creates_no_device(monkeypatch):
     monkeypatch.setitem(sys.modules, 'slangpy', None)
+    monkeypatch.setattr(gpu, 'list_adapters', lambda: pytest.fail('cpu probed the GPUs'))
     # the autouse fixture replaces the module attribute, not this original entry point
     assert probe_choice('cpu').cycles == ()
 
