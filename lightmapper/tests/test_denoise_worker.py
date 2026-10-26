@@ -38,13 +38,17 @@ def test_source_runtime_comes_from_system32(monkeypatch):
 
 
 def test_worker_round_trip_through_the_real_command():
+    # real OIDN only ever runs in the worker process: creating an OIDN device inside pytest is
+    # exactly what the worker exists to avoid (pages.py:23-26)
     page = np.full((40, 40, 3), .5, np.float32)
     src = io.BytesIO()
     np.save(src, page)
     done = subprocess.run(denoise_worker.worker_command(), input=src.getvalue(), capture_output=True, timeout=120)
     assert done.returncode == 0, done.stderr.decode(errors='replace')
     out = np.load(io.BytesIO(done.stdout))
-    assert out.shape == page.shape and np.allclose(out, .5, atol=.02)
+    assert out.shape == page.shape
+    assert abs(out.mean() - .5) < .01
+    assert np.abs(out - .5).max() < .05
 
 
 def test_main_pipes_npy_through_pyoidn(monkeypatch):

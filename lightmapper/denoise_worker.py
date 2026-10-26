@@ -27,6 +27,9 @@ def main(stdin=None, stdout=None) -> int:
     stdin = sys.stdin.buffer if stdin is None else stdin
     stdout = sys.stdout.buffer if stdout is None else stdout
     if os.name == 'nt':
+        # oidn needs the 14.4x msvcp140/vcruntime140 runtime. anaconda keeps a 2019 copy beside python.exe;
+        # once numpy or numba load it, oidn device creation dies with an access violation. source runs use the
+        # newer system32 copy; frozen runs ship it beside the exe, so load it before either import.
         for name in RUNTIME_DLLS:
             path = runtime_dll_dir() / f'{name}.dll'
             if path.is_file():

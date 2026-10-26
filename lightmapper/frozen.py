@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 
 
-# A windowed app has no console, so Windows would open one for every console child.
+# a windowed app has no console, so windows would open one for every console child
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0
 
 

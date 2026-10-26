@@ -1,3 +1,6 @@
+import os
+import sys
+
 import numpy as np
 import pytest
 
@@ -38,12 +41,6 @@ def test_mixed_mesh_kinds_refused():
     atlas.add_mesh(CUBE, CUBE_TRIS)
     with pytest.raises(ValueError):
         atlas.add_uv_mesh(np.zeros((3, 2), np.float32), np.array([[0, 1, 2]]))
-import os
-import sys
-
-import pytest
-
-from lightmapper import xatlas_c
 
 
 def test_frozen_loads_the_shipped_library_without_building(monkeypatch, tmp_path):
