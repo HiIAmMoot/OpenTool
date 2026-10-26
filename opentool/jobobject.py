@@ -43,6 +43,7 @@ def kill_children_on_exit() -> bool:
         return False
     try:
         kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         handle = kernel32.CreateJobObjectW(None, None)
@@ -59,7 +60,7 @@ def kill_children_on_exit() -> bool:
         if not kernel32.AssignProcessToJobObject(handle, kernel32.GetCurrentProcess()):
             kernel32.CloseHandle(handle)
             return False
-        # Blender runs behind a blocking worker call, so only closing this job with the app reliably stops its GPU work.
+        # blender runs behind a blocking worker call; keep the handle in a module global and never close it, because closing it kills children at once.
         _job_handle = handle
         return True
     except Exception:

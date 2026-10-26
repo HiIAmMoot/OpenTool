@@ -1,11 +1,10 @@
-import json
 import logging
 import shutil
 
 import pytest
 
 from lightmapper import pipeline
-from lightmapper.tagio.tagfile import new_element, read_tag, write_tag
+from lightmapper.tagio.tagfile import new_element, read_tag, resolve_reference_path, write_tag
 from test_pipeline import child, tiny
 import opentool.runner as runner
 from opentool.runner import BakeRequest, run_bake
@@ -23,6 +22,7 @@ def test_runner_bakes_into_new_names(tiny):
     assert out.status == 'done' and (tags / 'room_lit.scenario_structure_bsp').is_file()
     assert (tags / 'level_lit.scenario').is_file() and out.output_folder == tags
     assert events[-1] == ('done', out)
+    assert out.message == 'Done. The lit level is level_lit.'
 
 
 @pytest.fixture
@@ -77,7 +77,9 @@ def test_runner_restores_the_root_log_level(tiny):
 
 def test_runner_overwrites_in_place_only_when_asked(tiny):
     out, _ = run(tiny, new_names=False)
+    assert out.status == 'done'
     assert not (tiny[0] / 'room_lit.scenario_structure_bsp').exists()
+    assert not (tiny[0] / 'level_lit.scenario').exists()
 
 
 def test_runner_stages_end_with_validate(tiny):
@@ -95,6 +97,77 @@ def test_runner_reports_validation_problems(tiny, monkeypatch):
     monkeypatch.setattr(runner, 'validate_bsp', lambda *a, **k: ['last element must have bitmap -1'])
     out, _ = run(tiny)
     assert out.status == 'problems' and out.problems == ['last element must have bitmap -1']
+    assert out.message == 'Finished with problems. The tags were written; the problems are listed in the log.'
+
+
+def test_runner_output_folder_is_written_bsp_folder(tiny):
+    tags, settings, work = tiny
+    nested = tags / 'levels' / 'x'
+    nested.mkdir(parents=True)
+    shutil.move(tags / 'room.scenario_structure_bsp', nested / 'room.scenario_structure_bsp')
+    scenario = read_tag(tags / 'level.scenario')
+    scenario.root.block('structure_bsps')[0].set_reference('structure_bsp', 'sbsp', 'levels\\x\\room')
+    write_tag(scenario, nested / 'level.scenario')
+    (tags / 'level.scenario').unlink()
+    out = run_bake(BakeRequest(tags, 'levels\\x\\level', 'room', settings, True, work), lambda e: None)
+    assert out.output_folder == resolve_reference_path(tags, 'sbsp', 'levels\\x\\room_lit').parent
+
+
+def test_runner_validates_tags_read_back_from_disk(tiny, monkeypatch):
+    tags, settings, work = tiny
+    seen_reads = []
+    seen_validation = []
+    read = runner.read_tag
+
+    def track_read(path):
+        tag = read(path)
+        seen_reads.append((path, tag, path.read_bytes()))
+        return tag
+
+    def validate(bsp_tag, bitmap_tag):
+        seen_validation.append((bsp_tag, bitmap_tag))
+        return []
+
+    monkeypatch.setattr(runner, 'read_tag', track_read)
+    monkeypatch.setattr(runner, 'validate_bsp', validate)
+    out, _ = run(tiny)
+    bsp_path = resolve_reference_path(tags, 'sbsp', 'room_lit')
+    written_bsp = read(bsp_path)
+    bitmap_path = resolve_reference_path(tags, 'bitm', written_bsp.root.reference('lightmaps_bitmap')[1])
+    assert len(seen_validation) == 1
+    bsp_tag, bitmap_tag = seen_validation[0]
+    assert any(path == bsp_path and tag is bsp_tag and data == bsp_path.read_bytes()
+               for path, tag, data in seen_reads)
+    assert any(path == bitmap_path and tag is bitmap_tag and data == bitmap_path.read_bytes()
+               for path, tag, data in seen_reads)
+    assert out.status == 'done'
+
+
+def test_runner_setup_failure_still_emits_failed_outcome(tiny, monkeypatch):
+    def denied(*a, **k):
+        raise PermissionError(13, 'denied', 'C:\\tags\\opentool.log')
+
+    monkeypatch.setattr(runner.logging, 'FileHandler', denied)
+    events = []
+    out = run_bake(BakeRequest(tiny[0], 'level', 'room', tiny[1], True, tiny[2]), events.append)
+    assert out.status == 'failed'
+    assert events[-1] == ('done', out)
+    assert [event for event in events if event[0] == 'done'] == [('done', out)]
+
+
+def test_runner_ignores_raising_event_callback(tiny):
+    def broken_emit(event):
+        raise RuntimeError('event sink closed')
+
+    assert run_bake(BakeRequest(tiny[0], 'level', 'room', tiny[1], True, tiny[2]), broken_emit).status == 'done'
+
+
+def test_runner_continues_when_follower_cannot_start(tiny, monkeypatch):
+    def fail_start(self):
+        raise RuntimeError('thread could not start')
+
+    monkeypatch.setattr(runner.BlenderLogFollower, 'start', fail_start)
+    assert run(tiny)[0].status == 'done'
 
 
 def test_runner_reports_write_failure(tiny, monkeypatch):
@@ -111,7 +184,6 @@ def test_runner_follows_blender_log(tiny, monkeypatch):
     real = pipeline.run_blender
 
     def write_log(path, s):
-        job = json.loads((path / 'job.json').read_text())
         (path / 'blender.log').write_text('[bake] device OPTIX\n[bake] page 0 (0, 0)\n')
         return real(path, s)
 
