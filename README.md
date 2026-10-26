@@ -1,6 +1,6 @@
 # OpenTool
 
-OpenTool is a set of command-line tools that rebuild parts of the Halo: Combat Evolved editing kit's `tool.exe` in Python, so each step can be read, tested and changed. It is a research and learning project: it changes often, and its results are checked against tool's own. Keep backups of any tags you point it at.
+OpenTool is a set of command-line tools that rebuild parts of the Halo: Combat Evolved editing kit's `tool.exe` in Python, so each step can be read, tested and changed. It is a research and learning project: it changes often, and its results are checked against tool's own.
 
 OpenTool is developed alongside [OpenCE](https://github.com/OpenCommunityEdition/OpenCE), the open-source port of Halo: Combat Evolved to Linux, Windows, Android and the web. Everything it writes today is ordinary tags in the stock format of the Halo: Combat Evolved Anniversary (H1A) editing kit in MCC, so the results also work in MCC and with the editing kit's own tools. Nothing in it needs OpenCE yet. Features that only OpenCE can use are planned for later and will sit behind a switch.
 
