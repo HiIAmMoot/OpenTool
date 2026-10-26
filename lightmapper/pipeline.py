@@ -16,7 +16,8 @@ from time import perf_counter
 
 import numpy as np
 
-from .blender_job import Scene, run_blender, write_job
+from . import gpu, vertex_gpu
+from .blender_job import Scene, run_blender, run_blender_vertex_only, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, read_geometry
@@ -34,6 +35,10 @@ from .textures import TextureSet, shader_texture
 
 MAX_BSP_SURFACES = 131072
 logger = logging.getLogger(__name__)
+
+
+class BakeError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -208,6 +213,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
+    choice = gpu.probe_choice(s.device)
+    logger.info('devices: %s', choice.summary())
+    warnings = list(choice.warnings)
+    for warning in warnings:
+        logger.warning('%s', warning)
+    vertex_device = 'cpu'
 
     def stage(name):
         nonlocal last
@@ -255,11 +266,31 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                                       s.scenery_emission)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
-              lighting.ambient, s, sources=sources, textures=textures.arrays())
+              lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
+              vertex_pass='skip' if choice.adapter else 'cpu')
     stage('scene')
     begin('blender')
     result = run_blender(work, s)
     stage('blender')
+    if choice.adapter:
+        begin('vertex')
+        if result.device == 'CPU':
+            warning = 'cycles fell back to the CPU'
+            logger.warning('%s', warning)
+            warnings.append(warning)
+        try:
+            vp = vertex_gpu.run_in_child(work, result.diffuse_pages, choice.adapter, s.timeout_s)
+        except (vertex_gpu.GpuPassError, gpu.DeviceError) as error:
+            if choice.required:
+                raise BakeError(f'{choice.vendor} vertex pass failed: {error}') from error
+            warning = f'GPU vertex pass failed ({error}); falling back to the CPU pass'
+            logger.warning('%s', warning)
+            warnings.append(warning)
+            vp = run_blender_vertex_only(work, s, result.diffuse_pages)
+        else:
+            vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
+        result = with_vertex_pass(result, vp)
+    stage('vertex_pass')
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, masks, class_maps, utilisation, clipped = [], [], [], [], []
@@ -314,5 +345,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
+        'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device},
+        'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))
     return BakeOutput(bsp_tag, bitmap_tag, float_pages, mapping, work)

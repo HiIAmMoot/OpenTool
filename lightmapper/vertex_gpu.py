@@ -6,9 +6,13 @@ The constants are copies (bake.py cannot be imported outside Blender); a test pa
 """
 
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
+import zipfile
 
 import numpy as np
 
@@ -381,3 +385,61 @@ def load_and_run(work, pages, adapter):
         return run_vertex_pass(scene, job, textures, pages, device)
     finally:
         device.close()
+
+
+def _child_command(work: Path, adapter) -> list[str]:
+    return [sys.executable, '-m', 'lightmapper.vertex_gpu', str(work), json.dumps(asdict(adapter))]
+
+
+def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -> VertexPassResult:
+    work = Path(work).resolve()
+    np.savez(work / 'diffuse.npz', **{f'diffuse_{i}': p for i, p in enumerate(pages)})
+    out = work / 'gpu_out.npz'
+    # a crashed child must not leave an earlier run looking successful
+    out.unlink(missing_ok=True)
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
+                                                   env.get('PYTHONPATH', '')]))
+    try:
+        done = subprocess.run(_child_command(work, adapter), cwd=work, env=env, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise GpuPassError(f'gather: timed out after {timeout} s') from None
+    except OSError as error:
+        raise GpuPassError(f'gather: process died (exit unavailable): {error}') from error
+    tail = '\n'.join(done.stderr.decode(errors='replace').splitlines()[-40:])
+    died = f'gather: process died (exit {done.returncode}): {tail}'
+    if done.returncode:
+        raise GpuPassError(died)
+    try:
+        with np.load(out, allow_pickle=False) as data:
+            result = VertexPassResult(np.array(data['vector'], np.float32), np.array(data['irradiance'], np.float32),
+                                      np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
+                                      int(data['rays']))
+        job = json.loads((work / 'job.json').read_text())
+        with np.load(work / job['scene'], allow_pickle=False) as data:
+            q = len(data['query_pos'])
+            edges = len(data['edge_pos']) if 'edge_pos' in data else 0
+        suns = len(job['suns'])
+        if (result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
+                or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)):
+            raise ValueError('short vertex arrays')
+        return result
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as error:
+        raise GpuPassError(f'{died}\n{error}') from error
+
+
+def _main():
+    from .gpu import Adapter
+    work = Path(sys.argv[1])
+    fields = json.loads(sys.argv[2])
+    fields['luid'] = tuple(fields['luid'])
+    with np.load(work / 'diffuse.npz') as data:
+        pages = [data[f'diffuse_{i}'] for i in range(len(data.files))]
+    result = load_and_run(work, pages, Adapter(**fields))
+    np.savez(work / 'gpu_out.npz', vector=result.vector, irradiance=result.irradiance,
+             sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays))
+
+
+if __name__ == '__main__':
+    _main()

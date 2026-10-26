@@ -5,7 +5,7 @@ scene.npz and textures.npz, run it, and read out.npz back. Nothing in here impor
 bpy. A failed run raises before the caller has written anything to a tag.
 """
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 import json
 from pathlib import Path
 import subprocess
@@ -14,6 +14,7 @@ import numpy as np
 
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
+from .vertex_gpu import VertexPassResult
 from . import frozen
 
 
@@ -71,20 +72,24 @@ class BlenderError(RuntimeError):
 @dataclass
 class BakeResult:
     pages: list
-    vertex_vector: np.ndarray
-    vertex_irradiance: np.ndarray
+    vertex_vector: np.ndarray | None
+    vertex_irradiance: np.ndarray | None
     device: str
     written: list
     # per query and job sun: the vertex pass lit it (None when the run predates the output)
     vertex_sun_lit: np.ndarray | None = None
     edge_sun_lit: np.ndarray | None = None
+    diffuse_pages: list | None = None
+    vertex_rays_cast: int | None = None
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
               s: Settings, sources: str = 'all', textures: list | None = None,
-              choice: DeviceChoice | None = None) -> Path:
+              choice: DeviceChoice | None = None, vertex_pass: str = 'cpu') -> Path:
     if sources not in SOURCES:
         raise ValueError(f'sources must be one of {SOURCES}, not {sources!r}')
+    if vertex_pass not in ('cpu', 'skip'):
+        raise ValueError(f'vertex_pass must be cpu or skip, not {vertex_pass!r}')
     if choice is None:
         choice = choose(s.device, None)
     work = Path(work)
@@ -144,6 +149,7 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'cycles_devices': list(choice.cycles),
         'cycles_required': choice.required,
         'hiprt': HIPRT,
+        'vertex_pass': vertex_pass,
     }
     path = work / 'job.json'
     path.write_text(json.dumps(job, indent=2))
@@ -156,15 +162,15 @@ def _log_tail(log: Path) -> str:
     return '\n'.join(log.read_text(errors='replace').splitlines()[-LOG_TAIL_LINES:])
 
 
-def run_blender(work: Path, s: Settings) -> BakeResult:
+def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
     work = Path(work)
-    job = json.loads((work / 'job.json').read_text())
+    job = json.loads((work / job_name).read_text())
     out = work / job['out']
     # a result left by an earlier run must not pass for this one's
     out.unlink(missing_ok=True)
-    log = work / 'blender.log'
+    log = work / log_name
     command = [s.blender, '-b', '--factory-startup', '--python-exit-code', '1',
-               '--python', str(BAKE_SCRIPT), '--', str(work / 'job.json')]
+               '--python', str(BAKE_SCRIPT), '--', str(work / job_name)]
     try:
         with open(log, 'wb') as handle:
             done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=handle,
@@ -178,11 +184,38 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
         raise BlenderError(f'blender exited with {done.returncode}\n{_log_tail(log)}')
     if not out.is_file():
         raise BlenderError(f'blender wrote no {out.name}\n{_log_tail(log)}')
+    return job, out
+
+
+def run_blender(work: Path, s: Settings) -> BakeResult:
+    job, out = _run_blender(work, s, 'job.json', 'blender.log')
 
     with np.load(out) as data:
         pages = [np.array(data[f'page_{i}'], np.float32) for i in range(len(job['pages']))]
-        return BakeResult(pages, np.array(data['vertex_vector'], np.float32),
-                          np.array(data['vertex_irradiance'], np.float32), str(data['device']),
+        return BakeResult(pages, np.array(data['vertex_vector'], np.float32) if 'vertex_vector' in data else None,
+                          np.array(data['vertex_irradiance'], np.float32) if 'vertex_irradiance' in data else None,
+                          str(data['device']),
                           [np.array(data[f'written_{i}'], np.bool_) for i in range(len(job['pages']))],
                           np.array(data['vertex_sun_lit'], np.bool_) if 'vertex_sun_lit' in data.files else None,
-                          np.array(data['edge_sun_lit'], np.bool_) if 'edge_sun_lit' in data.files else None)
+                          np.array(data['edge_sun_lit'], np.bool_) if 'edge_sun_lit' in data.files else None,
+                          [np.array(data[f'diffuse_{i}'], np.float32) for i in range(len(job['pages']))],
+                          int(data['vertex_rays_cast']))
+
+
+def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:
+    work = Path(work)
+    np.savez(work / 'diffuse.npz', **{f'diffuse_{i}': p for i, p in enumerate(pages)})
+    job = json.loads((work / 'job.json').read_text())
+    job.update(vertex_only=True, out='vertex_out.npz', diffuse='diffuse.npz')
+    (work / 'job_vertex.json').write_text(json.dumps(job, indent=2))
+    _, out = _run_blender(work, s, 'job_vertex.json', 'blender_vertex.log')
+    with np.load(out) as data:
+        return VertexPassResult(np.array(data['vertex_vector'], np.float32),
+                                np.array(data['vertex_irradiance'], np.float32),
+                                np.array(data['vertex_sun_lit'], bool),
+                                np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']))
+
+
+def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
+    return replace(result, vertex_vector=vp.vector, vertex_irradiance=vp.irradiance,
+                   vertex_sun_lit=vp.sun_lit, edge_sun_lit=vp.edge_sun_lit, vertex_rays_cast=vp.rays)

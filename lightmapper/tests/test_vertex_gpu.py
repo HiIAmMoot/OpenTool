@@ -4,6 +4,7 @@ Blender (vertex_driver.py)."""
 import ast
 import dataclasses
 import json
+import sys
 
 import numpy as np
 import pytest
@@ -413,3 +414,87 @@ def test_chunk_luminances_are_summed_in_float64(monkeypatch, tmp_path, vendor, d
     for got, want in seen:
         np.testing.assert_allclose(got[0], want[0], rtol=1e-13, atol=0)
         np.testing.assert_allclose(got[1], want[1], rtol=1e-13, atol=0)
+
+
+def test_a_dying_gpu_child_becomes_a_gpu_pass_error(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter:
+                        [sys.executable, '-c', 'import sys; print("driver fault", file=sys.stderr); sys.exit(3)'],
+                        raising=False)
+    with pytest.raises(GpuPassError, match=r'process died \(exit 3\):.*driver fault'):
+        vertex_gpu.run_in_child(tmp_path, [np.zeros((4, 4, 3), np.float32)], NV, 60)
+
+
+@pytest.mark.parametrize('code', [
+    'pass',
+    'from pathlib import Path; Path("gpu_out.npz").write_bytes(b"short")',
+    'import numpy as np; np.savez("gpu_out.npz", vector=np.zeros((1,3)))',
+])
+def test_missing_or_short_gpu_output_is_an_error(tmp_path, monkeypatch, code):
+    from test_pipeline import NV
+    monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code], raising=False)
+    with pytest.raises(GpuPassError, match=r'process died \(exit 0\)'):
+        vertex_gpu.run_in_child(tmp_path, [], NV, 60)
+
+
+def test_gpu_child_timeout_discards_stale_output(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    (tmp_path / 'gpu_out.npz').write_bytes(b'stale')
+    monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter:
+                        [sys.executable, '-c', 'import time; time.sleep(60)'], raising=False)
+    with pytest.raises(GpuPassError, match='gather: timed out'):
+        vertex_gpu.run_in_child(tmp_path, [], NV, .2)
+    assert not (tmp_path / 'gpu_out.npz').exists()
+
+
+def test_child_exchange_at_the_stock_query_limit(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    # 131072 independent triangles can supply three distinct queries each
+    q = 393216
+    np.savez(tmp_path / 'scene.npz', query_pos=np.zeros((q, 3), np.float32), edge_pos=np.zeros((0, 3)))
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}, {}]}))
+    code = ('import numpy as np; '
+            f'q={q}; '
+            'np.savez("gpu_out.npz", vector=np.full((q,3),.25,np.float32), '
+            'irradiance=np.ones(q,np.float32), sun_lit=np.ones((q,2),bool), '
+            'edge_sun_lit=np.zeros((0,2),bool), rays=np.int64(q*4096))')
+    monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code], raising=False)
+    result = vertex_gpu.run_in_child(tmp_path, [RAMP], NV, 60)
+    assert result.vector.shape == (393216, 3) and result.rays == 1610612736
+    np.testing.assert_array_equal(result.vector, .25)
+    with np.load(tmp_path / 'diffuse.npz') as data:
+        np.testing.assert_array_equal(data['diffuse_0'], RAMP)
+
+
+@pytest.mark.blender
+def test_bake_with_the_gpu_pass_matches_the_cpu_pass(tmp_path, vendor):
+    from lightmapper.blender_job import run_blender
+    room = textured_room()
+    scene = dataclasses.replace(build(room['receivers'], room['occluders']),
+        query_pos=np.float32(room['query']), query_normal=np.float32(room['normals']),
+        query_class=np.zeros(64, np.int16))
+    s = dataclasses.replace(S, samples=8, vertex_rays=256)
+    write_job(tmp_path, scene, [(16, 16), (32, 8)], room['suns'], room['ambient'], s,
+              textures=room['textures'])
+    first = run_blender(tmp_path, s)
+    result = vertex_gpu.run_in_child(tmp_path, first.diffuse_pages, adapter_for(vendor), 120)
+    rel = np.abs(result.irradiance - first.vertex_irradiance) / np.maximum(first.vertex_irradiance, 1e-6)
+    assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
+    assert result.rays == first.vertex_rays_cast
+    np.testing.assert_array_equal(result.sun_lit, first.vertex_sun_lit)
+    direct = load_and_run(tmp_path, first.diffuse_pages, adapter_for(vendor))
+    np.testing.assert_array_equal(result.edge_sun_lit, direct.edge_sun_lit)
+
+
+def test_consistently_short_gpu_arrays_are_refused(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    write_bare_scene(tmp_path)
+    with np.load(tmp_path / 'scene.npz') as data:
+        edges = len(data['edge_pos'])
+    # complete keys and internally consistent shapes, but the job has one query, not zero
+    code = ('import numpy as np; np.savez("gpu_out.npz", vector=np.zeros((0,3),np.float32), '
+            'irradiance=np.zeros(0,np.float32), sun_lit=np.zeros((0,1),bool), '
+            f'edge_sun_lit=np.zeros(({edges},1),bool), rays=np.int64(0))')
+    monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code])
+    with pytest.raises(GpuPassError, match='process died'):
+        vertex_gpu.run_in_child(tmp_path, [], NV, 60)

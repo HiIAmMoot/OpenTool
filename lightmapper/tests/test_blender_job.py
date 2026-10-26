@@ -99,7 +99,7 @@ def test_write_job_files_load_back(tmp_path):
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
-        'cycles_devices', 'cycles_required', 'hiprt'])
+        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -278,3 +278,31 @@ def test_job_uses_the_supplied_choice(tmp_path):
     job = json.loads((tmp_path / 'job.json').read_text())
     assert (job['device'], job['cycles_devices'], job['cycles_required'], job['hiprt']) == (
         'amd', ['HIP'], True, False)
+
+
+@pytest.mark.blender
+def test_vertex_only_relaunch_equals_the_in_blender_pass(tmp_path):
+    from conftest import LIGHTMAPPER_BLENDER
+    from lightmapper import blender_job
+    s = Settings(samples=4, vertex_rays=16, blender=str(LIGHTMAPPER_BLENDER))
+    write_job(tmp_path, make_scene(), [(8, 8)], make_suns(), AMBIENT, s, textures=[TEXTURE])
+    first = run_blender(tmp_path, s)
+    relaunch = blender_job.run_blender_vertex_only(tmp_path, s, first.diffuse_pages)
+    np.testing.assert_array_equal(relaunch.vector, first.vertex_vector)
+    np.testing.assert_array_equal(relaunch.irradiance, first.vertex_irradiance)
+    np.testing.assert_array_equal(relaunch.sun_lit, first.vertex_sun_lit)
+    np.testing.assert_array_equal(relaunch.edge_sun_lit, first.edge_sun_lit)
+    assert relaunch.rays == first.vertex_rays_cast and relaunch.rays > 0
+    log = (tmp_path / 'blender_vertex.log').read_text()
+    assert 'page 0' not in log and 'device ' not in log
+
+
+@pytest.mark.blender
+def test_skip_returns_diffuse_pages_and_no_vector(tmp_path):
+    s = Settings(samples=4, vertex_rays=16)
+    write_job(tmp_path, make_scene(), [(8, 8)], make_suns(), AMBIENT, s, textures=[TEXTURE], vertex_pass='skip')
+    result = run_blender(tmp_path, s)
+    assert result.vertex_vector is None and result.vertex_irradiance is None
+    assert len(result.diffuse_pages) == 1 and result.vertex_rays_cast == 0
+    assert result.pages[0].mean() >= result.diffuse_pages[0].mean()
+    assert 'vertex pass:' not in (tmp_path / 'blender.log').read_text()

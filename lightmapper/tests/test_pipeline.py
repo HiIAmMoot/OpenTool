@@ -14,6 +14,12 @@ from lightmapper.formats.vertices import ENV, LM, compress, pack_uncompressed, u
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
 from lightmapper.validate import validate_bsp
+from lightmapper import gpu, vertex_gpu, blender_job
+from test_blender_job import fake
+
+
+NV = gpu.Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', gpu.NVIDIA, (1,), 'vulkan', True)
+GPU_CHOICE = gpu.choose('auto', [NV])
 
 
 def child(parent, name):
@@ -104,6 +110,156 @@ def test_pipeline_outputs(tiny):
     assert summary['settings']['respect_normal_seams'] is True
     assert summary['settings']['texel_samples'] is None
     assert summary['texel_samples'] == settings.resolved_texel_samples()
+
+
+@pytest.fixture
+def gpu_bake(tiny, fake, monkeypatch):
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: GPU_CHOICE)
+    return tags, replace(settings, blender=fake), work
+
+
+def test_gpu_choice_skips_the_blender_vertex_pass(gpu_bake, monkeypatch):
+    from test_blender_job import page
+    from test_blender_bake import sun
+    tags, settings, work = gpu_bake
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    material = bsp.root.block('lightmaps')[0].block('materials')[0]
+    env, lm = unpack_uncompressed(material.data('uncompressed_vertices'), 6, 6)
+    # a shared fold gives the real boundary builder non-empty edge probes
+    env['position'] = [[0, 0, 0], [4, 0, 0], [0, 4, 0], [0, 0, 0], [0, 4, 0], [0, 4, 4]]
+    material.set_data('uncompressed_vertices', pack_uncompressed(env, lm))
+    material.set_data('compressed_vertices', compress(env, lm))
+    put(tags, 'sbsp', 'room', bsp)
+    lighting = api().gather_lighting
+    monkeypatch.setattr(api(), 'gather_lighting', lambda *args:
+                        replace(lighting(*args), suns=[sun((.8, 0, .6), classes=(-1,))]))
+    seen_pages, terms, boundaries = [], [], []
+    expected = []
+    real_prepare, real_term = api().prepare_boundaries, api().sun_term
+
+    def run(work, pages, adapter, timeout):
+        assert adapter == NV and timeout == settings.timeout_s
+        seen_pages.extend(pages)
+        with np.load(work / 'scene.npz') as scene:
+            q, e = len(scene['query_pos']), len(scene['edge_pos'])
+        assert q >= 3 and e >= 3, 'both masks need a non-empty every-third-query pattern'
+        vp = vertex_gpu.VertexPassResult(np.full((q, 3), .25, np.float32), np.ones(q, np.float32),
+            (np.arange(q) % 3 == 0)[:, None], (np.arange(e) % 3 == 0)[:, None], 12345)
+        expected.append(vp)
+        return vp
+
+    def prepare(*args):
+        boundaries.append(args[3])
+        return real_prepare(*args)
+
+    def term(*args, **kwargs):
+        terms.append((args[2], kwargs['edge_sun_lit']))
+        return real_term(*args, **kwargs)
+
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', run, raising=False)
+    monkeypatch.setattr(api(), 'prepare_boundaries', prepare)
+    monkeypatch.setattr(api(), 'sun_term', term)
+    out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    job = json.loads((work / 'job.json').read_text())
+    summary = json.loads((work / 'summary.json').read_text())
+    assert job['vertex_pass'] == 'skip'
+    assert job['cycles_devices'] == ['OPTIX', 'CUDA']
+    assert summary['devices']['vertex_pass'] == 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)'
+    assert summary['vertex_rays_cast'] == 12345
+    assert 'vertex_pass' in summary['seconds'] and 'blender' in summary['seconds']
+    assert len(seen_pages) == len(job['pages'])
+    for i, (w, h) in enumerate(job['pages']):
+        np.testing.assert_array_equal(seen_pages[i], page(i, w, h))
+    assert terms and len(boundaries) == 1
+    for lit, edge in terms:
+        np.testing.assert_array_equal(lit, expected[0].sun_lit)
+        np.testing.assert_array_equal(edge, expected[0].edge_sun_lit)
+    for p in out.bsp_tag.root.block('lightmaps')[:-1]:
+        for m in p.block('materials'):
+            _, lm = unpack_uncompressed(m.data('uncompressed_vertices'),
+                m.get('rendered_vertices.vertex_count'), m.get('lightmap_vertices.vertex_count'))
+            np.testing.assert_array_equal(lm['incident_radiosity'], .25)
+
+
+@pytest.mark.parametrize('error_type', [vertex_gpu.GpuPassError, gpu.DeviceError])
+def test_auto_gpu_failure_falls_back_to_the_cpu_pass_with_a_warning(gpu_bake, monkeypatch, caplog, error_type):
+    tags, settings, work = gpu_bake
+
+    def fail(*args):
+        raise error_type('gather: device lost')
+
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', fail, raising=False)
+    out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert 'falling back to the CPU pass' in caplog.text
+    assert any('device lost' in w for w in summary['warnings'])
+    assert summary['devices']['vertex_pass'] == 'cpu'
+    assert (out.work / 'job_vertex.json').is_file()
+    with np.load(work / 'scene.npz') as scene:
+        expected = scene['query_pos'][:, [1, 2, 0]] * 2
+    with np.load(work / 'vertex_out.npz') as data:
+        np.testing.assert_array_equal(data['vertex_vector'], expected)
+
+
+def test_named_vendor_gpu_failure_fails_before_any_tag_write(gpu_bake, monkeypatch):
+    tags, settings, work = gpu_bake
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose('nvidia', [NV]))
+    before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
+
+    def fail(*args):
+        raise vertex_gpu.GpuPassError('gather: device lost')
+
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', fail, raising=False)
+    with pytest.raises(api().BakeError, match='nvidia vertex pass failed'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work)
+    assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
+    assert not (work / 'job_vertex.json').exists()
+
+
+def test_cpu_device_runs_todays_pass_in_blender(gpu_bake, monkeypatch):
+    tags, settings, work = gpu_bake
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', lambda *a: pytest.fail('GPU called for CPU'), raising=False)
+    api().bake(tags, 'level', 'room', replace(settings, device='cpu'), work=work, dry_run=True)
+    job = json.loads((work / 'job.json').read_text())
+    summary = json.loads((work / 'summary.json').read_text())
+    assert job['vertex_pass'] == 'cpu' and job['cycles_devices'] == []
+    assert summary['devices']['vertex_pass'] == 'cpu' and summary['warnings'] == []
+
+
+def test_device_probe_failure_precedes_charting_and_tag_writes(tiny, monkeypatch):
+    tags, settings, work = tiny
+
+    def fail(setting):
+        raise gpu.DeviceError('nvidia: unavailable')
+
+    monkeypatch.setattr(gpu, 'probe_choice', fail)
+    monkeypatch.setattr(api(), 'chart_and_pack', lambda *a: pytest.fail('charted before probe'))
+    with pytest.raises(gpu.DeviceError, match='unavailable'):
+        api().bake(tags, 'level', 'room', settings, work=work)
+
+
+def test_cycles_cpu_fallback_is_reported(gpu_bake, monkeypatch, caplog):
+    tags, settings, work = gpu_bake
+    real = api().run_blender
+
+    def cpu(*args):
+        return replace(real(*args), device='CPU')
+
+    def run(work, pages, adapter, timeout):
+        with np.load(work / 'scene.npz') as scene:
+            q, e = len(scene['query_pos']), len(scene['edge_pos'])
+        return vertex_gpu.VertexPassResult(np.zeros((q, 3)), np.ones(q), np.zeros((q, 0), bool),
+                                            np.zeros((e, 0), bool), 1)
+
+    monkeypatch.setattr(api(), 'run_blender', cpu)
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', run, raising=False)
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert 'cycles fell back to the CPU' in caplog.text
+    assert 'cycles fell back to the CPU' in summary['warnings']
 
 
 def test_pipeline_stitches_before_quantisation(tiny, monkeypatch):

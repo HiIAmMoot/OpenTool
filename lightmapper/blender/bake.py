@@ -3,8 +3,8 @@
 This script imports Blender's Python API and needs a GPL-compatible license. It exchanges data with the
 pipeline through job.json, scene.npz, textures.npz and out.npz. The page bakes are Cycles diffuse + emission
 passes into one float image per page; rows come back in our convention (row 0 = v 0). The per-vertex pass
-then runs on the CPU over the raw float pages: Blender's BVH tree casts the rays and numpy shades the hits
-in batches.
+runs here only on the CPU path or a vertex-only relaunch: Blender's BVH tree casts the rays and numpy
+shades the hits in batches.
 """
 
 import json
@@ -797,31 +797,39 @@ def main():
     with open(job_path) as handle:
         job = json.load(handle)
     started = time.perf_counter()
-    scene, device = setup_scene(job)
-    log(f'device {device}')
     with np.load(os.path.join(root, job['scene'])) as data:
         scene_data = {key: data[key] for key in data.files}
-    textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
-                                                     job['texel_samples'] > 0)
-    receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images)
-    add_suns(job, receivers, occluders)
-    out = {}
-    diffuse_pages = {}
-    for i, (w, h) in enumerate(job['pages']):
+    out = {'vertex_rays_cast': np.int64(0)}
+    if job.get('vertex_only'):
+        with np.load(os.path.join(root, job['diffuse'])) as data:
+            diffuse_pages = [data[f'diffuse_{i}'] for i in range(len(job['pages']))]
+    else:
+        scene, device = setup_scene(job)
+        log(f'device {device}')
+        textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
+                                                        job['texel_samples'] > 0)
+        receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images)
+        add_suns(job, receivers, occluders)
+        diffuse_pages = []
+        for i, (w, h) in enumerate(job['pages']):
+            began = time.perf_counter()
+            out[f'page_{i}'], diffuse, out[f'written_{i}'] = bake_page(i, receivers, page_images[i], h, w, job,
+                                                                   mask_images[i] if mask_images else None)
+            diffuse_pages.append(diffuse)
+            out[f'diffuse_{i}'] = diffuse
+            log(f'page {i} ({w}x{h}) baked in {time.perf_counter() - began:.2f} s')
+        out['device'] = np.array(device)
+    if job.get('vertex_only') or job.get('vertex_pass', 'cpu') == 'cpu':
+        with np.load(os.path.join(root, 'textures.npz')) as data:
+            raw_textures = [data[f'tex_{k}'] for k in range(len(data.files))]
         began = time.perf_counter()
-        out[f'page_{i}'], diffuse_pages[i], out[f'written_{i}'] = bake_page(i, receivers, page_images[i], h, w, job,
-                                                                            mask_images[i] if mask_images else None)
-        log(f'page {i} ({w}x{h}) baked in {time.perf_counter() - began:.2f} s')
-    with np.load(os.path.join(root, 'textures.npz')) as data:
-        raw_textures = [data[f'tex_{k}'] for k in range(len(data.files))]
-    began = time.perf_counter()
-    vertex_pass = VertexPass(scene_data, job, raw_textures, [diffuse_pages[i] for i in range(len(job['pages']))])
-    out['vertex_vector'], out['vertex_irradiance'], rays = vertex_pass.run()
-    out['vertex_sun_lit'] = vertex_pass.sun_lit
-    out['edge_sun_lit'] = vertex_pass.edge_sun_lit
-    elapsed = time.perf_counter() - began
-    log(f'vertex pass: {len(out["vertex_vector"])} queries, {rays} rays in {elapsed:.2f} s ({rays / max(elapsed, 1e-9):.0f} rays/s)')
-    out['device'] = np.array(device)
+        vertex_pass = VertexPass(scene_data, job, raw_textures, diffuse_pages)
+        out['vertex_vector'], out['vertex_irradiance'], rays = vertex_pass.run()
+        out['vertex_sun_lit'] = vertex_pass.sun_lit
+        out['edge_sun_lit'] = vertex_pass.edge_sun_lit
+        out['vertex_rays_cast'] = np.int64(rays)
+        elapsed = time.perf_counter() - began
+        log(f'vertex pass: {len(out["vertex_vector"])} queries, {rays} rays in {elapsed:.2f} s ({rays / max(elapsed, 1e-9):.0f} rays/s)')
     np.savez(os.path.join(root, job['out']), **out)
     log(f'done in {time.perf_counter() - started:.2f} s')
 

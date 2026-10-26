@@ -26,12 +26,23 @@ def main():
     with np.load(job_path.with_name(job['scene'])) as scene:
         query_pos = scene['query_pos']
         query_class = scene['query_class']
-    arrays = {f'page_{i}': page(i, w, h) for i, (w, h) in enumerate(job['pages'])}
-    for i, (w, h) in enumerate(job['pages']):
-        arrays[f'written_{i}'] = np.ones((h, w), bool)
-        arrays[f'written_{i}'][0, i] = False
-    arrays['vertex_vector'] = query_pos[:, [1, 2, 0]] * 2
-    arrays['vertex_irradiance'] = (query_pos.sum(axis=1) + query_class).astype(np.float32)
+        edges = len(scene['edge_pos'])
+    arrays = {'vertex_rays_cast': np.int64(0)}
+    if not job.get('vertex_only'):
+        for i, (w, h) in enumerate(job['pages']):
+            arrays[f'page_{i}'] = page(i, w, h)
+            arrays[f'diffuse_{i}'] = page(i, w, h)
+            arrays[f'written_{i}'] = np.ones((h, w), bool)
+            arrays[f'written_{i}'][0, i] = False
+    else:
+        with np.load(job_path.with_name(job['diffuse'])) as data:
+            assert len(data.files) == len(job['pages'])
+    if job.get('vertex_only') or job.get('vertex_pass', 'cpu') == 'cpu':
+        arrays['vertex_vector'] = query_pos[:, [1, 2, 0]] * 2
+        arrays['vertex_irradiance'] = (query_pos.sum(axis=1) + query_class).astype(np.float32)
+        arrays['vertex_sun_lit'] = np.zeros((len(query_pos), len(job['suns'])), bool)
+        arrays['edge_sun_lit'] = np.zeros((edges, len(job['suns'])), bool)
+        arrays['vertex_rays_cast'] = np.int64(len(query_pos) * job['vertex_rays'])
     arrays['device'] = np.array(('+'.join(job['cycles_devices']) or 'CPU') + '-FAKE')
     np.savez(job_path.with_name(job['out']), **arrays)
     if mode == 'fail':
