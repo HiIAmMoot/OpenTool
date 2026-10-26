@@ -66,10 +66,12 @@ The arguments are the scenario and then the name of the BSP inside it. `--out-bs
 ### 2. Bake
 
 ```powershell
-python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch_ot bloodgulch_ot --work bake\bloodgulch
+python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch_ot bloodgulch_ot --work bake\bloodgulch -v
 ```
 
 The bake reads the scenario and the BSP, lights the level, and writes the new BSP and lightmap bitmap back into the tags folder. It writes only after every stage has finished. Before it replaces a tag, it saves the old file next to it as `<name>.lm-backup-<date>-<time>`. Those backups stay until you delete them.
+
+Add `-v` to see progress lines.
 
 `--work` is a folder for the bake's files. It ends up holding the Blender job (`job.json`, `scene.npz`, `textures.npz`), the chart layout (`charts.npz`), Blender's log (`blender.log`), the raw and finished pages (`out.npz`, `float_pages.npz`), the surface mapping `diff` needs (`new_to_input.npy`), and `summary.json` with the settings, page sizes and timings. Without `--work`, each bake gets a new folder in your temp directory.
 

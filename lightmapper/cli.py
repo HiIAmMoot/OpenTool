@@ -28,12 +28,14 @@ def _blender_fallback(s):
     return s
 
 
-def main(argv=None) -> int:
+def _parser():
     parser = argparse.ArgumentParser(description='Bake stock H1A lightmaps with Blender Cycles')
     commands = parser.add_subparsers(dest='command', required=True)
-    commands.add_parser('check')
+    check = commands.add_parser('check')
+    check.add_argument('-v', '--verbose', action='store_true')
     for name in ('bake', 'copy', 'validate', 'diff', 'calibrate'):
         command = commands.add_parser(name)
+        command.add_argument('-v', '--verbose', action='store_true')
         command.add_argument('--tags', type=Path, default=os.environ.get('HCEEK_TAGS') or None)
         if name == 'validate':
             command.add_argument('bsp')
@@ -58,6 +60,11 @@ def main(argv=None) -> int:
             command.add_argument('--charts', type=Path)
             command.add_argument('--sources', choices=('all', 'sun', 'emit'), default='all')
             command.add_argument('--dry-run', action='store_true')
+    return parser
+
+
+def main(argv=None) -> int:
+    parser = _parser()
     args = parser.parse_args(argv)
     if args.command == 'check':
         from .check import run_checks
@@ -67,7 +74,7 @@ def main(argv=None) -> int:
         return int(not all(ok for _, ok, _ in results))
     if args.tags is None:
         parser.error('pass --tags with the editing-kit tags folder, or set HCEEK_TAGS')
-    logging.basicConfig(level=logging.INFO, format='%(levelname)s: %(message)s')
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format='%(levelname)s: %(message)s')
     if args.command == 'copy':
         copy_tags(args.tags, args.scenario, args.bsp, args.out_bsp, args.out_scenario)
         return 0
