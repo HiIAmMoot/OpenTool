@@ -1,6 +1,7 @@
 """Command-line entry points for baking, isolated tag copies, validation, differential and calibration."""
 
 import argparse
+from dataclasses import replace
 import logging
 import os
 from pathlib import Path
@@ -8,14 +9,23 @@ from pathlib import Path
 import numpy as np
 
 from .calibrate import calibrate
+from .blender_find import find_blender
 from .diff import load_pages, paired_samples, bitmap_pages, render_markdown, report
 from .pipeline import bake, copy_tags
+from . import settings as settings_module
 from .settings import load_settings
 from .tagio.tagfile import read_tag, resolve_reference_path
 from .validate import validate_bsp
 
 
 logger = logging.getLogger(__name__)
+
+
+def _blender_fallback(s):
+    if (not os.environ.get('LIGHTMAPPER_BLENDER') and s.blender == settings_module.DEFAULT_BLENDER
+            and not Path(s.blender).is_file()):
+        return replace(s, blender=str(find_blender().path))
+    return s
 
 
 def main(argv=None) -> int:
@@ -55,12 +65,12 @@ def main(argv=None) -> int:
         copy_tags(args.tags, args.scenario, args.bsp, args.out_bsp, args.out_scenario)
         return 0
     if args.command == 'bake':
-        result = bake(args.tags, args.scenario, args.bsp, load_settings(args.settings),
+        result = bake(args.tags, args.scenario, args.bsp, _blender_fallback(load_settings(args.settings)),
                       args.out_bsp, args.out_scenario, args.work, args.sources, args.charts, args.dry_run)
         print(f'Work: {result.work}')
         return 0
     if args.command == 'calibrate':
-        data = calibrate(args.tags, args.scenario, args.bsp, args.work, load_settings(args.settings))
+        data = calibrate(args.tags, args.scenario, args.bsp, args.work, _blender_fallback(load_settings(args.settings)))
         print((args.work / 'calibration.md').read_text())
         if not all(data['acceptance'].values()):
             print(f'acceptance failed: the fit is in {args.work / "calibration.json"}')

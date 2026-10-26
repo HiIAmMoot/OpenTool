@@ -14,6 +14,7 @@ from .charts import ChartSettings
 
 
 CALIBRATION_PATH = Path(__file__).with_name('calibration.json')
+DEFAULT_BLENDER = r'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
 RADIOSITY_MODES = ('coherence', 'scaled')
 
 
@@ -52,8 +53,7 @@ class Settings(ChartSettings):
     # its radiosity refines to near a shadow edge (non-emissive, detail level 0)
     reach: float = 0.225
     device: str = 'OPTIX'
-    blender: str = field(default_factory=lambda: os.environ.get(
-        'LIGHTMAPPER_BLENDER', r'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'))
+    blender: str = field(default_factory=lambda: os.environ.get('LIGHTMAPPER_BLENDER', DEFAULT_BLENDER))
     timeout_s: int = 7200
     w_sun: float = _calibrated('w_sun')
     w_emit: float = _calibrated('w_emit')
