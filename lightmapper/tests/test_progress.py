@@ -66,3 +66,20 @@ def test_follower_delivers_complete_lines_only(tmp_path):
     follower.stop()
     follower.join(2)
     assert got == ['[bake] device OPTIX', '[bake] page 0 (8x8) baked in 1 s']
+
+
+def test_follower_restarts_after_log_truncation(tmp_path):
+    from lightmapper.progress import BlenderLogFollower
+    log = tmp_path / 'blender.log'
+    got = []
+    follower = BlenderLogFollower(log, got.append, interval=.01)
+    follower.start()
+    log.write_bytes(b'one\ntwo\nthree\n')
+    wait_until(lambda: got == ['one', 'two', 'three'])
+    log.write_bytes(b'new run\n')
+    try:
+        wait_until(lambda: got == ['one', 'two', 'three', 'new run'])
+    finally:
+        follower.stop()
+        follower.join(2)
+    assert got == ['one', 'two', 'three', 'new run']

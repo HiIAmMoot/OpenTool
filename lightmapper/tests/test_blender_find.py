@@ -1,5 +1,7 @@
 import os
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -41,6 +43,65 @@ def test_version_of_missing_file_is_none(tmp_path, modules):
 
 def test_version_of_garbage_is_none(fake_cmd_text, modules):
     assert modules[0].blender_version(fake_cmd_text('hello')) is None
+
+
+def test_version_with_undecodable_output_is_parsed(tmp_path, monkeypatch, modules):
+    finder = modules[0]
+    path = tmp_path / 'odd-output.cmd'
+    script = tmp_path / 'emit.py'
+    script.write_text("import sys\nsys.stdout.buffer.write(b'\\xff\\nBlender 5.2.2\\n')\n")
+    path.write_text(f'@echo off\r\n@"{sys.executable}" "{script}"\r\n')
+    run = finder.subprocess.run
+    def utf8_run(*args, **kwargs):
+        errors = kwargs.pop('errors', 'strict')
+        kwargs.pop('encoding', None)
+        kwargs.pop('text', None)
+        result = run(*args, text=False, **kwargs)
+        assert b'\xff' in result.stdout
+        result.stdout = result.stdout.decode('utf-8', errors=errors)
+        return result
+    monkeypatch.setattr(finder.subprocess, 'run', utf8_run)
+    assert finder.blender_version(path) == (5, 2)
+
+
+def test_registry_continues_after_hive_without_uninstall_key(monkeypatch, tmp_path, modules):
+    finder = modules[0]
+    install = tmp_path / 'Blender 5.2'
+    install.mkdir()
+    path = install / 'blender.exe'
+    path.touch()
+
+    class Key:
+        def __init__(self, kind):
+            self.kind = kind
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+
+    winreg = SimpleNamespace(HKEY_LOCAL_MACHINE=1, HKEY_CURRENT_USER=2)
+    def open_key(key, subkey):
+        if key == winreg.HKEY_LOCAL_MACHINE and subkey == finder._UNINSTALL:
+            raise FileNotFoundError(subkey)
+        if isinstance(key, Key) and key.kind == 'hive' and subkey == 'Blender 5.2':
+            return Key('install')
+        if key == winreg.HKEY_CURRENT_USER and subkey == finder._UNINSTALL:
+            return Key('hive')
+        if key == winreg.HKEY_LOCAL_MACHINE and 'WOW6432Node' in subkey:
+            return Key('empty')
+        raise FileNotFoundError(str(subkey))
+    def query_info(key):
+        return (1 if key.kind == 'hive' else 0, 0, 0)
+    def enum_key(key, index):
+        return 'Blender 5.2'
+    def query_value(key, name):
+        return {'DisplayName': 'Blender 5.2', 'InstallLocation': str(install)}[name], 1
+    winreg.OpenKey = open_key
+    winreg.QueryInfoKey = query_info
+    winreg.EnumKey = enum_key
+    winreg.QueryValueEx = query_value
+    monkeypatch.setitem(sys.modules, 'winreg', winreg)
+    assert path in finder.registry_installs()
 
 
 def test_newest_install_wins(monkeypatch, tmp_path, fake_cmd, modules):

@@ -70,6 +70,9 @@ class BlenderLogFollower(threading.Thread):
 
     def _read(self, offset: int, pending: bytes) -> tuple[int, bytes]:
         try:
+            if self.log.stat().st_size < offset:
+                offset = 0
+                pending = b''
             with self.log.open('rb') as handle:
                 handle.seek(offset)
                 data = handle.read()

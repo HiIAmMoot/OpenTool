@@ -25,8 +25,8 @@ class BlenderNotFound(Exception):
 def blender_version(exe: Path, timeout: float = 60) -> tuple[int, int] | None:
     try:
         result = subprocess.run([str(exe), '--version'], capture_output=True, stdin=subprocess.DEVNULL,
-                                creationflags=NO_WINDOW, timeout=timeout, text=True)
-    except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+                                creationflags=NO_WINDOW, timeout=timeout, encoding='utf-8', errors='replace')
+    except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.search(r'^Blender (\d+)\.(\d+)', result.stdout, re.MULTILINE)
     return (int(match.group(1)), int(match.group(2))) if match else None
@@ -42,16 +42,20 @@ def registry_installs() -> list[Path]:
                      (winreg.HKEY_LOCAL_MACHINE, r'SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall'),
                      (winreg.HKEY_CURRENT_USER, _UNINSTALL))
         for hive, key_path in locations:
-            with winreg.OpenKey(hive, key_path) as key:
-                for index in range(winreg.QueryInfoKey(key)[0]):
-                    try:
-                        with winreg.OpenKey(key, winreg.EnumKey(key, index)) as install:
-                            display, _ = winreg.QueryValueEx(install, 'DisplayName')
-                            location, _ = winreg.QueryValueEx(install, 'InstallLocation')
-                        if str(display).lower().startswith('blender') and location:
-                            paths.append(Path(location) / 'blender.exe')
-                    except OSError:
-                        continue
+            try:
+                with winreg.OpenKey(hive, key_path) as key:
+                    for index in range(winreg.QueryInfoKey(key)[0]):
+                        try:
+                            with winreg.OpenKey(key, winreg.EnumKey(key, index)) as install:
+                                display, _ = winreg.QueryValueEx(install, 'DisplayName')
+                                location, _ = winreg.QueryValueEx(install, 'InstallLocation')
+                            # installers write both 'blender' and 'Blender'; this machine has both.
+                            if str(display).lower().startswith('blender') and location:
+                                paths.append(Path(location) / 'blender.exe')
+                        except OSError:
+                            continue
+            except OSError:
+                continue
         return paths
     except OSError:
         return []
