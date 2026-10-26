@@ -34,7 +34,7 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 | `reach` | 0.225 | On faces turned away from the sun, how far in world units the sun's light reaches in from the lit corners. Tool's value. |
 | `albedo_scale` | 1.0 | Multiplier on texture colour for bounced light. |
 | `albedo_fallback` | 0.5 | Grey used as the bounce colour when a shader has no readable base map. |
-| `device` | "OPTIX" | `OPTIX` tries OptiX, then CUDA, then CPU. `CUDA` skips OptiX. `CPU` forces CPU baking; unrecognised values also use CPU. |
+| `device` | "OPTIX" | `OPTIX` tries OptiX, then CUDA, HIP (AMD), oneAPI (Intel), then CPU. `CUDA` starts at CUDA. `CPU` forces CPU baking; unrecognised values also use CPU. |
 | `blender` | `LIGHTMAPPER_BLENDER` if set, otherwise Blender 5.2's standard install path | Path to `blender.exe`. A JSON setting overrides the environment default. The standard path is `C:\Program Files\Blender Foundation\Blender 5.2\blender.exe`. |
 | `timeout_s` | 7200 | Timeout in seconds for Blender and separately for each OIDN denoise process. This is not a total bake deadline. |
 

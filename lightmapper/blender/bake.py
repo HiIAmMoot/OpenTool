@@ -19,7 +19,7 @@ from mathutils.bvhtree import BVHTree
 import numpy as np
 
 
-DEVICE_TYPES = ('OPTIX', 'CUDA')
+DEVICE_TYPES = ('OPTIX', 'CUDA', 'HIP', 'ONEAPI')
 UV_LIGHTMAP = 'lightmap'
 UV_TEXTURE = 'texture'
 RAY_LENGTH = 1e5
