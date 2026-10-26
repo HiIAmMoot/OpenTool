@@ -28,14 +28,19 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
-               normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None):
+               normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query),
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
     pages = pages or [np.zeros((16, 16, 3), np.float32)]
-    settings = dataclasses.replace(S, vertex_rays=rays)
+    settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed)
     write_job(tmp_path, scene, [(p.shape[1], p.shape[0]) for p in pages], list(suns), ambient or {}, settings,
               'all', textures=textures)
+    if seed is None:
+        job_path = tmp_path / 'job.json'
+        job = json.loads(job_path.read_text())
+        del job['seed']
+        job_path.write_text(json.dumps(job, indent=2))
     np.savez(tmp_path / 'pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
     if probes is not None:
         (tmp_path / 'probe.json').write_text(json.dumps(probes))
@@ -45,6 +50,23 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                           stdin=subprocess.DEVNULL)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
     return np.load(tmp_path / ('probe.npz' if probes is not None else 'vp.npz'))
+
+
+@pytest.mark.blender
+def test_seed_zero_is_todays_pass(tmp_path):
+    scene = [full_quad(), wall_facing_minus_x(emission=(4, 4, 4))]
+    a = run_driver(tmp_path / 'a', scene, query=((1, 2, 0),))
+    b = run_driver(tmp_path / 'b', scene, query=((1, 2, 0),), seed=None)
+    assert np.array_equal(a['vector'], b['vector']) and np.array_equal(a['irradiance'], b['irradiance'])
+
+
+@pytest.mark.blender
+def test_another_seed_turns_the_rays_but_keeps_the_estimate(tmp_path):
+    scene = [full_quad(), wall_facing_minus_x(emission=(4, 4, 4))]
+    s0 = run_driver(tmp_path / 's0', scene, query=((1, 2, 0),), rays=1024, seed=0)
+    s1 = run_driver(tmp_path / 's1', scene, query=((1, 2, 0),), rays=1024, seed=1)
+    assert not np.array_equal(s0['vector'], s1['vector'])
+    assert s1['irradiance'][0] == pytest.approx(s0['irradiance'][0], rel=0.05)
 
 
 @pytest.mark.blender

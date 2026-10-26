@@ -113,6 +113,14 @@ def test_emit_only_pane_back_face_transmits_the_light_behind_it(tmp_path):
     np.testing.assert_allclose(screened[2:-2, 2:-2].mean(), bare[2:-2, 2:-2].mean(), rtol=0.05)
 
 
+@pytest.mark.blender
+def test_seed_sets_the_cycles_seed(tmp_path):
+    s = Settings(samples=8, vertex_rays=1, seed=2)
+    write_job(tmp_path, build([full_quad()]), [(16, 16)], [], {}, s)
+    run_blender(tmp_path, s)
+    assert 'cycles seed 2000' in (tmp_path / 'blender.log').read_text()
+
+
 def image_probe(tmp_path, blender_exe, samples=32):
     quarter = dict(quad=floor(0, 4, 0, 4, lm=((0, 0), (0.5, 0), (0.5, 0.5), (0, 0.5))))
     s = Settings(samples=samples, bounces=1, vertex_rays=1)

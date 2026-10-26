@@ -27,6 +27,8 @@ RAY_EPSILON = 1e-3
 PASS_LIMIT = 8
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
+SEED_STRIDE = 1000
+SEED_SPIN = 0.7548776662466927
 # queries per batch: bounds the hit arrays held before they are shaded
 QUERY_CHUNK = 256
 
@@ -65,6 +67,8 @@ def setup_scene(job):
     scene.render.engine = 'CYCLES'
     cycles = scene.cycles
     cycles.samples = max(1, round(job['samples'] / 9))
+    cycles.seed = job.get('seed', 0) * SEED_STRIDE
+    log(f'cycles seed {cycles.seed}')
     cycles.max_bounces = cycles.diffuse_bounces = job['bounces']
     cycles.glossy_bounces = cycles.transmission_bounces = cycles.volume_bounces = 0
     cycles.use_denoising = False
@@ -720,7 +724,7 @@ class VertexPass:
             tangent = np.cross(n, axis)
             tangent /= np.linalg.norm(tangent, axis=1, keepdims=True)
             bitangent = np.cross(n, tangent)
-            spin = 2 * np.pi * ((ids * GOLDEN_FRACTION) % 1.0)
+            spin = 2 * np.pi * ((ids * GOLDEN_FRACTION + job.get('seed', 0) * SEED_SPIN) % 1.0)
             angle = phi[None, :] + spin[:, None]
             dirs = (r[None, :, None] * np.cos(angle)[:, :, None] * tangent[:, None, :]
                     + r[None, :, None] * np.sin(angle)[:, :, None] * bitangent[:, None, :]

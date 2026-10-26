@@ -31,6 +31,7 @@ def _calibrated(key):
 
 @dataclass
 class Settings(ChartSettings):
+    seed: int = 0
     samples: int = 256
     # edge texels own few of their 9 sub-texels, so they are baked again until each has about this many samples in
     # all; None follows the interior's count, so the edges keep up when samples changes; 0 bakes every texel once
@@ -64,6 +65,8 @@ class Settings(ChartSettings):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.seed < 0 or self.seed > 999:
+            raise ValueError(f'seed must be between 0 and 999, not {self.seed}')
         if self.sky_grid < 1:
             raise ValueError(f'sky_grid must be at least 1, not {self.sky_grid}')
         if not self.reach > 0:

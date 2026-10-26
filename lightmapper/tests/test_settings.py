@@ -14,6 +14,13 @@ def test_defaults_come_from_calibration_json():
     assert s.page_max == 1024 and s.denoise and s.dither
 
 
+def test_seed_defaults_to_zero_and_stays_in_range():
+    assert Settings().seed == 0
+    for bad in (-1, 1000):
+        with pytest.raises(ValueError, match='seed'):
+            Settings(seed=bad)
+
+
 def test_shipped_calibration_is_tools_analytic_model(monkeypatch):
     from math import pi
     from lightmapper import settings

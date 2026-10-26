@@ -98,7 +98,7 @@ def test_write_job_files_load_back(tmp_path):
         np.testing.assert_array_equal(data['edge_offsets'], [0])
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
-        'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples'])
+        'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -256,3 +256,8 @@ def test_job_carries_the_resolved_edge_texel_target(tmp_path):
     assert job['texel_samples'] == 9 * round(64 / 9)
     job, _ = job_for(tmp_path / 'off', samples=64, texel_samples=0)
     assert job['texel_samples'] == 0
+
+
+def test_job_carries_the_seed(tmp_path):
+    write_job(tmp_path, make_scene(), [(8, 8)], [], {}, Settings(seed=7))
+    assert json.loads((tmp_path / 'job.json').read_text())['seed'] == 7

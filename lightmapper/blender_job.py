@@ -135,6 +135,7 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'albedo_scale': s.albedo_scale,
         'albedo_fallback': s.albedo_fallback,
         'vertex_rays': s.vertex_rays,
+        'seed': s.seed,
         'device': s.device,
     }
     path = work / 'job.json'
