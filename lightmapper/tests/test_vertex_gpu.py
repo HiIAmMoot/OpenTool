@@ -25,6 +25,17 @@ def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
     assert spin[0] == pytest.approx(2 * np.pi * ((3 * SEED_SPIN) % 1))
     assert spin[1] == pytest.approx(2 * np.pi * ((GOLDEN_FRACTION + 3 * SEED_SPIN) % 1))
 
+    count = 8
+    local, phi, r = hemisphere(count)
+    assert r == pytest.approx(np.sqrt((np.arange(count) + 0.5) / count))
+    np.testing.assert_allclose(local[:, :2], np.stack([r * np.cos(phi), r * np.sin(phi)], axis=1), atol=1e-15)
+    # bake.py picks x as the helper axis unless the normal lies along it, then y; the frame is cross(n, axis) and
+    # cross(n, tangent), so the two cases are written out by hand
+    _, n, t, b, _ = query_frames(np.float32([[0, 0, 3], [2, 0, 0]]), seed=0)
+    np.testing.assert_allclose(n, [[0, 0, 1], [1, 0, 0]], atol=1e-15)
+    np.testing.assert_allclose(t, [[0, 1, 0], [0, 0, 1]], atol=1e-15)
+    np.testing.assert_allclose(b, [[-1, 0, 0], [0, -1, 0]], atol=1e-15)
+
 
 def test_gather_sums_equal_the_per_ray_sum():
     rng = np.random.default_rng(7)
