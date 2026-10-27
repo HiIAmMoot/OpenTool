@@ -14,6 +14,15 @@ from lightmapper.progress import STAGE_LABELS, fraction
 from . import form, jobobject, presets, runner, usersettings
 
 
+class _BakeGate:
+    # held by the bake thread's emit wrapper and by on_close, so "is a tag write under way" is
+    # decided in one place instead of from the UI thread's slightly stale view of the events.
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.closing = False
+        self.writing = False
+
+
 class App:
     def __init__(self, root: tk.Misc, *, store_path: Path | None = None,
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
@@ -29,6 +38,7 @@ class App:
         self.stage: str | None = None
         self.close_after_write = False
         self._locked: dict = {}
+        self._gate = _BakeGate()
         self.events: queue.Queue = queue.Queue()
         self.blender: blender_find.Blender | None = None
         self._user_chose_blender = False
@@ -439,6 +449,16 @@ class App:
         self.blender_label.configure(text=text)
 
     def _poll(self):
+        # reschedule whatever a handler raises, or the form would stay locked with nobody listening.
+        try:
+            self._drain()
+        finally:
+            try:
+                self.root.after(100, self._poll)
+            except tk.TclError:
+                pass
+
+    def _drain(self):
         while True:
             try:
                 event = self.events.get_nowait()
@@ -476,16 +496,13 @@ class App:
             elif event[0] == 'pages':
                 _, done, total = event
                 if not self.close_after_write:
-                    self.stage_label.configure(text=f'Baking in Blender: page {done} of {total}')
+                    self.stage_label.configure(
+                        text=f'Baking in Blender: page {done} of {total}' if total else f'Baking in Blender: page {done}')
                 self.progress['value'] = fraction('blender', done, total) * 1000
             elif event[0] == 'done':
                 self._bake_done(event[1])
                 if self.close_after_write:
                     self._finish_close_after_write()
-        try:
-            self.root.after(100, self._poll)
-        except tk.TclError:
-            pass
 
     def _append_log(self, text):
         self.log_box.configure(state='normal')
@@ -542,7 +559,10 @@ class App:
                     'Replace your tags?',
                     f'This replaces {request.bsp} and its lightmaps in place. {tail} Continue?'):
                 return
-        self.remember()
+        try:
+            self.remember()
+        except Exception as exc:
+            self._write_exception(exc)
         self.busy = True
         self.stage = None
         self.close_after_write = False
@@ -556,8 +576,27 @@ class App:
         self._set_optional_label(self.device_label, '')
         self.stage_label.configure(text='Starting…', foreground='')
         self.progress['value'] = 0
-        # the thread gets the runner and the queue, not self, so no Tk object is finalized off the UI thread.
-        threading.Thread(target=self._run_bake, args=(request, self.events.put), daemon=True).start()
+        gate = self._gate = _BakeGate()
+        put = self.events.put
+
+        def emit(event):
+            if event[0] == 'stage' and event[1] == 'write':
+                with gate.lock:
+                    closing = gate.closing
+                    if not closing:
+                        gate.writing = True
+                        put(event)
+                if closing:
+                    # the window is closing and the process is about to exit; never start a write.
+                    threading.Event().wait()
+                return
+            if event[0] == 'done' or event == ('stage', 'validate'):
+                with gate.lock:
+                    gate.writing = False
+            put(event)
+
+        # the thread gets the runner and the gate, not self, so no Tk object is finalized off the UI thread.
+        threading.Thread(target=self._run_bake, args=(request, emit), daemon=True).start()
 
     def _write_exception(self, exc, tb=None):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -581,9 +620,12 @@ class App:
                 "A bake is running. Closing OpenTool stops it, and no tags will be written "
                 "if it hasn't reached that step yet."):
             return
+        with self._gate.lock:
+            self._gate.closing = True
+            writing = self._gate.writing
         if not self.busy:
             self._close_window()
-        elif self.stage == 'write':
+        elif writing:
             # the pipeline writes the bitmap, BSP and scenario one after another; stopping between
             # them would leave a lit BSP whose scenario was never written.
             self.close_after_write = True

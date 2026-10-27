@@ -710,3 +710,123 @@ def test_replacing_originals_goes_ahead_on_yes(ready_app, monkeypatch):
 def test_new_names_bake_does_not_ask(ready_app, monkeypatch):
     monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: pytest.fail('asked'))
     run_events(ready_app, [('done', OUTCOME_DONE)])
+
+
+def test_close_before_the_write_starts_never_lets_it_start(ready_app, monkeypatch):
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: True)
+    exits = []
+    ready_app._exit_now = lambda: exits.append(1)
+    go, passed = threading.Event(), []
+
+    def fake(req, emit):
+        emit(('stage', 'finish'))
+        go.wait(5)
+        emit(('stage', 'write'))
+        passed.append(1)
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: ready_app.stage == 'finish')
+    ready_app.on_close()
+    assert exits == [1]
+    go.set()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        ready_app.root.update()
+        time.sleep(0.01)
+    assert passed == [] and ready_app.stage == 'finish'
+
+
+def test_close_right_after_the_write_started_waits_for_it(ready_app, monkeypatch):
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: True)
+    exits = []
+    ready_app._exit_now = lambda: exits.append(1)
+    emitted, gate = threading.Event(), threading.Event()
+
+    def fake(req, emit):
+        emit(('stage', 'write'))
+        emitted.set()
+        gate.wait(5)
+        emit(('stage', 'validate'))
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    assert emitted.wait(5)
+    # no poll has run yet, so the window still thinks the stage is not 'write'
+    assert ready_app.stage != 'write'
+    ready_app.on_close()
+    assert exits == []
+    gate.set()
+    pump_app(ready_app, lambda: exits == [1])
+
+
+def test_poller_survives_a_bad_event(ready_app):
+    run_events(ready_app, [('stage', 'no-such-stage'), ('done', OUTCOME_DONE)])
+    assert not ready_app.busy
+    assert str(ready_app.tags_entry['state']) == 'normal'
+    assert str(ready_app.bake_button['state']) == 'normal'
+
+
+def test_failed_settings_save_does_not_block_the_bake(ready_app, monkeypatch, tmp_path):
+    def fail_save(*_args, **_kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(usersettings, 'save', fail_save)
+    run_events(ready_app, [('done', OUTCOME_DONE)])
+    assert ready_app.stage_label['text'] == OUTCOME_DONE.message
+    assert 'disk full' in (tmp_path / 'opentool.log').read_text()
+
+
+def test_pages_label_drops_the_total_when_unknown(ready_app):
+    gate = threading.Event()
+
+    def fake(req, emit):
+        emit(('pages', 3, 0))
+        gate.wait(5)
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: ready_app.stage_label['text'].startswith('Baking in Blender'))
+    assert ready_app.stage_label['text'] == 'Baking in Blender: page 3'
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+
+
+def test_failed_bake_unlocks_bake_and_form(ready_app):
+    failed = BakeOutcome('failed', 'Blender could not be started.', [], None, Path(), None)
+    run_events(ready_app, [('done', failed)])
+    assert str(ready_app.bake_button['state']) == 'normal'
+    assert str(ready_app.tags_entry['state']) == 'normal'
+    assert str(ready_app.new_names_check['state']) == 'normal'
+
+
+def test_finishing_label_survives_later_events(ready_app, monkeypatch):
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: True)
+    ready_app._exit_now = lambda: None
+    gate, end = threading.Event(), threading.Event()
+
+    def fake(req, emit):
+        emit(('stage', 'write'))
+        gate.wait(5)
+        emit(('pages', 1, 2))
+        emit(('log', 'late line'))
+        end.wait(5)
+        emit(('stage', 'validate'))
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: ready_app.stage == 'write')
+    ready_app.on_close()
+    gate.set()
+    pump_app(ready_app, lambda: 'late line' in ready_app.log_box.get('1.0', 'end'))
+    assert ready_app.stage_label['text'] == 'Finishing writing tags…'
+    end.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+
+
+def test_idle_close_saves_the_settings(ready_app):
+    ready_app.on_close()
+    assert usersettings.load(ready_app.store_path).bsp == 'room'
