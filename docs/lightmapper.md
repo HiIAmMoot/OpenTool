@@ -11,7 +11,7 @@ On Windows you can use the app instead of Python: see [Download the app](../READ
 Tool stores a level's lighting in two tags: the lightmap pages in a `bitmap` tag, and per-vertex lighting data in the `scenario_structure_bsp`. The lightmapper fills the same two tags, but builds them its own way:
 
 - It lays out the lightmap UVs with [xatlas](https://github.com/jpcy/xatlas). Charts split at hard creases, and the texels on either side of a chart seam are stitched so the seam is hard to see.
-- It renders the light with Blender's Cycles path tracer, on an NVIDIA GPU if you have one.
+- It renders the light with Blender's Cycles path tracer, on a supported GPU if you have one.
 - It denoises the pages with Intel Open Image Denoise and keeps the light in floating point until the final 16-bit encode.
 - It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap. Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
 
@@ -36,7 +36,8 @@ One difference is on purpose. Some shaders take their lightmap layout from their
 On top of the general requirements in the [README](../README.md#requirements):
 
 - [Blender 5.2](https://www.blender.org/download/), which the lightmapper runs as a separate program for the bake.
-- An NVIDIA GPU for fast bakes. Cycles tries OptiX, then CUDA, and falls back to the CPU.
+- A GPU can speed up bakes. Cycles tries OptiX, CUDA, HIP (AMD), then oneAPI (Intel), and falls back to the CPU.
+- NVIDIA is the only GPU vendor tested.
 - [LLVM](https://releases.llvm.org) and the Visual Studio Build Tools with the "Desktop development with C++" workload. The first run compiles xatlas from the bundled source, and clang needs the C++ standard library headers and Windows SDK from the Build Tools. LLVM in its default folder, `C:\Program Files\LLVM`, is found even when it is not on `PATH`.
 - The Microsoft Visual C++ x64 runtime, version 14.4 or newer, for the denoiser.
 

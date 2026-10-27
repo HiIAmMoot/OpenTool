@@ -14,7 +14,8 @@ def explain(exc: BaseException, work: Path | None = None) -> str:
         log_location = f'blender.log in {work}' if work is not None else "blender.log in the bake's work folder"
         return f"Blender stopped during the bake. The end of its log is below, and the whole log is {log_location}.\n{exc}"
     if isinstance(exc, CapError):
-        return 'This level needs more lightmap space than the stock format allows at these settings. Lower the texel density under Advanced, or use a smaller page size.'
+        return ('This level needs more lightmap space than the stock format allows at these settings. '
+                'Lower the texel density, or raise Max resolution under Advanced.')
     if isinstance(exc, ValueError):
         text = str(exc)
         if 'exceed stock cap' in text:

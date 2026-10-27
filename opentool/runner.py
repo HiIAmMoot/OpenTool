@@ -62,18 +62,21 @@ class _EventHandler(logging.Handler):
 
 
 def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True):
-    _, index, _ = pipeline.find_bsp(tags, scenario, bsp)
     path = resolve_reference_path(tags, 'scnr', out_scenario)
-    if path.is_file():
-        tag = read_tag(path)
-        entries = tag.root.block('structure_bsps')
-        if len(entries) <= index:
-            logger.warning('Existing lit scenario has fewer BSP entries; rebuilding it from the original scenario.')
-            tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
-    else:
-        tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
+    tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
     entries = tag.root.block('structure_bsps')
-    entries[index].set_reference('structure_bsp', 'sbsp', out_bsp)
+    for entry in entries:
+        _, original_bsp = entry.reference('structure_bsp')
+        if original_bsp == bsp:
+            lit_bsp = out_bsp
+        else:
+            earlier_lit_bsp = f'{original_bsp}_lit'
+            if resolve_reference_path(tags, 'sbsp', earlier_lit_bsp).is_file():
+                lit_bsp = earlier_lit_bsp
+            else:
+                lit_bsp = original_bsp
+        entry.set_reference('structure_bsp', 'sbsp', lit_bsp)
+    # The lit scenario must match the scenario the bake read; earlier lit BSPs are found by name, not position.
     write_tag(tag, path, backup=backups)
 
 

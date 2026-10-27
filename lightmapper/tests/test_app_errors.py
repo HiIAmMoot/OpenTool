@@ -50,7 +50,9 @@ def test_missing_tag_names_the_file():
 
 
 def test_cap_error_is_not_the_generic_value_error():
-    assert 'texel density' in explain(CapError('a chart exceeds page_max including padding'))
+    assert explain(CapError('a chart exceeds page_max including padding')) == (
+        'This level needs more lightmap space than the stock format allows at these settings. '
+        'Lower the texel density, or raise Max resolution under Advanced.')
 
 
 @pytest.mark.parametrize('exc', [RuntimeError(), AssertionError(), KeyError()])

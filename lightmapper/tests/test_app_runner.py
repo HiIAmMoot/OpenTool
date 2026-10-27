@@ -53,6 +53,29 @@ def test_rebaking_the_same_bsp_keeps_one_lit_name(two_bsps):
     assert refs == ['room_lit', 'room2'] and not (tags / 'room_lit_lit.scenario_structure_bsp').exists()
 
 
+def test_rebake_carries_current_scenario_root_edits(tiny):
+    tags, settings, work = tiny
+    assert run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'a'), lambda e: None).status == 'done'
+    scenario = read_tag(tags / 'level.scenario')
+    scenario.root.set('local_north', 1.25)
+    write_tag(scenario, tags / 'level.scenario')
+    assert run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'b'), lambda e: None).status == 'done'
+    assert read_tag(tags / 'level_lit.scenario').root.get('local_north') == pytest.approx(1.25)
+
+
+def test_rebake_after_bsp_reorder_keeps_lit_refs_in_current_order(two_bsps):
+    tags, settings, work = two_bsps
+    run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'a'), lambda e: None)
+    run_bake(BakeRequest(tags, 'level', 'room2', settings, True, work / 'b'), lambda e: None)
+    scenario = read_tag(tags / 'level.scenario')
+    entries = scenario.root.block('structure_bsps')
+    scenario.root.set_block('structure_bsps', [entries[1], entries[0]])
+    write_tag(scenario, tags / 'level.scenario')
+    assert run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'c'), lambda e: None).status == 'done'
+    refs = [e.reference('structure_bsp')[1] for e in read_tag(tags / 'level_lit.scenario').root.block('structure_bsps')]
+    assert refs == ['room2_lit', 'room_lit']
+
+
 def test_rebake_reads_the_original_bsp(two_bsps, monkeypatch):
     tags, settings, work = two_bsps
     run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'a'), lambda e: None)
