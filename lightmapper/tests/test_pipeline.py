@@ -77,7 +77,8 @@ def tiny(tmp_path, monkeypatch):
             vectors = scene['query_normal'] * (scene['query_pos'][:, 0:1] / 100 + .25)
         return BakeResult([np.zeros((h, w, 3), np.float32) for w, h in job['pages']],
                           vectors, np.ones(len(vectors), np.float32), 'test CPU',
-                          [np.ones((h, w), bool) for w, h in job['pages']])
+                          [np.ones((h, w), bool) for w, h in job['pages']],
+                          stages={'start': 0, 'scene': 2, 'pages': 3, 'vertex': 0})
 
     monkeypatch.setattr(pipeline, 'run_blender', fake_blender)
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
@@ -106,11 +107,23 @@ def test_pipeline_outputs(tiny):
     assert summary['device'] == 'test CPU'
     assert summary['pages'] == len(out.float_pages)
     assert summary['seconds'] and summary['texels_per_unit'] == .25
+    assert {'blender_start', 'blender_scene', 'page_bake', 'denoise'} <= summary['seconds'].keys()
     assert summary['settings']['stitch_seams'] is True
     assert summary['settings']['respect_normal_seams'] is True
     assert summary['settings']['texel_samples'] is None
     assert summary['texel_samples'] == settings.resolved_texel_samples()
     assert summary['devices']['denoise'] == 'CPU'
+
+
+def test_summary_splits_the_blender_step(tiny, fake, monkeypatch):
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'stage_timings')
+    api().bake(tags, 'level', 'room', replace(settings, blender=fake), out_bsp='timed', work=work)
+    seconds = json.loads((work / 'summary.json').read_text())['seconds']
+    assert 1.5 <= seconds['blender_start'] < 6  # the fake's sleep plus however slow the interpreter starts under load
+    assert (seconds['blender_scene'], seconds['page_bake'], seconds['blender_vertex']) == (2, 3, 0)
+    assert 'denoise' in seconds and seconds['denoise'] == 0 and seconds['finish'] >= 0
 
 
 def test_denoise_startup_fallback_is_logged_and_summarized(tiny, monkeypatch, caplog):
@@ -172,6 +185,7 @@ def test_required_amd_starts_hyp_worker_non_strict(tiny, monkeypatch):
     class Worker:
         device = 'CPU'
         warnings = []
+        def denoise(self, page): return page
         def close(self): pass
 
     monkeypatch.setattr(api().DenoiseWorker, 'start', classmethod(

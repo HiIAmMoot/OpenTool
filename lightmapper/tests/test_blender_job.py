@@ -201,6 +201,8 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     np.testing.assert_allclose(result.vertex_irradiance, [2.0, 8.0, 0.25])
     assert result.vertex_vector.dtype == np.float32 and result.vertex_irradiance.dtype == np.float32
     assert result.device == 'OPTIX+CUDA+HIP-FAKE'
+    assert set(result.stages) == {'start', 'scene', 'pages', 'vertex'}
+    assert all(v >= 0 for v in result.stages.values())
     assert hasattr(result, 'written'), 'written masks were not returned'
     for i, (w, h) in enumerate([(16, 8), (4, 4)]):
         expected = np.ones((h, w), bool)
@@ -211,6 +213,17 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     args = json.loads((work / 'args.json').read_text())
     assert args[:4] == ['-b', '--factory-startup', '--python-exit-code', '1']
     assert args[4] == '--python' and args[5].endswith('bake.py') and args[6:] == ['--', str(work / 'job.json')]
+
+
+def test_run_blender_returns_stage_seconds(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(8, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'stage_timings')
+    result = run_blender(work, s)
+    assert set(result.stages) == {'start', 'scene', 'pages', 'vertex'}
+    assert 1.5 <= result.stages['start'] < 6  # the fake's sleep plus however slow the interpreter starts under load
+    assert (result.stages['scene'], result.stages['pages'], result.stages['vertex']) == (2, 3, 0)
 
 
 def test_run_blender_without_timeout(tmp_path, fake):

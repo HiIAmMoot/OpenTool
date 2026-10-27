@@ -99,6 +99,13 @@ def bake(tmp_path, receivers, suns, pages=((16, 16),), occluders=(), textures=No
     return run_blender(tmp_path, s)
 
 
+@pytest.mark.blender
+def test_blender_reports_its_stage_seconds(tmp_path):
+    result = bake(tmp_path, [full_quad()], [sun()])
+    assert set(result.stages) == {'start', 'scene', 'pages', 'vertex'}
+    assert all(value >= 0 for value in result.stages.values())
+
+
 def full_quad(**extra):
     return dict(quad=floor(0, 4, 0, 4), **extra)
 

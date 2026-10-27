@@ -272,6 +272,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     begin('blender')
     result = run_blender(work, s)
     stage('blender')
+    blender_stages = result.stages or {}
+    seconds['blender_start'] = blender_stages.get('start', 0.0)
+    seconds['blender_scene'] = blender_stages.get('scene', 0.0)
+    seconds['page_bake'] = blender_stages.get('pages', 0.0)
     if choice.adapter:
         begin('vertex')
         if result.device == 'CPU':
@@ -311,6 +315,19 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,
                                          strict=choice.required and choice.oidn != 'HIP') if s.denoise else None
     denoise_device = 'CPU' if denoise_worker is None else denoise_worker.device
+    denoise_seconds = 0.0
+    if denoise_worker is not None:
+        denoise = denoise_worker.denoise
+
+        def timed_denoise(page):
+            nonlocal denoise_seconds
+            began = perf_counter()
+            try:
+                return denoise(page)
+            finally:
+                denoise_seconds += perf_counter() - began
+
+        denoise_worker.denoise = timed_denoise
     try:
         float_pages = finish_pages(pages, raw_pages, masks, class_maps, ambient, s, written=result.written,
                                    joined_groups={i for i, r in enumerate(radiosity) if r.flags & SIMPLE_PARAMETERIZATION},
@@ -331,6 +348,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             material.lm['incident_radiosity'] = vectors[offset:offset + len(material.env)]
             offset += len(material.env)
     stage('finish')
+    seconds['denoise'] = denoise_seconds
+    seconds['finish'] -= denoise_seconds
+    seconds['blender_vertex'] = blender_stages.get('vertex', 0.0)
     begin('write')
     if over_cap:
         # apply_layout enforces the real cap too; a timing-only run cannot make a stock tag

@@ -802,19 +802,27 @@ def main():
     with open(job_path) as handle:
         job = json.load(handle)
     started = time.perf_counter()
+    out = {
+        'seconds_start': np.float64(time.time() - float(os.environ['LIGHTMAPPER_LAUNCH_TIME']))
+        if 'LIGHTMAPPER_LAUNCH_TIME' in os.environ else np.float64(0),
+        'seconds_scene': np.float64(0), 'seconds_pages': np.float64(0),
+        'seconds_vertex': np.float64(0),
+    }
     with np.load(os.path.join(root, job['scene'])) as data:
         scene_data = {key: data[key] for key in data.files}
-    out = {'vertex_rays_cast': np.int64(0)}
+    out['vertex_rays_cast'] = np.int64(0)
     if job.get('vertex_only'):
         with np.load(os.path.join(root, job['diffuse'])) as data:
             diffuse_pages = [data[f'diffuse_{i}'] for i in range(len(job['pages']))]
     else:
+        scene_started = time.perf_counter()
         scene, device = setup_scene(job)
         log(f'device {device}')
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
                                                         job['texel_samples'] > 0)
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images)
         add_suns(job, receivers, occluders)
+        out['seconds_scene'] = np.float64(time.perf_counter() - scene_started)
         diffuse_pages = []
         for i, (w, h) in enumerate(job['pages']):
             began = time.perf_counter()
@@ -822,6 +830,7 @@ def main():
                                                                    mask_images[i] if mask_images else None)
             diffuse_pages.append(diffuse)
             out[f'diffuse_{i}'] = diffuse
+            out['seconds_pages'] = np.float64(out['seconds_pages'] + time.perf_counter() - began)
             log(f'page {i} ({w}x{h}) baked in {time.perf_counter() - began:.2f} s')
         out['device'] = np.array(device)
     if job.get('vertex_only') or job.get('vertex_pass', 'cpu') == 'cpu':
@@ -834,6 +843,7 @@ def main():
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
         out['vertex_rays_cast'] = np.int64(rays)
         elapsed = time.perf_counter() - began
+        out['seconds_vertex'] = np.float64(elapsed)
         log(f'vertex pass: {len(out["vertex_vector"])} queries, {rays} rays in {elapsed:.2f} s ({rays / max(elapsed, 1e-9):.0f} rays/s)')
     np.savez(os.path.join(root, job['out']), **out)
     log(f'done in {time.perf_counter() - started:.2f} s')

@@ -3,9 +3,13 @@
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
+# stamped before numpy loads, which is slow under load and would swamp the 1.5 s the tests expect
+launch_seconds = time.time() - float(os.environ.get('LIGHTMAPPER_LAUNCH_TIME', time.time()))
 import numpy as np
+
 
 
 def page(i, w, h):
@@ -19,6 +23,11 @@ def main():
     job = json.loads(job_path.read_text())
     mode = os.environ.get('FAKE_BLENDER_MODE', 'ok')
     print('fake blender running')
+    stage_start = launch_seconds
+    if mode == 'stage_timings':
+        time.sleep(1.5)
+        if 'LIGHTMAPPER_LAUNCH_TIME' in os.environ:
+            stage_start += 1.5
     if mode == 'nooutput':
         return
     with open(job_path.with_name('args.json'), 'w') as handle:
@@ -28,6 +37,9 @@ def main():
         query_class = scene['query_class']
         edges = len(scene['edge_pos'])
     arrays = {'vertex_rays_cast': np.int64(0)}
+    if 'LIGHTMAPPER_LAUNCH_TIME' in os.environ:
+        arrays.update(seconds_start=np.float64(stage_start),
+                      seconds_scene=np.float64(2), seconds_pages=np.float64(3), seconds_vertex=np.float64(0))
     if not job.get('vertex_only'):
         for i, (w, h) in enumerate(job['pages']):
             arrays[f'page_{i}'] = page(i, w, h)

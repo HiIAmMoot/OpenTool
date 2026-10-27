@@ -7,8 +7,10 @@ bpy. A failed run raises before the caller has written anything to a tag.
 
 from dataclasses import dataclass, fields, replace
 import json
+import os
 from pathlib import Path
 import subprocess
+import time
 
 import numpy as np
 
@@ -82,6 +84,7 @@ class BakeResult:
     edge_sun_lit: np.ndarray | None = None
     diffuse_pages: list | None = None
     vertex_rays_cast: int | None = None
+    stages: dict | None = None
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
@@ -174,10 +177,12 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
     log = work / log_name
     command = [s.blender, '-b', '--factory-startup', '--python-exit-code', '1',
                '--python', str(BAKE_SCRIPT), '--', str(work / job_name)]
+    environment = dict(os.environ)
+    environment['LIGHTMAPPER_LAUNCH_TIME'] = str(time.time())
     try:
         with open(log, 'wb') as handle:
             done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=handle,
-                                  stderr=subprocess.STDOUT, timeout=s.timeout_s,
+                                  stderr=subprocess.STDOUT, timeout=s.timeout_s, env=environment,
                                   creationflags=frozen.NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise BlenderError(f'blender timed out after {s.timeout_s} s\n{_log_tail(log)}') from None
@@ -202,7 +207,10 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                           np.array(data['vertex_sun_lit'], np.bool_) if 'vertex_sun_lit' in data.files else None,
                           np.array(data['edge_sun_lit'], np.bool_) if 'edge_sun_lit' in data.files else None,
                           [np.array(data[f'diffuse_{i}'], np.float32) for i in range(len(job['pages']))],
-                          int(data['vertex_rays_cast']))
+                          int(data['vertex_rays_cast']),
+                          ({'start': float(data['seconds_start']), 'scene': float(data['seconds_scene']),
+                            'pages': float(data['seconds_pages']), 'vertex': float(data['seconds_vertex'])}
+                           if 'seconds_start' in data.files else None))
 
 
 def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:
