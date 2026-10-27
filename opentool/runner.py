@@ -2,7 +2,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import logging
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import tempfile
 from typing import Callable
 
@@ -67,7 +67,8 @@ def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True)
     entries = tag.root.block('structure_bsps')
     for entry in entries:
         _, original_bsp = entry.reference('structure_bsp')
-        if original_bsp == bsp:
+        # (bsp is the name the modder picked, as find_bsp matches it, not the tag path)
+        if PureWindowsPath(original_bsp).name == bsp:
             lit_bsp = out_bsp
         else:
             earlier_lit_bsp = f'{original_bsp}_lit'

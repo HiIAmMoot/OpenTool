@@ -76,6 +76,16 @@ def test_rebake_after_bsp_reorder_keeps_lit_refs_in_current_order(two_bsps):
     assert refs == ['room2_lit', 'room_lit']
 
 
+def test_lit_scenario_matches_the_baked_bsp_by_name_in_a_folder(tiny):
+    tags, _, _ = tiny
+    scenario = read_tag(tags / 'level.scenario')
+    scenario.root.block('structure_bsps')[0].set_reference('structure_bsp', 'sbsp', 'levels\\x\\room')
+    write_tag(scenario, tags / 'level.scenario')
+    runner.write_lit_scenario(tags, 'level', 'room', 'levels\\x\\room_baked', 'level_lit')
+    refs = [e.reference('structure_bsp')[1] for e in read_tag(tags / 'level_lit.scenario').root.block('structure_bsps')]
+    assert refs == ['levels\\x\\room_baked']
+
+
 def test_rebake_reads_the_original_bsp(two_bsps, monkeypatch):
     tags, settings, work = two_bsps
     run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'a'), lambda e: None)
