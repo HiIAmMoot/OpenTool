@@ -4,7 +4,12 @@ SlangPy is optional for the CPU path and is imported only while probing or
 opening a device. Adapter LUIDs keep subsequent passes on the probed GPU.
 """
 
-from dataclasses import dataclass
+import json
+import os
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 
 NVIDIA, AMD = 0x10DE, 0x1002
@@ -13,6 +18,9 @@ BACKEND_ORDER: dict[int, tuple[str, ...]] = {NVIDIA: ('vulkan',), AMD: ('vulkan'
 DEFAULT_BACKENDS: tuple[str, ...] = ('vulkan',)
 # recon's warmed 680M HIP bakes were not faster with HIP RT
 HIPRT = False
+# a healthy probe takes about 2 s; a driver that hangs while a device opens would otherwise hang the bake, so the
+# child is cut off well before a user would give up and the bake goes on without the GPU
+PROBE_TIMEOUT_S = 60.0
 
 
 class DeviceError(RuntimeError):
@@ -129,11 +137,45 @@ def list_adapters() -> tuple[list[Adapter], str | None]:
                 finally:
                     device.close()
                 found.append(Adapter(adapter.name, adapter.vendor_id, adapter.luid, backend, ray_query))
+            except DeviceError as error:
+                errors.append(str(error))
             except Exception as error:
                 errors.append(f'{adapter.name} ({backend}): {error}')
     return dedupe_adapters(found), '; '.join(errors) or None
 
 
+def _probe_command() -> list[str]:
+    return [sys.executable, '-m', 'lightmapper.gpu']
+
+
+def probe_adapters() -> tuple[list[Adapter], str | None]:
+    """list_adapters in a child process, so a driver that crashes or hangs while a device opens is a reason string."""
+    env = dict(os.environ)
+    env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
+                                                   env.get('PYTHONPATH', '')]))
+    try:
+        done = subprocess.run(_probe_command(), env=env, stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=PROBE_TIMEOUT_S)
+    except subprocess.TimeoutExpired:
+        return [], f'GPU probe timed out after {PROBE_TIMEOUT_S:g} s'
+    except OSError as error:
+        return [], f'GPU probe could not start: {error}'
+    if done.returncode:
+        tail = ' | '.join(done.stderr.decode(errors='replace').strip().splitlines()[-3:])
+        return [], f'GPU probe process died (exit {done.returncode}){": " + tail if tail else ""}'
+    try:
+        # (drivers may print to stdout before the child's own line)
+        data = json.loads(done.stdout.decode(errors='replace').strip().splitlines()[-1])
+        return [Adapter(**{**a, 'luid': tuple(a['luid'])}) for a in data['adapters']], data['reason']
+    except (IndexError, ValueError, KeyError, TypeError) as error:
+        return [], f'GPU probe output unreadable ({error})'
+
+
 def probe_choice(setting: str) -> DeviceChoice:
     setting = normalise_device(setting)
-    return choose(setting, []) if setting == 'cpu' else choose(setting, *list_adapters())
+    return choose(setting, []) if setting == 'cpu' else choose(setting, *probe_adapters())
+
+
+if __name__ == '__main__':
+    _adapters, _reason = list_adapters()
+    print(json.dumps({'adapters': [asdict(a) for a in _adapters], 'reason': _reason}))

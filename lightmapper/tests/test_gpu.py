@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import sys
 from types import SimpleNamespace
 
@@ -66,17 +67,66 @@ def test_summary_is_json_ready():
 
 def test_probe_choice_cpu_creates_no_device(monkeypatch):
     monkeypatch.setitem(sys.modules, 'slangpy', None)
-    monkeypatch.setattr(gpu, 'list_adapters', lambda: pytest.fail('cpu probed the GPUs'))
+    monkeypatch.setattr(gpu, 'probe_adapters', lambda: pytest.fail('cpu probed the GPUs'))
     # the autouse fixture replaces the module attribute, not this original entry point
     assert probe_choice('cpu').cycles == ()
 
 
 def test_probe_choice_uses_the_probed_adapters_and_failure_reason(monkeypatch):
-    monkeypatch.setattr(gpu, 'list_adapters', lambda: ([RADEON], None))
+    monkeypatch.setattr(gpu, 'probe_adapters', lambda: ([RADEON], None))
     assert probe_choice('HIP').adapter == RADEON
-    monkeypatch.setattr(gpu, 'list_adapters', lambda: ([], 'probe refused'))
+    monkeypatch.setattr(gpu, 'probe_adapters', lambda: ([], 'probe refused'))
     assert probe_choice('auto').warnings == (
         'no GPU with ray queries (probe refused); vertex pass on the CPU',)
+
+
+def _stand_in(monkeypatch, code, timeout=None):
+    monkeypatch.setattr(gpu, '_probe_command', lambda: [sys.executable, '-c', code])
+    if timeout is not None:
+        monkeypatch.setattr(gpu, 'PROBE_TIMEOUT_S', timeout)
+
+
+CHILD_FAILURES = {
+    'exit': ('import sys; sys.exit(3)', None, 'exit 3'),
+    'access violation': ('import os; os._exit(0xC0000005)', None, 'exit'),
+    'hang': ('import time; time.sleep(60)', 1, 'timed out'),
+    'garbage': ('print("not json")', None, 'unreadable')}
+
+
+@pytest.mark.parametrize('kind', CHILD_FAILURES)
+def test_a_failing_probe_child_makes_auto_the_cpu_with_a_warning(monkeypatch, kind):
+    code, timeout, text = CHILD_FAILURES[kind]
+    _stand_in(monkeypatch, code, timeout)
+    choice = probe_choice('auto')
+    assert choice.adapter is None and choice.required is False
+    assert len(choice.warnings) == 1 and 'probe' in choice.warnings[0] and text in choice.warnings[0]
+
+
+@pytest.mark.parametrize('kind', CHILD_FAILURES)
+def test_a_failing_probe_child_fails_a_named_vendor(monkeypatch, kind):
+    code, timeout, text = CHILD_FAILURES[kind]
+    _stand_in(monkeypatch, code, timeout)
+    with pytest.raises(DeviceError, match='nvidia') as error:
+        probe_choice('nvidia')
+    assert text in str(error.value)
+
+
+def test_the_probe_child_hands_back_the_adapters(monkeypatch):
+    payload = json.dumps({'adapters': [dataclasses.asdict(NV)], 'reason': 'one refused'})
+    _stand_in(monkeypatch, f'print("driver noise"); print({payload!r})')
+    adapters, reason = gpu.probe_adapters()
+    assert adapters == [NV] and reason == 'one refused'
+
+
+def test_a_per_adapter_probe_error_names_the_adapter_once(monkeypatch):
+    def device(**kwargs):
+        raise RuntimeError('adapter refused')
+    device.enumerate_adapters = lambda kind: [NV]
+    spy = SimpleNamespace(Device=device, DeviceType=SimpleNamespace(vulkan='vulkan'),
+                          Feature=SimpleNamespace(ray_query='ray_query'))
+    monkeypatch.setitem(sys.modules, 'slangpy', spy)
+    _, reason = gpu.list_adapters()
+    assert reason.count(NV.name) == 1 and reason.count('vulkan') == 1
 
 
 def test_one_adapter_per_gpu_on_the_vendors_first_backend(monkeypatch):
