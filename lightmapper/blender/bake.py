@@ -24,6 +24,8 @@ UV_LIGHTMAP = 'lightmap'
 UV_TEXTURE = 'texture'
 RAY_LENGTH = 1e5
 RAY_EPSILON = 1e-3
+# coincident reverse faces self-shadow in Cycles; separate only bake copies, including at far-out map positions
+TWIN_SEPARATION = 1e-4
 PASS_LIMIT = 8
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
@@ -316,6 +318,16 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
         page, cls, casts = int(key[0]), int(key[1]), bool(key[2])
         used, local = np.unique(tris[picked].ravel(), return_inverse=True)
         local = local.reshape(-1, 3)
+        paired = scene_data['tri_twin'][picked] >= 0
+        copied = tris[picked[paired]].ravel()
+        corners = positions[copied].astype(np.float64).reshape(-1, 3, 3)
+        normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+        length = np.linalg.norm(normal, axis=1, keepdims=True)
+        normal /= np.where(length > 0, length, 1)
+        moved = corners + TWIN_SEPARATION * normal[:, None]
+        local[paired] = np.arange(len(used), len(used) + len(copied)).reshape(-1, 3)
+        bake_positions = np.concatenate([positions[used], moved.reshape(-1, 3)]).astype(np.float32)
+        used = np.concatenate([used, copied])
         tri_props = [(int(scene_data['tri_texture'][t]), bool(scene_data['tri_cutout'][t]),
                       tuple(float(c) for c in scene_data['tri_emission'][t]),
                       tuple(float(c) for c in scene_data['tri_tint'][t]) if tinted[t] else ()) for t in picked]
@@ -324,7 +336,7 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
                                    job, page_images[page], tint,
                                    mask_image=mask_images[page] if mask_images else None)
                      for n, (tex, cut, emit, tint) in enumerate(distinct)]
-        obj = make_object(f'recv_{page}_{cls}_{int(casts)}', positions[used],
+        obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
                            UV_LIGHTMAP: flip_v(scene_data['lm_uv'][used])},
                           local, materials, [distinct.index(p) for p in tri_props], casts,

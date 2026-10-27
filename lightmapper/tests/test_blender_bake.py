@@ -110,6 +110,143 @@ def full_quad(**extra):
     return dict(quad=floor(0, 4, 0, 4), **extra)
 
 
+TWIN_DEVICES = [
+    'CPU',
+    pytest.param('OPTIX', marks=pytest.mark.gpu_nvidia),
+    pytest.param('HIP', marks=pytest.mark.gpu_amd),
+]
+
+
+def twin_sheet_scene(translation=(0, 0, 0), reverse=False, control=False, blocker=False):
+    lower_uv = ((0, 0), (0.5, 0), (0.5, 1), (0, 1))
+    upper_uv = ((0.5, 0), (1, 0), (1, 1), (0.5, 1))
+    p, lm, tex, nrm = floor(16.45, 16.75, -23.4140568, -21.880722, z=-3.61228895,
+                            up=False, lm=lower_uv)
+    lower = dict(quad=(p, lm, tex, nrm))
+    # reversing about corner zero keeps the diagonal, so these are exact reversed triangle twins
+    order = [0, 3, 2, 1]
+    upper = dict(quad=(p[order], np.float32(upper_uv)[order], tex[order], -nrm[order]))
+    receivers = [lower] if control else ([upper, lower] if reverse else [lower, upper])
+    panel = dict(quad=floor(16.5, 16.7, -23.3640568, -21.930722, z=-3.69436),
+                 casts=False, emission=(84.70593, 63.52938, 56.11761))
+    occluders = [panel]
+    if blocker:
+        occluders.append(dict(quad=floor(15, 18, -25, -20, z=-3.65)))
+    scene = build(receivers, occluders)
+    scene.positions += np.float32(translation)
+    scene.occ_positions += np.float32(translation)
+    scene.query_pos = scene.positions[:1].copy()
+    scene.query_normal = np.float32([[0, 0, -1]])
+    return scene
+
+
+def bake_twin_sheet(tmp_path, device, **scene_options):
+    from lightmapper.gpu import choose
+    s = Settings(samples=288, bounces=1, vertex_rays=1, w_emit=1, albedo_scale=1,
+                 albedo_fallback=0.5)
+    choice = replace(choose('auto', None), cycles=() if device == 'CPU' else (device,),
+                     required=device != 'CPU')
+    write_job(tmp_path, twin_sheet_scene(**scene_options), [(16, 8)], [], {}, s,
+              choice=choice, vertex_pass='skip')
+    result = run_blender(tmp_path, s)
+    assert result.device == device
+    return result.pages[0]
+
+
+@pytest.fixture(scope='module')
+def twin_device_pages():
+    return {}
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('device', TWIN_DEVICES)
+@pytest.mark.parametrize('translation', [(0, 0, 0), (400, -400, 100)], ids=['origin', 'far'])
+@pytest.mark.parametrize('reverse', [False, True], ids=['lower-first', 'upper-first'])
+def test_twin_sheet_bakes_light_from_a_panel_on_every_device(tmp_path, device, translation, reverse,
+                                                           twin_device_pages):
+    options = dict(translation=translation, reverse=reverse)
+    control = bake_twin_sheet(tmp_path / 'control', device, control=True, **options)
+    page = bake_twin_sheet(tmp_path / 'twins', device, **options)
+    lower = page[1:-1, 1:7]
+    reference = control[1:-1, 1:7]
+    assert reference.mean() > 20, 'the control must see the bright panel'
+    np.testing.assert_allclose(lower, reference, rtol=0.02,
+                               err_msg='legitimate panel lighting must not be self-shadowed')
+    assert page[1:-1, 9:15].max() < 0.01, 'the upper side must retain its own dark island'
+    if device != 'CPU':
+        cpu = bake_twin_sheet(tmp_path / 'cpu', 'CPU', **options)
+        np.testing.assert_allclose(lower, cpu[1:-1, 1:7], rtol=0.02)
+    seen = twin_device_pages.setdefault((translation, reverse), {})
+    for other_device, other in seen.items():
+        np.testing.assert_allclose(lower, other, rtol=0.02, err_msg=f'{device} vs {other_device}')
+    seen[device] = lower.copy()
+    print(f'TWIN_MEASUREMENT {device} {translation} reverse={reverse} '
+          f'lower={lower.mean(axis=(0, 1)).tolist()} control={reference.mean(axis=(0, 1)).tolist()}')
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('device', TWIN_DEVICES)
+def test_twin_separation_keeps_a_real_blocker(tmp_path, device):
+    page = bake_twin_sheet(tmp_path, device, blocker=True)
+    assert page[1:-1, 1:7].max() < 0.01
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('triangles', [4, 20000])
+def test_twin_separation_copies_only_bake_corners(tmp_path, blender_exe, triangles):
+    scene = twin_sheet_scene()
+    if triangles == 20000:
+        count = triangles // 4
+        offsets = np.float32([(i % 100, i // 100, 0) for i in range(count)])
+        scene.positions = (scene.positions[None] + offsets[:, None]).reshape(-1, 3)
+        scene.tris = (scene.tris[None] + 8 * np.arange(count)[:, None, None]).reshape(-1, 3)
+        for name in ('normals', 'lm_uv', 'tex_uv', 'tri_page', 'tri_class', 'tri_casts_shadow',
+                     'tri_emission', 'tri_texture', 'tri_cutout', 'tri_tint'):
+            value = getattr(scene, name)
+            setattr(scene, name, np.tile(value, (count,) + (1,) * (value.ndim - 1)))
+    else:
+        # this unpaired neighbour shares corners with a twin but must not move with it
+        scene.positions = np.concatenate([scene.positions, np.float32([[16.4, -23.5, -3.5]])])
+        scene.normals = np.concatenate([scene.normals, np.float32([[0, 0, -1]])])
+        scene.tex_uv = np.concatenate([scene.tex_uv, np.float32([[0.3, 0.7]])])
+        scene.lm_uv = np.concatenate([scene.lm_uv, np.float32([[0.1, 0.9]])])
+        scene.tris = np.concatenate([scene.tris, [[0, 1, 8]]])
+        for name in ('tri_page', 'tri_class', 'tri_casts_shadow', 'tri_emission',
+                     'tri_texture', 'tri_cutout', 'tri_tint'):
+            value = getattr(scene, name)
+            setattr(scene, name, np.concatenate([value, value[:1]]))
+    # smooth normals deliberately disagree with geometric normals
+    scene.normals[:] = [0.6, 0, 0.8]
+    s = Settings(device='cpu', samples=1, vertex_rays=1)
+    write_job(tmp_path, scene, [(16, 8)], [], {}, s)
+    original = (tmp_path / 'scene.npz').read_bytes()
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('twin_geometry_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    assert (tmp_path / 'scene.npz').read_bytes() == original
+    with np.load(tmp_path / 'scene.npz') as source, np.load(tmp_path / 'geometry.npz') as mesh:
+        paired = source['tri_twin'][:len(scene.tris)] >= 0
+        assert paired.sum() == triangles
+        assert len(mesh['positions']) == len(np.unique(scene.tris)) + 3 * triangles
+        local = mesh['tris']
+        assert len(np.unique(local[paired])) == 3 * triangles
+        assert not np.isin(local[paired], local[~paired]).any()
+        corners = scene.positions[scene.tris].astype(np.float64)
+        normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+        normal /= np.linalg.norm(normal, axis=1)[:, None]
+        assert mesh['separation'] > 0
+        expected = corners + paired[:, None, None] * normal[:, None] * mesh['separation']
+        np.testing.assert_array_equal(mesh['positions'][local], expected.astype(np.float32))
+        for name, uv in [('texture', scene.tex_uv), ('lightmap', scene.lm_uv)]:
+            flipped = uv[scene.tris].copy()
+            flipped[:, :, 1] = 1 - flipped[:, :, 1]
+            np.testing.assert_array_equal(mesh[name], flipped)
+        np.testing.assert_allclose(mesh['normals'], scene.normals[scene.tris], atol=1e-4)
+
+
 @pytest.mark.blender
 def test_emit_only_pane_back_face_transmits_the_light_behind_it(tmp_path):
     roof = dict(quad=floor(-100, 100, -100, 100, z=2, up=False), emission=(4, 4, 4), texture=0)
