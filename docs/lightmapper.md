@@ -129,7 +129,7 @@ Build the map as usual, for example with the editing kit's `tool.exe`, run from 
 
 ```powershell
 Set-Location "C:\HCEEK"
-.\tool.exe build-cache-file levels\test\bloodgulch\bloodgulch_ot remastered
+.\tool.exe build-cache-file levels\test\bloodgulch\bloodgulch_ot
 ```
 
 ## Exit codes
