@@ -16,7 +16,7 @@ Follow the install steps in the README, then add pytest:
 python -m pip install pytest
 ```
 
-Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BLENDER` at `blender.exe`, so the tests that need them run instead of being skipped.
+Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BLENDER` at `blender.exe`, so the tests that need them run instead of being skipped. Tests marked `gpu_nvidia` or `gpu_amd` also run only on a machine with that GPU. Without it they are skipped, so say in your pull request which GPUs your run covered.
 
 ## How we work
 

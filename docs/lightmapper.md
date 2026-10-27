@@ -11,7 +11,7 @@ On Windows you can use the app instead of Python: see [Download the app](../READ
 Tool stores a level's lighting in two tags: the lightmap pages in a `bitmap` tag, and per-vertex lighting data in the `scenario_structure_bsp`. The lightmapper fills the same two tags, but builds them its own way:
 
 - It lays out the lightmap UVs with [xatlas](https://github.com/jpcy/xatlas). Charts split at hard creases, and the texels on either side of a chart seam are stitched so the seam is hard to see.
-- It renders the light with Blender's Cycles path tracer, on a supported GPU if you have one.
+- It renders the light with Blender's Cycles path tracer and works out the per-vertex light on the GPU too, when you have an NVIDIA or AMD one.
 - It denoises the pages with Intel Open Image Denoise and keeps the light in floating point until the final 16-bit encode.
 - It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap. Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
 
@@ -36,8 +36,9 @@ One difference is on purpose. Some shaders take their lightmap layout from their
 On top of the general requirements in the [README](../README.md#requirements):
 
 - [Blender 5.2](https://www.blender.org/download/), which the lightmapper runs as a separate program for the bake.
-- A GPU can speed up bakes. Cycles tries OptiX, CUDA, HIP (AMD), then oneAPI (Intel), and falls back to the CPU.
-- NVIDIA is the only GPU vendor tested.
+- A GPU makes bakes much faster: an NVIDIA or AMD card whose Vulkan driver supports ray queries. Without one, the bake runs on the CPU and takes far longer. The `device` setting chooses; see [lightmapper-settings.md](lightmapper-settings.md).
+- [SlangPy](https://slangpy.shader-slang.org), which runs the per-vertex pass on the GPU. `requirements.txt` pins it, and the Windows app bundles it (`THIRD_PARTY_NOTICES.md` lists its parts).
+- GPU baking has been tested on an NVIDIA RTX 4060 laptop GPU and an AMD Radeon 680M. Intel GPUs are untested.
 - [LLVM](https://releases.llvm.org) and the Visual Studio Build Tools with the "Desktop development with C++" workload. The first run compiles xatlas from the bundled source, and clang needs the C++ standard library headers and Windows SDK from the Build Tools. LLVM in its default folder, `C:\Program Files\LLVM`, is found even when it is not on `PATH`.
 - The Microsoft Visual C++ x64 runtime, version 14.4 or newer, for the denoiser.
 
@@ -144,6 +145,12 @@ Other failures stop the command with an error message and a traceback.
 
 ## Bake times
 
-On a laptop with an RTX 4060, earlier bakes of multiplayer maps took two to seven minutes each. The GPU part, baking the pages, took 5 to 12 seconds per map. Most of the time went into the per-vertex pass on the CPU, which works out the direction of the light at every vertex. `summary.json` records how long each stage took on your machine.
+On a laptop with an RTX 4060, Blood Gulch, Rat Race and Chiron TL-34 each bake in about 20 to 40 seconds with the default settings. On the same machine's AMD Radeon 680M they take about 40 to 60 seconds. Both bake the pages and the per-vertex light on the GPU. In 0.1.0 the same kind of bake took two to seven minutes, because the per-vertex pass ran on the CPU.
 
-Tool's time grows much faster with the size of a level. On one campaign level, tool took 2 hours 20 minutes against about two minutes for an earlier version of the lightmapper. That version cast fewer rays per vertex, so current bakes of such a level take longer.
+The Windows app's presets, timed on Blood Gulch with the RTX 4060:
+
+<!-- T8 TIMINGS -->
+
+`summary.json` records how long each stage took on your machine, and which device ran each one.
+
+Tool's time grows much faster with the size of a level. On one campaign level, tool took 2 hours 20 minutes against about two minutes for an earlier version of the lightmapper that cast fewer rays per vertex. A level that large will take longer now, on the CPU especially.

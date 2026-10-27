@@ -38,11 +38,15 @@ The quickest way to use OpenTool is the Windows app. It needs nothing installed 
 1. Download `OpenTool-<version>-windows-x64.zip` from the [releases page](https://github.com/HiIAmMoot/OpenTool/releases) and unzip it anywhere.
 2. Install [Blender 5.2](https://www.blender.org/download/) or newer if you don't have it. The app finds it on its own.
 3. Double-click `OpenTool.exe`.
-4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake.
+4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake. The Device row shows the GPU the app found. Auto uses it; choose NVIDIA, AMD or CPU only to override that. NVIDIA and AMD stop the bake with a message if no such GPU is found.
 
 With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual.
 
-On an RTX 4060 laptop GPU, Blood Gulch bakes in about 24 seconds at Draft, 70 at Normal and 220 at High.
+The presets use more rays on a GPU than 0.1.0 did, because a GPU can afford them. On the CPU, Draft, Normal and High use 0.1.0's smaller counts; the app says so under the preset. Custom values are used as typed on any device.
+
+On an RTX 4060 laptop GPU, Blood Gulch bakes in:
+
+<!-- T8 TIMINGS -->
 
 `OpenTool-cli.exe` in the same folder takes the same commands as `python lightmap.py`. Its `check` command tests every part of the download and prints one line per part.
 
@@ -55,7 +59,7 @@ To run from source:
 - Windows.
 - [Python 3.11](https://www.python.org/downloads/).
 - The H1A editing kit, with its tags extracted.
-- For the lightmapper: [Blender 5.2](https://www.blender.org/download/) installed, and [LLVM](https://releases.llvm.org) with the Visual Studio Build Tools ("Desktop development with C++") to compile one library on the first run. [Details](docs/lightmapper.md#requirements).
+- For the lightmapper: [Blender 5.2](https://www.blender.org/download/) installed, a GPU for fast bakes (NVIDIA or AMD, with Vulkan ray queries; without one the bake runs on the CPU and is much slower), and [LLVM](https://releases.llvm.org) with the Visual Studio Build Tools ("Desktop development with C++") to compile one library on the first run. [Details](docs/lightmapper.md#requirements).
 
 ## Installing
 
@@ -68,6 +72,7 @@ To run from source:
    py -3.11 -m pip install -r requirements.txt
    ```
 
+- The requirements include SlangPy, which the GPU baking uses. The Windows app bundles it, and `THIRD_PARTY_NOTICES.md` lists its parts.
 - That's all. There is no package to install; the tools run straight from the folder.
 - The docs write `python`. If `python` on your machine isn't Python 3.11, or opens the Microsoft Store, type `py -3.11` instead.
 - Optional: install into a virtual environment (`py -3.11 -m venv .venv`) to keep these pinned package versions apart from your other Python projects. Running `.\.venv\Scripts\Activate.ps1` then makes `python` and `pip` in that terminal use the environment's Python. Install the requirements after activating.
@@ -114,6 +119,7 @@ python -m pytest -q lightmapper/tests
 
 - Tests marked `ek` read stock tags. Set `HCEEK_TAGS` to your tags folder, or they are skipped.
 - Tests marked `blender` run Blender. They are skipped when Blender isn't found; set `LIGHTMAPPER_BLENDER` if it is not in its standard folder.
+- Tests marked `gpu_nvidia` or `gpu_amd` need a GPU of that vendor with ray queries. They are skipped when there is none.
 
 ## Repository layout
 

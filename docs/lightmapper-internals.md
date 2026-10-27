@@ -57,9 +57,11 @@ In Blender the script:
 2. Adds the sun lamps and links each one to the receivers it may light.
 3. Bakes each page with Cycles at three times its resolution, as a 3 by 3 grid of samples per texel, and averages the samples that land on a surface. It bakes incoming light: direct, indirect and emission. `bounces` controls indirect light and defaults to one bounce. The game multiplies in the surface's own colour when it draws.
 4. Bakes again where a texel at a chart's edge owns only a few of its nine samples, until it has about as many samples as a texel in the middle of a chart. Without this, small charts come out noisy.
-5. Casts `vertex_rays` rays (4,096 by default) from every lightmapped vertex to measure where its light comes from. Vertices at the same position with the same normal are measured once. This vertex pass runs on the CPU with Blender's ray tracer and takes most of the bake time.
+5. Casts `vertex_rays` rays (4,096 by default) from every lightmapped vertex to measure where its light comes from. Vertices at the same position with the same normal are measured once. When a GPU with ray queries is in use, this vertex pass does not run in Blender: after Blender finishes, the lightmapper runs it in a separate process on the GPU through SlangPy and Vulkan. Without a usable GPU, Blender runs it on the CPU with its own ray tracer (`cpu_vertex_rays` rays), and that is the slow case.
 
-By default, page baking tries OptiX where Blender supports it, then CUDA, then the CPU. The `device` setting can select CUDA directly or force CPU baking.
+A short probe at the start of each bake finds the GPUs that support ray queries. `device` then picks the vendor: NVIDIA pages bake on OptiX, falling back to CUDA, and AMD pages on HIP. `auto` takes NVIDIA before AMD and falls back to the CPU when the probe finds nothing. If Cycles cannot open the device, the pages bake on the CPU with a warning. Stages that run on the CPU use `cpu_samples` and `cpu_vertex_rays`, so the CPU gets fewer rays. A bake that asked for NVIDIA or AMD stops instead of falling back, if the vertex pass cannot run on that GPU.
+
+Triangles that sit exactly on top of each other facing opposite ways, such as the two faces of a two-sided sheet, are paired first, so the two faces no longer shadow each other in Cycles or in the vertex pass.
 
 ## 5. Finishing the pages
 
