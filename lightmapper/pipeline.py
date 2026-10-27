@@ -231,6 +231,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         if progress is not None:
             progress(name)
 
+    stage('probe')
     begin('gather')
     scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
     input_file = resolve_reference_path(tags, 'sbsp', input_path)
@@ -277,12 +278,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     seconds['blender_scene'] = blender_stages.get('scene', 0.0)
     seconds['page_bake'] = blender_stages.get('pages', 0.0)
     seconds['blender_vertex'] = blender_stages.get('vertex', 0.0)
+    if choice.cycles and result.device == 'CPU':
+        warning = 'cycles fell back to the CPU'
+        logger.warning('%s', warning)
+        warnings.append(warning)
     if choice.adapter:
         begin('vertex')
-        if result.device == 'CPU':
-            warning = 'cycles fell back to the CPU'
-            logger.warning('%s', warning)
-            warnings.append(warning)
         try:
             vp = vertex_gpu.run_in_child(work, result.diffuse_pages, choice.adapter, s.timeout_s)
         except (vertex_gpu.GpuPassError, gpu.DeviceError) as error:
@@ -299,7 +300,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, masks, class_maps, utilisation, clipped = [], [], [], [], []
-    job_suns = json.loads((work / 'job.json').read_text())['suns']
+    job = json.loads((work / 'job.json').read_text())
+    job_suns = job['suns']
+    if job.get('ambiguous_twin_groups'):
+        warnings.append(f'{job["ambiguous_twin_groups"]} coincident triangle groups of more than two left unpaired')
     boundaries = (prepare_boundaries(scene, job_suns, s.reach, result.edge_sun_lit)
                   if result.vertex_sun_lit is not None else None)
     for i, page in enumerate(pages):
@@ -313,9 +317,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
+    # (OIDN's HIP device cannot open on the Radeon 680M, so AMD denoises on the CPU with a warning even when `amd` is
+    # named; owner decision 2026-10-26)
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,
                                          strict=choice.required and choice.oidn != 'HIP') if s.denoise else None
-    denoise_device = 'CPU' if denoise_worker is None else denoise_worker.device
+    denoise_device = 'off' if denoise_worker is None else denoise_worker.device
     denoise_seconds = 0.0
     try:
         float_pages = finish_pages(pages, raw_pages, masks, class_maps, ambient, s, written=result.written,

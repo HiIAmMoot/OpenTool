@@ -85,7 +85,8 @@ def test_sun_facing_copy_matches_bake(tmp_path):
     receivers = [dict(quad=floor(0, 4, 0, 4)), dict(quad=floor(0, 4, 5, 9, up=False)),
                  dict(quad=quad([(10, 0, 0), (10, 4, 0), (10, 4, 4), (10, 0, 4)], (1, 0, 0))),
                  dict(quad=quad([(12, 0, 0), (12, 0, 4), (12, 4, 4), (12, 4, 0)], (-1, 0, 0)))]
-    suns = [sun(UP), sun((0, 0, -1)), sun((1, 0.2, 0.1))]
+    suns = [sun(UP), sun((0, 0, -1)), sun((1, 0.2, 0.1)),
+            dataclasses.replace(sun((0.3, 0.2, 1)), centre=np.float64([0.3, 0.2, 1]) / np.linalg.norm([0.3, 0.2, 1]))]
     scene = build(receivers)
     out = run_driver(tmp_path, receivers, suns, query=scene.positions, normals=scene.normals,
                      inverse=np.arange(len(scene.positions)), sun_facing=True)
@@ -243,6 +244,21 @@ def test_gpu_matches_cpu_on_the_vertex_pass_scenes(tmp_path, vendor, case):
     np.testing.assert_allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
     np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-4, atol=1e-5)
     assert np.array_equal(result.sun_lit, cpu['sun_lit']) and np.array_equal(result.edge_sun_lit, cpu['edge_sun_lit'])
+
+
+@pytest.mark.blender
+def test_a_chunk_smaller_than_one_dispatch_gives_the_same_irradiance(tmp_path, vendor, monkeypatch):
+    case = CASES['seed_1']
+    cpu, whole = cpu_and_gpu(tmp_path, vendor, **case)
+    assert len(whole.irradiance) >= 2
+    with np.load(tmp_path / 'pages.npz') as data:
+        pages = [data[f'page_{i}'] for i in range(len(data.files))]
+    # one query's rays per chunk
+    monkeypatch.setattr(vertex_gpu, 'MAX_LUMINANCES_PER_CHUNK', case['rays'])
+    split = load_and_run(tmp_path, pages, adapter_for(vendor))
+    np.testing.assert_allclose(split.irradiance, whole.irradiance, rtol=1e-6)
+    np.testing.assert_allclose(split.vector, whole.vector, rtol=1e-6, atol=1e-7)
+    assert split.rays == whole.rays
 
 
 @pytest.mark.blender

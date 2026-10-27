@@ -42,7 +42,7 @@ def log(message):
 
 
 def pick_device(kinds: list[str], required: bool, hiprt: bool) -> str:
-    """Enable every device of the first working GPU type; the name of what was used, 'CPU' when none."""
+    """Enable every device of the first working GPU type and give its name; 'CPU' when none, or raise when required."""
     prefs = bpy.context.preferences.addons['cycles'].preferences
     for kind in kinds:
         try:

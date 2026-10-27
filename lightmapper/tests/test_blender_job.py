@@ -103,7 +103,7 @@ def test_write_job_files_load_back(tmp_path):
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
-        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass'])
+        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ambiguous_twin_groups'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)

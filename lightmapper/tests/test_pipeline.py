@@ -113,7 +113,7 @@ def test_pipeline_outputs(tiny):
     assert summary['settings']['respect_normal_seams'] is True
     assert summary['settings']['texel_samples'] is None
     assert summary['texel_samples'] == settings.resolved_texel_samples()
-    assert summary['devices']['denoise'] == 'CPU'
+    assert summary['devices']['denoise'] == 'off'
 
 
 def test_summary_splits_the_blender_step(tiny, fake, monkeypatch):
@@ -371,6 +371,49 @@ def test_cycles_cpu_fallback_is_reported(gpu_bake, monkeypatch, caplog):
     summary = json.loads((work / 'summary.json').read_text())
     assert 'cycles fell back to the CPU' in caplog.text
     assert 'cycles fell back to the CPU' in summary['warnings']
+
+
+def test_the_probe_is_its_own_stage(tiny):
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert 'probe' in json.loads((work / 'summary.json').read_text())['seconds']
+
+
+def test_cycles_cpu_fallback_is_reported_without_a_chosen_adapter(tiny, monkeypatch, caplog):
+    tags, settings, work = tiny
+    choice = gpu.choose('auto', [])
+    assert choice.adapter is None and choice.cycles
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: choice)
+    fake_blender = api().run_blender
+    monkeypatch.setattr(api(), 'run_blender', lambda *args: replace(fake_blender(*args), device='CPU'))
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['warnings'].count('cycles fell back to the CPU') == 1
+    assert 'cycles fell back to the CPU' in caplog.text
+
+
+def test_no_cycles_cpu_warning_when_cycles_is_not_offered_a_gpu(tiny, monkeypatch):
+    tags, settings, work = tiny
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose('cpu', []))
+    fake_blender = api().run_blender
+    monkeypatch.setattr(api(), 'run_blender', lambda *args: replace(fake_blender(*args), device='CPU'))
+    api().bake(tags, 'level', 'room', replace(settings, device='cpu'), work=work, dry_run=True)
+    assert json.loads((work / 'summary.json').read_text())['warnings'] == []
+
+
+def test_unpaired_coincident_triangle_groups_are_a_summary_warning(tiny, monkeypatch):
+    tags, settings, work = tiny
+    real = blender_job.reversed_twins
+    monkeypatch.setattr(blender_job, 'reversed_twins', lambda corners: (*real(corners)[:2], 3))
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert '3 coincident triangle groups of more than two left unpaired' in summary['warnings']
+
+
+def test_no_twin_warning_when_every_group_pairs(tiny):
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert not any('coincident' in w for w in json.loads((work / 'summary.json').read_text())['warnings'])
 
 
 def test_pipeline_stitches_before_quantisation(tiny, monkeypatch):

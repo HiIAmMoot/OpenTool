@@ -3,7 +3,9 @@
 import io
 import struct
 import subprocess
+import tempfile
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -48,11 +50,46 @@ def test_worker_cpu_result_equals_the_one_off_denoise():
         assert np.array_equal(worker.denoise(page), pages._denoise(page, 60))
 
 
+def test_a_worker_writing_far_more_than_a_pipe_buffer_to_stderr_still_finishes_its_page(monkeypatch):
+    monkeypatch.setattr(pages, '_WORKER', """
+import io, struct, sys
+import numpy as np
+sys.stderr.write('x' * 1_000_000 + '\\n'); sys.stderr.flush()
+def send(value):
+    out = io.BytesIO(); np.save(out, value); data = out.getvalue()
+    sys.stdout.buffer.write(struct.pack('<Q', len(data)) + data); sys.stdout.buffer.flush()
+send(np.array([1], dtype=np.uint8))
+while True:
+    head = sys.stdin.buffer.read(8)
+    if len(head) < 8: break
+    size = struct.unpack('<Q', head)[0]
+    send(np.load(io.BytesIO(sys.stdin.buffer.read(size))))
+""")
+    page = noisy_page()
+    with pages.DenoiseWorker.start('CPU', 30, strict=True) as worker:
+        np.testing.assert_array_equal(worker.denoise(page), page)
+
+
+def test_a_failing_worker_start_reports_the_stderr_tail_once(monkeypatch):
+    monkeypatch.setattr(pages, '_WORKER', """
+import io, struct, sys
+import numpy as np
+out = io.BytesIO(); np.save(out, np.array([0], dtype=np.uint8)); data = out.getvalue()
+sys.stdout.buffer.write(struct.pack('<Q', len(data)) + data); sys.stdout.buffer.flush()
+print('no such device', file=sys.stderr, flush=True)
+sys.exit(2)
+""")
+    with pytest.raises(RuntimeError) as error:
+        pages.DenoiseWorker.start('CUDA', 30, strict=True)
+    assert str(error.value).count('no such device') == 1
+
+
 def test_gpu_failure_falls_back_with_a_warning_unless_strict(caplog):
     worker = pages.DenoiseWorker.start('NOPE', 60, strict=False)
     try:
         assert worker.device == 'CPU' and 'denoising on the CPU' in worker.warnings[0]
         assert 'invalid device type' in worker.warnings[0]
+        assert '\n' not in worker.warnings[0] and '\r' not in worker.warnings[0]
         assert worker.warnings[0] in caplog.text
     finally:
         worker.close()
@@ -200,15 +237,16 @@ def test_strict_page_failure_names_device_and_child_error(monkeypatch):
             def close(self): pass
             def write(self, data): pass
             def flush(self): pass
-        class Error:
-            def read(self): return b'filter exploded'
-        stdin, stdout, stderr = Input(), Output(), Error()
+        stdin, stdout = Input(), Output()
 
         def poll(self): return 1
         def wait(self, timeout=None): return 1
 
     def open_worker(cls, device, timeout):
-        return cls(device, timeout, Process())
+        worker = cls(device, timeout, Process())
+        worker.cwd = tempfile.TemporaryDirectory()
+        (Path(worker.cwd.name) / 'stderr.txt').write_bytes(b'filter exploded\r\n')
+        return worker
 
     def fail(self, payload):
         raise RuntimeError('worker exited')

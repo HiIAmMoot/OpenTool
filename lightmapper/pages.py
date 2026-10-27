@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
@@ -122,6 +123,18 @@ class DenoiseTimeoutError(RuntimeError):
     pass
 
 
+# (the worker's stderr goes to a file: nothing reads a pipe while a page is denoising, so a chatty runtime would
+# fill the pipe and stall the worker until the page's timeout)
+STDERR_FILE = 'stderr.txt'
+
+
+def _stderr_tail(cwd) -> str:
+    try:
+        return (Path(cwd.name) / STDERR_FILE).read_bytes().decode(errors='replace')[-400:].strip()
+    except (AttributeError, OSError):
+        return ''
+
+
 class DenoiseWorker:
     def __init__(self, device, timeout, process):
         self.device, self.timeout, self.process = device, timeout, process
@@ -149,8 +162,9 @@ class DenoiseWorker:
     @classmethod
     def _open(cls, device, timeout):
         cwd = tempfile.TemporaryDirectory()
-        process = subprocess.Popen([sys.executable, '-c', _WORKER, device], stdin=subprocess.PIPE,
-                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd.name)
+        with open(Path(cwd.name) / STDERR_FILE, 'wb') as stderr:
+            process = subprocess.Popen([sys.executable, '-c', _WORKER, device], stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=stderr, cwd=cwd.name)
         worker = cls(device, timeout, process)
         worker.cwd = cwd
 
@@ -164,7 +178,12 @@ class DenoiseWorker:
                 raise RuntimeError(f'worker returned a truncated ready frame ({len(payload)} of {size} bytes)')
             ready = np.load(io.BytesIO(payload))
             if not ready[0]:
-                raise RuntimeError(process.stderr.read().decode(errors='replace')[-400:])
+                # (the worker sends the refusal before it prints the reason)
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                raise RuntimeError('worker refused to start')
 
         try:
             with ThreadPoolExecutor(max_workers=1) as pool:
@@ -187,7 +206,7 @@ class DenoiseWorker:
             if process.poll() is None:
                 process.kill()
                 process.wait()
-            stderr = process.stderr.read().decode(errors='replace')[-400:]
+            stderr = _stderr_tail(cwd)
             cwd.cleanup()
             if stderr:
                 raise RuntimeError(f'{error}: {stderr}') from error
@@ -206,8 +225,7 @@ class DenoiseWorker:
             except (subprocess.TimeoutExpired, OSError):
                 self.process.kill()
                 self.process.wait()
-        stderr = getattr(self.process, 'stderr', None)
-        tail = stderr.read().decode(errors='replace')[-400:] if stderr is not None else ''
+        tail = _stderr_tail(self.cwd)
         if self.cwd is not None:
             self.cwd.cleanup()
             self.cwd = None

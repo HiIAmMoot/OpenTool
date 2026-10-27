@@ -26,6 +26,9 @@ SEED_SPIN = 0.7548776662466927
 GROUP_SIZE = 64
 # the 680M gather kernel on putput's scene.npz at 4096 rays: 266M rays/s (slowest of 10 runs, 0.16-0.22 s each) x 0.25 s
 RAYS_PER_DISPATCH = 66600960
+# a chunk's luminances sit in a device buffer, a float32 readback and a float64 copy (16 bytes each), so this keeps a
+# chunk near 270 MB on a GPU with little memory, where the dispatch cap alone would allow 66.6M luminances
+MAX_LUMINANCES_PER_CHUNK = 16777216
 SHADERS = Path(__file__).with_name('shaders')
 
 
@@ -301,7 +304,7 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
         hemisphere_buffers = dict(hemi_phi=_upload(device, hemi[0], np.float32),
                                   hemi_r=_upload(device, hemi[1], np.float32),
                                   hemi_h=_upload(device, hemi[2], np.float32), rays=rays)
-    step = cap // rays
+    step = max(1, min(cap, MAX_LUMINANCES_PER_CHUNK) // rays)
     for first in range(0, len(ids), step):
         chunk = slice(first, first + step)
         with _stage('gather'):
