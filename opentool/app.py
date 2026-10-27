@@ -27,6 +27,8 @@ class App:
         self.events: queue.Queue = queue.Queue()
         self.blender: blender_find.Blender | None = None
         self._user_chose_blender = False
+        self._blender_change_pending = False
+        self._setting_preset = False
         self._tags: Path | None = None
         self._scenario = ''
         self._scenario_file: Path | None = None
@@ -52,7 +54,8 @@ class App:
         tags_row = ttk.Frame(self.frame)
         tags_row.grid(row=0, column=0, sticky='ew')
         tags_row.columnconfigure(0, weight=1)
-        ttk.Label(tags_row, text='Tags folder').grid(row=0, column=0, sticky='w')
+        self.tags_label = ttk.Label(tags_row, text='HCEK tags folder')
+        self.tags_label.grid(row=0, column=0, sticky='w')
         self.tags_entry = ttk.Entry(tags_row)
         self.tags_entry.grid(row=1, column=0, sticky='ew', pady=(2, 0))
         ttk.Button(tags_row, text='Browse…', command=self._browse_tags).grid(row=1, column=1, padx=(6, 0))
@@ -89,9 +92,9 @@ class App:
         quality.grid(row=6, column=0, sticky='ew', pady=(12, 0))
         ttk.Label(quality, text='Quality').pack(side='left')
         self.preset_var = tk.StringVar(value='Normal')
-        for name in presets.PRESET_NAMES:
+        for name in (*presets.PRESET_NAMES, presets.CUSTOM):
             ttk.Radiobutton(quality, text=name, value=name, variable=self.preset_var,
-                            command=self._update_hint).pack(side='left', padx=(8, 0))
+                            command=lambda selected=name: self._select_preset(selected)).pack(side='left', padx=(8, 0))
         self.preset_hint = ttk.Label(quality, text=presets.PRESET_HINTS['Normal'])
         self.preset_hint.pack(side='left', padx=(12, 0))
 
@@ -108,16 +111,15 @@ class App:
         self.advanced_frame.columnconfigure(1, weight=1)
         self.advanced_vars = {}
         self.advanced_entries = {}
-        self._advanced_placeholders = {}
-        self._advanced_placeholder_values = {}
         self._advanced_open = False
-        labels = {'texels_per_unit': 'Texel density', 'bounces': 'Bounces', 'page_max': 'Page size'}
         for index, name in enumerate(presets.ADVANCED):
-            ttk.Label(self.advanced_frame, text=labels[name]).grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
+            ttk.Label(self.advanced_frame, text=presets.LABELS[name]).grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
             value = tk.StringVar()
             self.advanced_vars[name] = value
-            if name == 'bounces':
-                entry = ttk.Spinbox(self.advanced_frame, from_=0, to=8, textvariable=value)
+            if name in ('bounces', 'samples', 'vertex_rays', 'sky_grid'):
+                maximum = {'bounces': 8, 'samples': 4096, 'vertex_rays': 65536, 'sky_grid': 8}[name]
+                entry = ttk.Spinbox(self.advanced_frame, from_=0 if name == 'bounces' else 1,
+                                    to=maximum, textvariable=value)
             elif name == 'page_max':
                 entry = ttk.Combobox(self.advanced_frame, values=presets.PAGE_MAX_CHOICES, textvariable=value, state='readonly')
             else:
@@ -125,11 +127,8 @@ class App:
             entry.grid(row=index, column=1, sticky='ew', pady=2)
             self.advanced_entries[name] = entry
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
-            entry.bind('<FocusIn>', lambda _event, field=name: self._clear_placeholder(field))
-            entry.bind('<FocusOut>', lambda _event, field=name: self._show_placeholder(field))
-            self._show_placeholder(name)
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
-        self.advanced_error.grid(row=3, column=0, columnspan=2, sticky='w')
+        self.advanced_error.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w')
 
         blender_row = ttk.Frame(self.frame)
         blender_row.grid(row=11, column=0, sticky='ew', pady=(12, 0))
@@ -155,13 +154,13 @@ class App:
         self.frame.rowconfigure(16, weight=1)
         self.open_button = ttk.Button(self.frame, text='Open output folder', command=self._open_output, state='disabled')
         self.open_button.grid(row=17, column=0, sticky='e', pady=(4, 0))
+        self.verbose_var = tk.BooleanVar(value=self.settings.verbose)
+        ttk.Checkbutton(self.frame, text='Detailed log', variable=self.verbose_var).grid(row=18, column=0, sticky='w')
 
     def _restore(self):
-        self.preset_var.set(self.settings.preset)
-        self._update_hint()
+        self._select_preset(self.settings.preset)
         for name, value in self.settings.advanced.items():
             if name in self.advanced_vars:
-                self._clear_placeholder(name)
                 self.advanced_vars[name].set(value)
         if self.settings.advanced_open:
             self._toggle_advanced()
@@ -223,7 +222,7 @@ class App:
             )
             self.bsp_box.configure(values=self._bsps)
             self.bsp_var.set(self._bsps[0] if len(self._bsps) == 1 else '')
-        except (OSError, ValueError, KeyError) as exc:
+        except Exception as exc:
             self._scenario = ''
             self._bsps = []
             self.bsp_box.configure(values=())
@@ -265,7 +264,7 @@ class App:
             raise ValueError(self.blender_label['text'])
         try:
             advanced = presets.parse_advanced({
-                name: '' if self._advanced_placeholders.get(name) else var.get()
+                name: var.get()
                 for name, var in self.advanced_vars.items()
             })
         except ValueError as exc:
@@ -273,18 +272,19 @@ class App:
             raise
         self.advanced_error.configure(text='')
         settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path))
-        return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get())
+        return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(), verbose=self.verbose_var.get())
 
     def remember(self):
         advanced = {
             name: value.get() for name, value in self.advanced_vars.items()
-            if value.get().strip() and not self._advanced_placeholders.get(name)
+            if value.get().strip()
         }
         self.settings = usersettings.UserSettings(
             tags=self.tags_entry.get(), scenario=self._scenario, bsp=self.bsp_var.get(),
             blender=str(self.blender.path) if self.blender else self.settings.blender,
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
             advanced_open=self._advanced_open,
+            verbose=self.verbose_var.get(),
         )
         usersettings.save(self.settings, self.store_path)
 
@@ -295,11 +295,17 @@ class App:
 
     def _update_hint(self):
         self.preset_hint.configure(text=presets.PRESET_HINTS.get(self.preset_var.get(), ''))
-        for name in self.advanced_vars:
-            if self._advanced_placeholders.get(name):
-                self._advanced_placeholders[name] = False
-                self.advanced_vars[name].set('')
-                self._show_placeholder(name)
+
+    def _select_preset(self, name):
+        self._setting_preset = True
+        try:
+            self.preset_var.set(name)
+            self._update_hint()
+            if name in presets.PRESET_NAMES:
+                for field, value in presets.PRESETS[name].items():
+                    self.advanced_vars[field].set(str(value))
+        finally:
+            self._setting_preset = False
 
     def _toggle_advanced(self):
         if self._advanced_open:
@@ -310,33 +316,19 @@ class App:
             self.advanced_button.configure(text='Advanced ▾')
         self._advanced_open = not self._advanced_open
 
-    def _placeholder_text(self, name):
-        settings = presets.build_settings(self.preset_var.get(), {}, str(self.blender.path) if self.blender else '')
-        value = getattr(settings, name)
-        return str(value)
-
-    def _show_placeholder(self, name):
-        variable = self.advanced_vars[name]
-        if variable.get():
-            return
-        placeholder = self._placeholder_text(name)
-        self._advanced_placeholders[name] = True
-        self._advanced_placeholder_values[name] = placeholder
-        variable.set(placeholder)
-        self.advanced_entries[name].configure(foreground='gray')
-
-    def _clear_placeholder(self, name):
-        if not self._advanced_placeholders.get(name):
-            return
-        self._advanced_placeholders[name] = False
-        self.advanced_vars[name].set('')
-        self.advanced_entries[name].configure(foreground='black')
-
     def _advanced_value_changed(self, name):
-        if (self._advanced_placeholders.get(name)
-                and self.advanced_vars[name].get() != self._advanced_placeholder_values.get(name)):
-            self._advanced_placeholders[name] = False
-            self.advanced_entries[name].configure(foreground='black')
+        if self._setting_preset:
+            return
+        selected = self.preset_var.get()
+        if selected in presets.PRESET_NAMES:
+            try:
+                matches = all(str(presets.PRESETS[selected][field]) == self.advanced_vars[field].get()
+                              for field in presets.ADVANCED)
+            except KeyError:
+                matches = False
+            if not matches:
+                self.preset_var.set(presets.CUSTOM)
+                self._update_hint()
 
     def _browse_tags(self):
         path = filedialog.askdirectory()
@@ -354,7 +346,7 @@ class App:
         if path:
             try:
                 self.set_scenario_file(Path(path))
-            except ValueError as exc:
+            except Exception as exc:
                 self._set_optional_label(self.scenario_error, str(exc))
 
     def _discover_blender(self):
@@ -376,7 +368,7 @@ class App:
         path = filedialog.askopenfilename(filetypes=[('Blender', 'blender.exe')])
         if not path:
             return
-        self._user_chose_blender = True
+        self._blender_change_pending = True
         self._set_blender_status('Checking Blender…')
         self._update_bake_state()
         events = self.events
@@ -418,6 +410,9 @@ class App:
                         self.blender = None
                     self._set_blender_status(str(result))
                 else:
+                    if source == 'change':
+                        self._user_chose_blender = True
+                    self._blender_change_pending = False
                     self.blender = result
                     self.settings.blender = str(result.path)
                     self._set_blender_status(f'Blender {result.version[0]}.{result.version[1]} ({result.path})')

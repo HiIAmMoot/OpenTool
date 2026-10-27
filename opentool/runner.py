@@ -25,6 +25,7 @@ class BakeRequest:
     settings: Settings
     new_names: bool
     work: Path | None = None
+    verbose: bool = False
 
 
 @dataclass
@@ -92,6 +93,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             if follower is not None:
                 follower.stop(); follower.join(); follower = None
             safe_emit(('stage', stage))
+            safe_emit(('log', f'INFO: stage: {stage}'))
             if stage == 'blender':
                 try:
                     total = len(json.loads((work / 'job.json').read_text())['pages'])
@@ -125,6 +127,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         except FileNotFoundError:
             pass
         event_handler = _EventHandler(emit)
+        event_handler.setLevel(logging.INFO if request.verbose else logging.WARNING)
         file_handler = logging.FileHandler(work / 'opentool.log', mode='w', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))

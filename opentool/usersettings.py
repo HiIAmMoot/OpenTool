@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .presets import ADVANCED, PRESET_NAMES
+from .presets import ADVANCED, CUSTOM, PRESET_NAMES
 
 
 @dataclass
@@ -14,9 +14,10 @@ class UserSettings:
     bsp: str = ''
     blender: str = ''
     preset: str = 'Normal'
-    new_names: bool = True
+    new_names: bool = False
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
+    verbose: bool = False
 
 
 def settings_path() -> Path:
@@ -46,7 +47,7 @@ def load(path: Path | None = None) -> UserSettings:
             valid = type(value) is type(default)
         if valid:
             values[item.name] = value
-    if values.get('preset', defaults.preset) not in PRESET_NAMES:
+    if values.get('preset', defaults.preset) not in (*PRESET_NAMES, CUSTOM):
         values['preset'] = defaults.preset
     return UserSettings(**values)
 

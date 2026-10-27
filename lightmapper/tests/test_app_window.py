@@ -77,7 +77,10 @@ def test_first_screen_widgets(app):
     for name in ('tags_entry', 'scenario_entry', 'bsp_box', 'bake_button', 'progress', 'log_box', 'open_button'):
         assert hasattr(app, name)
     assert str(app.bake_button['state']) == 'disabled' and str(app.open_button['state']) == 'disabled'
-    assert app.new_names_var.get() is True and app.preset_var.get() == 'Normal'
+    assert app.new_names_var.get() is False and app.preset_var.get() == 'Normal'
+    assert app.verbose_var.get() is False
+    assert app.tags_label['text'] == 'HCEK tags folder'
+    assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
     assert app.advanced_frame.winfo_manager() == ''
     app._toggle_advanced()
     assert app.advanced_frame.winfo_manager() == 'grid'
@@ -98,9 +101,26 @@ def test_request_carries_the_form(app, tiny):
     app.set_tags(str(tags))
     app.set_scenario_file(tags / 'level.scenario')
     pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
-    app.preset_var.set('Draft')
+    app._select_preset('Draft')
     req = app.request()
-    assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', True, 64, None)
+    assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', False, 64, None)
+
+
+def test_draft_fills_all_advanced_fields(app):
+    app._select_preset('Draft')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1.0', samples='64', vertex_rays='256', sky_grid='2', bounces='1', page_max='512')
+
+
+def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
+    store = tmp_path / 'settings.json'
+    app = make_app(store_path=store)
+    app._select_preset('Draft')
+    app.advanced_vars['texels_per_unit'].set('3')
+    assert app.preset_var.get() == 'Custom'
+    app.remember()
+    restored = make_app(store_path=store)
+    assert restored.preset_var.get() == 'Custom'
+    assert restored.advanced_vars['texels_per_unit'].get() == '3'
 
 
 def test_bad_advanced_value_blocks_the_request(app, tiny):
@@ -121,7 +141,7 @@ def test_settings_are_remembered(tmp_path, tiny, make_app):
     a.set_tags(str(tags))
     a.set_scenario_file(tags / 'level.scenario')
     pump(a.root, lambda: a.bsp_box.get() == 'room' and a.blender is not None)
-    a.preset_var.set('High')
+    a._select_preset('High')
     a.remember()
     b = make_app(store_path=tmp_path / 's.json')
     assert b.preset_var.get() == 'High' and b.tags_entry.get() == str(tags)
@@ -283,6 +303,35 @@ def test_change_result_wins_over_late_discovery(make_app, monkeypatch, tmp_path)
     time.sleep(0.15)
     app.root.update()
     assert app.blender.path == picked
+
+
+def test_rejected_pick_does_not_discard_discovery(make_app, monkeypatch, tmp_path, tiny):
+    release = threading.Event()
+    def discovery(_remembered=None):
+        release.wait(5)
+        return Blender(Path('C:/b/discovered.exe'), (5, 2))
+    app = make_app(find_blender=discovery)
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **_kwargs: str(tmp_path / 'old.exe'))
+    monkeypatch.setattr(app_module.blender_find, 'blender_version', lambda _path: (4, 1))
+    app._choose_blender()
+    pump(app.root, lambda: app.blender_label['text'] != 'Checking Blender…')
+    release.set()
+    pump(app.root, lambda: app.blender is not None)
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
+    assert app.blender.version == (5, 2) and str(app.bake_button['state']) == 'normal'
+
+
+def test_garbage_scenario_clears_previous_bsp_and_disables_bake(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.blender is not None)
+    garbage = tags / 'garbage.scenario'; garbage.write_bytes(b'\xff\x00not a scenario')
+    app.set_scenario_file(garbage)
+    assert app._scenario == '' and tuple(app.bsp_box['values']) == () and app.bsp_var.get() == ''
+    assert str(app.bake_button['state']) == 'disabled' and app.scenario_error['text']
 
 
 def test_discovery_worker_does_not_capture_app(make_app, monkeypatch):

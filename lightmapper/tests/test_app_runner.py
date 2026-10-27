@@ -93,6 +93,22 @@ def test_runner_forwards_log_lines_and_writes_a_log_file(tiny):
     assert 'stage: write' in (out.work / 'opentool.log').read_text()
 
 
+def test_verbose_controls_info_forwarding_but_file_keeps_info(tiny, monkeypatch):
+    tags, settings, work = tiny
+    real_bake = pipeline.bake
+    def with_info(*args, **kwargs):
+        logging.getLogger('lightmapper.test').info('an info record')
+        return real_bake(*args, **kwargs)
+    monkeypatch.setattr(runner.pipeline, 'bake', with_info)
+    quiet_events = []
+    quiet = run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'quiet', verbose=False), quiet_events.append)
+    assert not any(event[0] == 'log' and 'an info record' in event[1] for event in quiet_events)
+    assert 'an info record' in (quiet.work / 'opentool.log').read_text()
+    loud_events = []
+    run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'loud', verbose=True), loud_events.append)
+    assert any(event[0] == 'log' and 'an info record' in event[1] for event in loud_events)
+
+
 def test_runner_reports_validation_problems(tiny, monkeypatch):
     monkeypatch.setattr(runner, 'validate_bsp', lambda *a, **k: ['last element must have bitmap -1'])
     out, _ = run(tiny)
