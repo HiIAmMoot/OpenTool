@@ -4,6 +4,7 @@ from dataclasses import replace
 import importlib.util
 import json
 import struct
+import time
 
 import numpy as np
 import pytest
@@ -126,6 +127,33 @@ def test_summary_splits_the_blender_step(tiny, fake, monkeypatch):
     assert 'denoise' in seconds and seconds['denoise'] == 0 and seconds['finish'] >= 0
 
 
+def test_finish_excludes_the_denoise_worker_start_and_pages(tiny, monkeypatch):
+    tags, settings, work = tiny
+
+    def finish_seconds(delay):
+        class Worker:
+            device = 'CPU'
+            warnings = []
+            seconds = delay
+
+            def close(self): pass
+
+        def start(cls, device, timeout, strict):
+            time.sleep(delay)
+            return Worker()
+
+        monkeypatch.setattr(api().DenoiseWorker, 'start', classmethod(start))
+        api().bake(tags, 'level', 'room', replace(settings, denoise=True), work=work, dry_run=True)
+        return json.loads((work / 'summary.json').read_text())['seconds']
+
+    finish_seconds(0)  # the first bake pays one-time costs that would hide the start-up
+    baseline = finish_seconds(0)
+    slow = finish_seconds(2.0)
+    assert slow['denoise'] == 2.0
+    # the start-up sits inside the finish stage's wall time, so it must be taken out of finish
+    assert 0 <= slow['finish'] < baseline['finish'] + 1.0
+
+
 def test_denoise_startup_fallback_is_logged_and_summarized(tiny, monkeypatch, caplog):
     from lightmapper.pages import DenoiseWorker
 
@@ -149,6 +177,7 @@ def test_denoise_mid_page_fallback_is_logged_and_summarized(tiny, monkeypatch, c
     class Worker:
         device = 'CUDA'
         warnings = []
+        seconds = 0.0
 
         def denoise(self, page):
             self.device = 'CPU'
@@ -185,7 +214,7 @@ def test_required_amd_starts_hyp_worker_non_strict(tiny, monkeypatch):
     class Worker:
         device = 'CPU'
         warnings = []
-        def denoise(self, page): return page
+        seconds = 0.0
         def close(self): pass
 
     monkeypatch.setattr(api().DenoiseWorker, 'start', classmethod(

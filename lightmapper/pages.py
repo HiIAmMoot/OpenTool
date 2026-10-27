@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import numpy as np
@@ -127,9 +128,13 @@ class DenoiseWorker:
         self.warnings = []
         self.cwd = None
         self.strict = True
+        # start-up plus every page's denoise, for the bake's profile
+        self.seconds = 0.0
+        self._timing = False
 
     @classmethod
     def start(cls, device, timeout, strict):
+        began = perf_counter()
         try:
             worker = cls._open(device, timeout)
         except (RuntimeError, OSError) as error:
@@ -138,6 +143,7 @@ class DenoiseWorker:
             worker = cls._open('CPU', timeout)
             worker._warn_fallback(f'OIDN {device} failed ({error}); denoising on the CPU')
         worker.strict = strict
+        worker.seconds += perf_counter() - began
         return worker
 
     @classmethod
@@ -238,6 +244,18 @@ class DenoiseWorker:
         return np.load(io.BytesIO(result))
 
     def denoise(self, page):
+        # _page_failure retries through this method, so only the outermost call may add its time
+        if self._timing:
+            return self._denoise(page)
+        self._timing = True
+        began = perf_counter()
+        try:
+            return self._denoise(page)
+        finally:
+            self._timing = False
+            self.seconds += perf_counter() - began
+
+    def _denoise(self, page):
         padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
         data = io.BytesIO(); np.save(data, padded); payload = data.getvalue()
         with ThreadPoolExecutor(max_workers=1) as pool:

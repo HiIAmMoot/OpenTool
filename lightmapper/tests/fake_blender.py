@@ -11,7 +11,6 @@ launch_seconds = time.time() - float(os.environ.get('LIGHTMAPPER_LAUNCH_TIME', t
 import numpy as np
 
 
-
 def page(i, w, h):
     # different in every row, column and channel, so a flip or transpose shows
     y, x, c = np.mgrid[0:h, 0:w, 0:3]

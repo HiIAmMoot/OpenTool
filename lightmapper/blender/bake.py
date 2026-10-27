@@ -808,6 +808,7 @@ def main():
         'seconds_scene': np.float64(0), 'seconds_pages': np.float64(0),
         'seconds_vertex': np.float64(0),
     }
+    scene_started = time.perf_counter()
     with np.load(os.path.join(root, job['scene'])) as data:
         scene_data = {key: data[key] for key in data.files}
     out['vertex_rays_cast'] = np.int64(0)
@@ -815,7 +816,6 @@ def main():
         with np.load(os.path.join(root, job['diffuse'])) as data:
             diffuse_pages = [data[f'diffuse_{i}'] for i in range(len(job['pages']))]
     else:
-        scene_started = time.perf_counter()
         scene, device = setup_scene(job)
         log(f'device {device}')
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],

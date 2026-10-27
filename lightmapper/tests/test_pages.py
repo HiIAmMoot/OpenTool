@@ -3,6 +3,7 @@
 import io
 import struct
 import subprocess
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -218,6 +219,44 @@ def test_strict_page_failure_names_device_and_child_error(monkeypatch):
     with pytest.raises(RuntimeError, match=r'OIDN CUDA.*filter exploded.*Visual C\+\+ redistributable'):
         worker.denoise(np.ones((2, 2, 3), np.float32))
     worker.close()
+
+
+def test_denoise_seconds_count_a_fallback_page_once_and_include_the_start(monkeypatch):
+    class Process:
+        class Input:
+            def close(self): pass
+            def write(self, data): pass
+            def flush(self): pass
+        class Output:
+            def read(self, size=-1): return b''
+        stdin, stdout = Input(), Output()
+        def poll(self): return 0
+        def wait(self, timeout=None): return 0
+
+    def open_worker(cls, device, timeout):
+        time.sleep(0.2)
+        worker = cls(device, timeout, Process())
+        worker.cwd = None
+        return worker
+
+    def exchange(self, payload):
+        if self.device == 'CPU':
+            time.sleep(0.4)
+            return np.load(io.BytesIO(payload))
+        raise RuntimeError('worker exited')
+
+    monkeypatch.setattr(pages.DenoiseWorker, '_open', classmethod(open_worker))
+    monkeypatch.setattr(pages.DenoiseWorker, '_exchange', exchange, raising=False)
+    worker = pages.DenoiseWorker.start('CUDA', 10, strict=False)
+    startup = worker.seconds
+    assert startup >= 0.2
+    began = time.perf_counter()
+    worker.denoise(np.ones((2, 2, 3), np.float32))
+    wall = time.perf_counter() - began
+    worker.close()
+    # the CPU retry runs through denoise again; adding it to the outer call would double its 0.4 s
+    assert worker.seconds - startup == pytest.approx(wall, abs=0.15)
+    assert worker.device == 'CPU'
 
 
 @pytest.mark.gpu_nvidia
