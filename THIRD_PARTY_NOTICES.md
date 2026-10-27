@@ -1,6 +1,6 @@
 # Third-party notices
 
-OpenTool is licensed under version 3 of the GNU General Public License (see [LICENSE](LICENSE)). It includes or uses the following third-party work. Each part keeps its own license, and each of those licenses (MIT, BSD, HPND, Apache 2.0) allows use in a GPLv3 program.
+OpenTool is licensed under version 3 of the GNU General Public License (see [LICENSE](LICENSE)). It includes or uses the following third-party work. Each part keeps its own license and is redistributed under its own terms.
 
 ## Included in this repository
 
@@ -74,6 +74,27 @@ Pillow is included under the HPND license.
 pyoidn, the Python binding for Open Image Denoise, uses the MIT license.
 
 Open Image Denoise, oneTBB and the oneAPI/Level Zero loaders use Apache 2.0 and MIT licenses. Their license texts and component notices are in `licenses/oidn/`.
+
+### SlangPy
+
+SlangPy 0.43.1 uses Apache-2.0 WITH LLVM-exception. It provides the Vulkan GPU probe and vertex pass. Its wheel license is in `licenses/slangpy/licenses/`, with the full Apache text and exception in `licenses/slangpy-third-party/slangpy.txt`.
+
+sgl.dll is built with NVIDIA OptiX support compiled in, as distributed in the SlangPy wheel; the OptiX SDK headers are not included.
+
+Slang 2026.12 (compiler, GLSL module and standard modules) and slang-rhi use Apache-2.0 WITH LLVM-exception. The remaining bundled components include:
+
+- fmt, robin-map, Dear ImGui (including its stb notices), stb image codecs, the RenderDoc API header, OffsetAllocator, NVAPI, libdeflate, miniz, unordered_dense, fast_float and mimalloc (MIT or an offered MIT option).
+- nanobind, nanothread, tevclient, OpenEXR, Imath, LZ4, glslang and cmark (BSD and MIT notices).
+- GLFW, zlib and AsmJit (Zlib license); libpng (libpng license); libjpeg-turbo (IJG, BSD and Zlib terms). This software is based in part on the work of the Independent JPEG Group.
+- TinyEXR and its embedded OpenEXR code (BSD-3-Clause), LMDB (OpenLDAP Public License 2.8), SPIRV-Tools (Apache-2.0), SPIRV-Headers (MIT), and Vulkan-Headers (Apache-2.0 or MIT).
+- Inconsolata and Montserrat fonts (SIL Open Font License 1.1), kept under that license.
+- Martin Moene's bit header (Boost Software License 1.0) and the DXC API header declarations used by Slang (University of Illinois/NCSA; the DXC DLL is not included).
+
+The pinned versions, source locations and one text per component are listed in `licenses/slangpy-third-party/README.md`. In the repository they are under `packaging/licenses/slangpy/`. The optional SPIRV-Tools allocator notice is retained conservatively. The D3D12 SDK DLLs, DXC, DXIL, PIX, Slang LLVM backend, test images, tests and benchmarks are excluded. SlangPy's `torchintegration` package is required by its import; PyTorch itself is not bundled.
+
+SlangPy also imports typing_extensions, under the PSF License; see `licenses/typing_extensions/`.
+
+### Other app components
 
 The Microsoft Visual C++ runtime DLLs are redistributed as Distributable Code under the [Visual Studio license terms](https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/).
 

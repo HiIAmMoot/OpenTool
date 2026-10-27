@@ -4,10 +4,15 @@ import sys
 
 import pytest
 
-from lightmapper import blender_job, frozen, pages
+from lightmapper import blender_job, frozen, pages, resources, vertex_gpu
 from lightmapper.blender_job import write_job, run_blender
 from lightmapper.settings import Settings
 from test_blender_job import fake, make_scene, make_suns, AMBIENT
+
+
+def test_shader_is_a_required_file_where_the_pass_looks_for_it():
+    assert 'lightmapper/shaders/vertex_pass.slang' in resources.REQUIRED and resources.missing() == []
+    assert vertex_gpu.SHADERS == frozen.bundle_dir() / 'lightmapper' / 'shaders'
 
 
 def test_run_blender_starts_blender_without_a_window(tmp_path, monkeypatch, fake):

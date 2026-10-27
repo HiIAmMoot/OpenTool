@@ -3,7 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import blender_find, pages, raster, resources, xatlas_c
+from . import blender_find, gpu, pages, raster, resources, xatlas_c
 
 RUNTIME_MODULES = ('msvcp140.dll', 'vcruntime140_1.dll')
 SKIPPED = 'not checked in this build'
@@ -95,6 +95,16 @@ def run_checks(skip: tuple[str, ...] = ()) -> list[tuple[str, bool, str]]:
         results.append(('denoiser', True, 'OIDN denoised a constant 32x32 page'))
     except Exception as exc:
         results.append(('denoiser', False, str(exc)))
+
+    try:
+        adapters, reason = gpu.run_probe()
+        order = {gpu.NVIDIA: 0, gpu.AMD: 1}
+        adapters = sorted(adapters, key=lambda adapter: order.get(adapter.vendor_id, 2))
+        names = ', '.join(f'{adapter.name} ({adapter.backend})' for adapter in adapters if adapter.ray_query)
+        detail = names or f'no GPU with ray queries ({reason or "no adapters seen"})'
+        results.append(('gpu', True, detail))
+    except gpu.ProbeError as exc:
+        results.append(('gpu', False, str(exc)))
 
     if 'blender' in skip:
         # (a CI runner has no Blender; the build still self-tests everything else)

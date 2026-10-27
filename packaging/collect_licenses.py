@@ -9,10 +9,11 @@ import sys
 
 DISTRIBUTIONS = (
     'numpy', 'scipy', 'numba', 'llvmlite', 'pyoidn', 'cffi', 'pycparser',
-    'pillow', 'pyinstaller', 'packaging',
+    'pillow', 'pyinstaller', 'packaging', 'slangpy', 'typing_extensions',
 )
 LICENSE_NAME = re.compile(r'^(LICEN[CS]E|COPYING|NOTICE)', re.IGNORECASE)
 OIDN_LICENSES = Path(__file__).resolve().parent / 'licenses' / 'oidn'
+SLANGPY_LICENSES = Path(__file__).resolve().parent / 'licenses' / 'slangpy'
 
 
 def collect(destination: Path) -> None:
@@ -59,6 +60,12 @@ def collect(destination: Path) -> None:
         if not source.is_file():
             missing.append(str(source))
         copies.append((source, destination / 'oidn' / source.name))
+
+    slangpy_files = sorted(SLANGPY_LICENSES.glob('*'))
+    if not slangpy_files:
+        missing.append('SlangPy third-party licenses')
+    for source in slangpy_files:
+        copies.append((source, destination / 'slangpy-third-party' / source.name))
 
     if missing:
         raise RuntimeError('Missing license files:\n' + '\n'.join(f'  {name}' for name in missing))

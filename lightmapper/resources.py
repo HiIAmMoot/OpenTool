@@ -6,6 +6,7 @@ from .frozen import bundle_dir
 REQUIRED: tuple[str, ...] = (
     'lightmapper/calibration.json',
     'lightmapper/blender/bake.py',
+    'lightmapper/shaders/vertex_pass.slang',
     'lightmapper/tagio/layouts/LICENSE',
     'lightmapper/tagio/layouts/bitmap.xml',
     'lightmapper/tagio/layouts/gbxmodel.xml',

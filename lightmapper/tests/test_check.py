@@ -9,6 +9,42 @@ from lightmapper.resources import REQUIRED, missing
 REPO = Path(__file__).resolve().parents[2]
 
 
+def dict_of(results):
+    return {name: (ok, detail) for name, ok, detail in results}
+
+
+def test_gpu_check_passes_when_the_probe_answers_without_a_gpu(monkeypatch):
+    monkeypatch.setattr(check.gpu, 'run_probe', lambda: ([], 'vulkan: no driver'))
+    assert dict_of(check.run_checks(('blender',)))['gpu'] == (True, 'no GPU with ray queries (vulkan: no driver)')
+
+
+def test_gpu_check_names_the_ray_query_gpus(monkeypatch):
+    from lightmapper.gpu import Adapter, NVIDIA
+    rtx = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', NVIDIA, (1,), 'vulkan', True)
+    no_rays = Adapter('No ray queries', NVIDIA, (2,), 'vulkan', False)
+    monkeypatch.setattr(check.gpu, 'run_probe', lambda: ([rtx, no_rays], None))
+    results = check.run_checks(('blender',))
+    assert dict_of(results)['gpu'] == (True, 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)')
+    names = [name for name, _, _ in results]
+    assert names == ['files', 'xatlas', 'numba', 'runtime', 'denoiser', 'gpu', 'blender']
+
+
+def test_gpu_check_fails_when_the_probe_child_dies(monkeypatch):
+    def dies():
+        raise check.gpu.ProbeError('GPU probe process died (exit 3)')
+    monkeypatch.setattr(check.gpu, 'run_probe', dies)
+    assert dict_of(check.run_checks(('blender',)))['gpu'] == (False, 'GPU probe process died (exit 3)')
+
+
+def test_gpu_check_lists_nvidia_before_amd(monkeypatch):
+    from lightmapper.gpu import Adapter, AMD, NVIDIA
+    amd = Adapter('AMD Radeon(TM) Graphics', AMD, (1,), 'vulkan', True)
+    nvidia = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', NVIDIA, (2,), 'vulkan', True)
+    monkeypatch.setattr(check.gpu, 'run_probe', lambda: ([amd, nvidia], None))
+    assert dict_of(check.run_checks(('blender',)))['gpu'] == (
+        True, 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan), AMD Radeon(TM) Graphics (vulkan)')
+
+
 def test_required_files_are_all_present_in_the_repo():
     assert missing() == []
 
