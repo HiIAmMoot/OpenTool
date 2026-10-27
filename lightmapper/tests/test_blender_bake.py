@@ -160,7 +160,8 @@ def twin_device_pages():
 
 @pytest.mark.blender
 @pytest.mark.parametrize('device', TWIN_DEVICES)
-@pytest.mark.parametrize('translation', [(0, 0, 0), (400, -400, 100)], ids=['origin', 'far'])
+@pytest.mark.parametrize('translation', [(0, 0, 0), (400, -400, 100), (400, -400, 1400)],
+                         ids=['origin', 'far', 'stock-height'])
 @pytest.mark.parametrize('reverse', [False, True], ids=['lower-first', 'upper-first'])
 def test_twin_sheet_bakes_light_from_a_panel_on_every_device(tmp_path, device, translation, reverse,
                                                            twin_device_pages):
@@ -191,6 +192,51 @@ def test_twin_separation_keeps_a_real_blocker(tmp_path, device):
     assert page[1:-1, 1:7].max() < 0.01
 
 
+def inspect_twin_geometry(tmp_path, blender_exe, scene):
+    s = Settings(device='cpu', samples=1, vertex_rays=1)
+    write_job(tmp_path, scene, [(16, 8)], [], {}, s)
+    original = (tmp_path / 'scene.npz').read_bytes()
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('twin_geometry_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    assert (tmp_path / 'scene.npz').read_bytes() == original
+    with np.load(tmp_path / 'geometry.npz') as data:
+        return {key: data[key] for key in data.files}
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('coordinate', [1400, 4096, -1400, -4096])
+@pytest.mark.parametrize('tilted', [False, True], ids=['horizontal', 'tilted'])
+def test_twin_separation_survives_float32_at_large_coordinates(tmp_path, blender_exe, coordinate, tilted):
+    if tilted:
+        base = np.float32([coordinate] * 3)
+        u, v = np.float32([2, -1, 0]), np.float32([3, 0, -1])
+        normal = np.float64([1, 2, 3]) / np.sqrt(14)
+    else:
+        base = np.float32([0, 0, coordinate])
+        u, v = np.float32([2, 0, 0]), np.float32([0, 2, 0])
+        normal = np.float64([0, 0, 1])
+    positions = np.array([base, base + u, base + u + v, base + v])
+    order = [0, 3, 2, 1]
+    scene = build([dict(quad=quad(positions, normal)), dict(quad=quad(positions[order], -normal))])
+    mesh = inspect_twin_geometry(tmp_path, blender_exe, scene)
+    original = scene.positions[scene.tris].astype(np.float64)
+    moved = mesh['positions'][mesh['tris']].astype(np.float64)
+    normals = np.array([normal, normal, -normal, -normal])
+    outward = ((moved - original) * normals[:, None]).sum(axis=2)
+    assert (outward > 0).all(), 'every float32 corner must remain separated outward'
+    # four float32 steps at these magnitudes are exact powers of two, independent of the bake implementation
+    distance = {1400: 1 / 2048, 4096: 1 / 512}[abs(coordinate)]
+    expected = (original + distance * normals[:, None]).astype(np.float32)
+    np.testing.assert_array_equal(moved, expected,
+                                  err_msg='separation must retain the four-step rounding margin')
+    print(f'TWIN_FLOAT32 coordinate={coordinate} tilted={tilted} '
+          f'distance={distance} min_outward={outward.min()} max_outward={outward.max()}')
+
+
 @pytest.mark.blender
 @pytest.mark.parametrize('triangles', [4, 20000])
 def test_twin_separation_copies_only_bake_corners(tmp_path, blender_exe, triangles):
@@ -217,17 +263,8 @@ def test_twin_separation_copies_only_bake_corners(tmp_path, blender_exe, triangl
             setattr(scene, name, np.concatenate([value, value[:1]]))
     # smooth normals deliberately disagree with geometric normals
     scene.normals[:] = [0.6, 0, 0.8]
-    s = Settings(device='cpu', samples=1, vertex_rays=1)
-    write_job(tmp_path, scene, [(16, 8)], [], {}, s)
-    original = (tmp_path / 'scene.npz').read_bytes()
-    done = subprocess.run(
-        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
-         str(Path(__file__).with_name('twin_geometry_driver.py')), '--', str(tmp_path)],
-        capture_output=True, text=True, stdin=subprocess.DEVNULL,
-        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
-    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
-    assert (tmp_path / 'scene.npz').read_bytes() == original
-    with np.load(tmp_path / 'scene.npz') as source, np.load(tmp_path / 'geometry.npz') as mesh:
+    mesh = inspect_twin_geometry(tmp_path, blender_exe, scene)
+    with np.load(tmp_path / 'scene.npz') as source:
         paired = source['tri_twin'][:len(scene.tris)] >= 0
         assert paired.sum() == triangles
         assert len(mesh['positions']) == len(np.unique(scene.tris)) + 3 * triangles

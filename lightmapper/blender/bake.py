@@ -26,6 +26,8 @@ RAY_LENGTH = 1e5
 RAY_EPSILON = 1e-3
 # coincident reverse faces self-shadow in Cycles; separate only bake copies, including at far-out map positions
 TWIN_SEPARATION = 1e-4
+# the dominant normal axis carries at least 1/sqrt(3) of the move, giving over two float32 steps of rounding margin
+TWIN_SEPARATION_STEPS = 4
 PASS_LIMIT = 8
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
@@ -324,7 +326,9 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
         normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
         length = np.linalg.norm(normal, axis=1, keepdims=True)
         normal /= np.where(length > 0, length, 1)
-        moved = corners + TWIN_SEPARATION * normal[:, None]
+        spacing = np.spacing(np.abs(corners).astype(np.float32)).max(axis=(1, 2))
+        separation = np.maximum(TWIN_SEPARATION, TWIN_SEPARATION_STEPS * spacing.astype(np.float64))
+        moved = corners + separation[:, None, None] * normal[:, None]
         local[paired] = np.arange(len(used), len(used) + len(copied)).reshape(-1, 3)
         bake_positions = np.concatenate([positions[used], moved.reshape(-1, 3)]).astype(np.float32)
         used = np.concatenate([used, copied])
