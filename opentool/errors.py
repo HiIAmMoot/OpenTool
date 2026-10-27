@@ -28,7 +28,7 @@ def explain(exc: BaseException, work: Path | None = None) -> str:
         vendor = {'nvidia': 'NVIDIA', 'amd': 'AMD'}[failed.group(1)]
         return (f'The vertex pass failed on the {vendor} GPU. Pick Auto to fall back to the CPU, or CPU only. '
                 'The full error is in the log.')
-    if isinstance(exc, RuntimeError) and re.match(r'OIDN (CUDA|HIP) failed', str(exc)):
+    if isinstance(exc, RuntimeError) and re.match(r'OIDN (CUDA|HIP) ', str(exc)):
         return 'The denoiser could not start on the GPU. Pick Auto to fall back to the CPU, or CPU only.'
     if isinstance(exc, ValueError):
         text = str(exc)

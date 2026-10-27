@@ -1,4 +1,4 @@
-﻿import pytest
+import pytest
 
 from lightmapper.gpu import Adapter
 from opentool.devices import device_hint, gpu_text, result_line

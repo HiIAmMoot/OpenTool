@@ -88,7 +88,8 @@ def read_summary(work: Path) -> tuple[dict | None, dict | None, list[str]]:
     try:
         summary = json.loads((work / 'summary.json').read_text())
         devices, rays, warnings = summary['devices'], summary.get('rays'), summary.get('warnings', [])
-        if isinstance(devices, dict) and isinstance(warnings, list):
+        if (isinstance(devices, dict) and {'page_bake', 'vertex_pass', 'denoise'} <= devices.keys()
+                and isinstance(warnings, list)):
             return devices, rays if isinstance(rays, dict) else None, [str(text) for text in warnings]
     except (OSError, ValueError, KeyError, TypeError):
         pass

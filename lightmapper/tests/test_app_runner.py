@@ -339,3 +339,19 @@ def test_unreadable_summary_leaves_devices_empty(tiny, monkeypatch):
     monkeypatch.setattr(runner.pipeline, 'bake', bake_then_break)
     out, _ = run(tiny)
     assert out.status == 'done' and out.devices is None and out.warnings == []
+
+
+def test_summary_without_all_three_devices_leaves_devices_empty(tiny, monkeypatch):
+    real = runner.pipeline.bake
+
+    def bake_then_cut(*a, **k):
+        result = real(*a, **k)
+        path = k['work'] / 'summary.json'
+        summary = json.loads(path.read_text())
+        del summary['devices']['denoise']
+        path.write_text(json.dumps(summary))
+        return result
+
+    monkeypatch.setattr(runner.pipeline, 'bake', bake_then_cut)
+    out, _ = run(tiny)
+    assert out.status == 'done' and out.devices is None and out.warnings == []

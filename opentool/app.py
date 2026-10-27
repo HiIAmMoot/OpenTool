@@ -38,6 +38,7 @@ class App:
         self._adapters: list | None = None
         self._gpu_reason: str | None = None
         self.busy = False
+        self._live_warnings: set[str] = set()
         self.stage: str | None = None
         self.close_after_write = False
         self._locked: dict = {}
@@ -457,7 +458,10 @@ class App:
         events = self.events
 
         def discover():
-            adapters, reason = probe()
+            try:
+                adapters, reason = probe()
+            except Exception as error:
+                adapters, reason = [], str(error)
             events.put(('gpu', adapters, reason))
 
         threading.Thread(target=discover, daemon=True).start()
@@ -536,6 +540,7 @@ class App:
                     'Baking on the CPU. This can take a long time.' if device.upper() == 'CPU' else f'Baking on {device}')
             elif event[0] == 'log':
                 self._append_log(str(event[1]))
+                self._live_warnings.add(str(event[1]))
             elif event[0] == 'stage':
                 self.stage = event[1]
                 if self.close_after_write and event[1] == 'validate':
@@ -576,7 +581,9 @@ class App:
         if outcome.devices:
             self._set_optional_label(self.device_label, devices.result_line(outcome.devices, outcome.rays, outcome.warnings))
         for warning in outcome.warnings:
-            self._append_log(f'WARNING: {warning}')
+            # (the runner already sent most warnings as they happened)
+            if f'WARNING: {warning}' not in self._live_warnings:
+                self._append_log(f'WARNING: {warning}')
         self._output_folder = outcome.output_folder
         self.open_button.configure(state='normal' if outcome.output_folder else 'disabled')
         self._unlock_form()
@@ -619,6 +626,7 @@ class App:
             self._write_exception(exc)
         self.busy = True
         self.stage = None
+        self._live_warnings = set()
         self.close_after_write = False
         self._output_folder = None
         self.bake_button.configure(state='disabled')

@@ -85,3 +85,10 @@ def test_device_errors_are_explained():
 
 def test_the_old_denoise_mapping_survives_the_gpu_one():
     assert 'unzip the download again' in explain(RuntimeError('OIDN denoise failed (1): ...'))
+
+
+def test_strict_oidn_gpu_failures_say_what_to_pick():
+    for text in ('OIDN CUDA denoise failed: page 3 returned 1', 'OIDN HIP denoise failed: page 3 returned 1',
+                 'OIDN CUDA startup timed out after 60 s'):
+        assert explain(RuntimeError(text)) == (
+            'The denoiser could not start on the GPU. Pick Auto to fall back to the CPU, or CPU only.')

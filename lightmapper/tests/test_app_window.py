@@ -969,3 +969,32 @@ def test_late_probe_result_after_close_is_ignored(make_app):
     a.events.put(('gpu', [RADEON], None))
     a.window.destroy()
     a._drain()
+    assert a.events.empty()
+
+
+def test_a_warning_already_logged_live_is_not_logged_again_after_the_bake(ready_app):
+    devices = {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    outcome = BakeOutcome('done', 'Done. The lit level is level.', [], Path('C:/x'), Path(), 'CPU',
+                          devices, None, ['live one', 'twin groups'])
+    run_events(ready_app, [('log', 'WARNING: live one'), ('done', outcome)])
+    log = ready_app.log_box.get('1.0', 'end')
+    assert log.count('WARNING: live one') == 1 and log.count('WARNING: twin groups') == 1
+
+
+def test_a_live_warning_of_an_earlier_bake_does_not_hide_the_next_summary_warning(ready_app):
+    devices = {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    outcome = BakeOutcome('done', 'Done. The lit level is level.', [], Path('C:/x'), Path(), 'CPU',
+                          devices, None, ['same text'])
+    run_events(ready_app, [('log', 'WARNING: same text'), ('done', outcome)])
+    run_events(ready_app, [('done', outcome)])
+    assert ready_app.log_box.get('1.0', 'end').count('WARNING: same text') == 1
+
+
+def test_a_probe_that_raises_still_answers(make_app):
+    def broken():
+        raise OSError('no child process')
+
+    a = make_app(probe_gpu=broken)
+    pump(a.root, lambda: a.gpu_label['text'] != 'Looking for GPUs…')
+    assert a.gpu_label['text'] != 'Looking for GPUs…'
+    assert 'no child process' in a.gpu_label['text'] + a.device_hint['text']

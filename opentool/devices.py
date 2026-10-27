@@ -1,4 +1,4 @@
-﻿from lightmapper import gpu
+from lightmapper import gpu
 
 CPU_HINT = 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'
 
