@@ -6,10 +6,11 @@ import sys
 import threading
 import traceback
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from lightmapper import blender_find
+from lightmapper.progress import STAGE_LABELS, fraction
 from . import form, jobobject, presets, runner, usersettings
 
 
@@ -23,7 +24,11 @@ class App:
         self.store_path = store_path
         self.log_path = Path(log_path) if log_path is not None else Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'OpenTool' / 'opentool.log'
         self.find_blender = find_blender
-        self.run_bake = run_bake
+        self._run_bake = run_bake
+        self.busy = False
+        self.stage: str | None = None
+        self.close_after_write = False
+        self._locked: dict = {}
         self.events: queue.Queue = queue.Queue()
         self.blender: blender_find.Blender | None = None
         self._user_chose_blender = False
@@ -38,7 +43,7 @@ class App:
         self.window.minsize(640, 560)
         self.window.resizable(True, True)
         self.tk_root.report_callback_exception = self._report_callback_exception
-        self.window.protocol('WM_DELETE_WINDOW', self._close)
+        self.window.protocol('WM_DELETE_WINDOW', self.on_close)
         self._build()
         self._restore()
         self._set_blender_status('Looking for Blender…')
@@ -150,7 +155,7 @@ class App:
 
         controls = ttk.Frame(self.frame)
         controls.grid(row=12, column=0, sticky='ew', pady=(12, 0))
-        self.bake_button = ttk.Button(controls, text='Bake', command=lambda: None, state='disabled')
+        self.bake_button = ttk.Button(controls, text='Bake', command=self.start_bake, state='disabled')
         self.bake_button.pack(side='left')
         self._output_folder: Path | None = None
 
@@ -310,7 +315,8 @@ class App:
 
     def _update_bake_state(self):
         valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
-        valid = valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
+        valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
+                 and not self.busy)
         self.bake_button.configure(state='normal' if valid else 'disabled')
 
     def _update_new_names_hint(self):
@@ -454,9 +460,28 @@ class App:
                     self._set_blender_status(f'Blender {result.version[0]}.{result.version[1]} ({result.path})')
                 self._update_bake_state()
             elif event[0] == 'device':
-                self._set_optional_label(self.device_label, str(event[1]))
+                device = str(event[1])
+                self._set_optional_label(
+                    self.device_label,
+                    'Baking on the CPU. This can take a long time.' if device.upper() == 'CPU' else f'Baking on {device}')
             elif event[0] == 'log':
                 self._append_log(str(event[1]))
+            elif event[0] == 'stage':
+                self.stage = event[1]
+                if self.close_after_write and event[1] == 'validate':
+                    self._finish_close_after_write()
+                if not self.close_after_write:
+                    self.stage_label.configure(text=STAGE_LABELS[event[1]])
+                self.progress['value'] = fraction(event[1]) * 1000
+            elif event[0] == 'pages':
+                _, done, total = event
+                if not self.close_after_write:
+                    self.stage_label.configure(text=f'Baking in Blender: page {done} of {total}')
+                self.progress['value'] = fraction('blender', done, total) * 1000
+            elif event[0] == 'done':
+                self._bake_done(event[1])
+                if self.close_after_write:
+                    self._finish_close_after_write()
         try:
             self.root.after(100, self._poll)
         except tk.TclError:
@@ -465,8 +490,74 @@ class App:
     def _append_log(self, text):
         self.log_box.configure(state='normal')
         self.log_box.insert('end', text + '\n')
+        extra = int(self.log_box.index('end-1c').split('.')[0]) - 1 - 5000
+        if extra > 0:
+            self.log_box.delete('1.0', f'{extra + 1}.0')
         self.log_box.see('end')
         self.log_box.configure(state='disabled')
+
+    def _bake_done(self, outcome):
+        self.busy = False
+        self.stage = None
+        self.progress['value'] = 1000
+        self.stage_label.configure(text=outcome.message,
+                                   foreground='red' if outcome.status == 'failed' else '')
+        if outcome.problems:
+            self._append_log('Problems')
+            for problem in outcome.problems:
+                self._append_log(str(problem))
+        self._output_folder = outcome.output_folder
+        self.open_button.configure(state='normal' if outcome.output_folder else 'disabled')
+        self._unlock_form()
+
+    def _lock_form(self):
+        self._locked = {}
+        keep = (self.bake_button, self.open_button, self.advanced_button)
+        pending = [self.frame]
+        while pending:
+            for widget in pending.pop().winfo_children():
+                pending.append(widget)
+                if isinstance(widget, (ttk.Entry, ttk.Button, ttk.Checkbutton, ttk.Radiobutton)) and widget not in keep:
+                    self._locked[widget] = str(widget.cget('state'))
+                    widget.configure(state='disabled')
+
+    def _unlock_form(self):
+        for widget, state in self._locked.items():
+            widget.configure(state=state)
+        self._locked = {}
+        self._update_bake_state()
+
+    def start_bake(self):
+        if self.busy:
+            return
+        try:
+            request = self.request()
+        except ValueError as exc:
+            self.stage_label.configure(text=str(exc), foreground='red')
+            return
+        if not request.new_names:
+            tail = ('Backups go in a backups folder next to them.' if request.backups
+                    else 'No backups are kept.')
+            if not messagebox.askyesno(
+                    'Replace your tags?',
+                    f'This replaces {request.bsp} and its lightmaps in place. {tail} Continue?'):
+                return
+        self.remember()
+        self.busy = True
+        self.stage = None
+        self.close_after_write = False
+        self._output_folder = None
+        self.bake_button.configure(state='disabled')
+        self.open_button.configure(state='disabled')
+        self._lock_form()
+        self.log_box.configure(state='normal')
+        self.log_box.delete('1.0', 'end')
+        self.log_box.configure(state='disabled')
+        self._set_optional_label(self.device_label, '')
+        self.stage_label.configure(text='Starting…', foreground='')
+        self.progress['value'] = 0
+        # the thread gets the runner and the queue, not self, so no Tk object is finalized off the UI thread.
+        threading.Thread(target=self._run_bake, args=(request, self.events.put), daemon=True).start()
 
     def _write_exception(self, exc, tb=None):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -481,7 +572,30 @@ class App:
         if self._output_folder is not None:
             os.startfile(self._output_folder)
 
-    def _close(self):
+    def on_close(self):
+        if not self.busy:
+            self._close_window()
+            return
+        if not messagebox.askyesno(
+                'Stop the bake?',
+                "A bake is running. Closing OpenTool stops it, and no tags will be written "
+                "if it hasn't reached that step yet."):
+            return
+        if not self.busy:
+            self._close_window()
+        elif self.stage == 'write':
+            # the pipeline writes the bitmap, BSP and scenario one after another; stopping between
+            # them would leave a lit BSP whose scenario was never written.
+            self.close_after_write = True
+            self.stage_label.configure(text='Finishing writing tags…')
+        else:
+            self._exit_now()
+
+    def _finish_close_after_write(self):
+        self.close_after_write = False
+        self._exit_now()
+
+    def _close_window(self):
         try:
             try:
                 self.remember()
@@ -489,6 +603,11 @@ class App:
                 self._write_exception(exc)
         finally:
             self.window.destroy()
+
+    def _exit_now(self):
+        self._close_window()
+        # os._exit skips mainloop teardown; the job object then ends Blender with the process.
+        os._exit(0)
 
 
 def main() -> int:
