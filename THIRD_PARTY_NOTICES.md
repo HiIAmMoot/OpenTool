@@ -51,7 +51,37 @@ and the reason for such modification.
 
 `lightmapper/tagio/layouts/` holds XML tag layouts from General-101's [Halo Asset Blender Development Toolset](https://github.com/General-101/Halo-Asset-Blender-Development-Toolset), under its MIT license, copyright (c) 2020 Steven Garcia. They describe the H1A editing kit's tag definitions. The full license text is in `lightmapper/tagio/layouts/LICENSE`. The upstream commit and any local edits were not recorded, so these files are not claimed to be an exact upstream snapshot.
 
-## Used, not included
+## Included in the app download
+
+The Windows app includes the libraries below. Full license texts are in `licenses/` beside the executables, except for the Microsoft runtime terms linked below and the xatlas notices above.
+
+Python 3.11 is included under the PSF License. Its license also covers the bundled `python311.dll`.
+
+Tcl and Tk provide the window toolkit. They use BSD-style licenses; see `licenses/tcltk/`.
+
+The PyInstaller bootloader uses GPLv2 or later with an exception that permits distributing bundled applications under their own licenses. See `licenses/pyinstaller/`.
+
+NumPy and SciPy use BSD licenses. Their wheels include OpenBLAS and Fortran runtime libraries; the wheel license texts include the BSD terms and the GCC Runtime Library Exception.
+
+Numba and llvmlite use BSD licenses. llvmlite includes LLVM under Apache 2.0 with the LLVM exception. See their license folders for the bundled components' notices.
+
+cffi and pycparser use MIT and BSD licenses, respectively.
+
+Setuptools and packaging are included as dependencies of the bundled Python libraries. Setuptools uses the MIT license; packaging offers Apache 2.0 or BSD terms.
+
+Pillow is included under the HPND license.
+
+pyoidn, the Python binding for Open Image Denoise, uses the MIT license.
+
+Open Image Denoise, oneTBB and the oneAPI/Level Zero loaders use Apache 2.0 and MIT licenses. Their license texts and component notices are in `licenses/oidn/`.
+
+The Microsoft Visual C++ runtime DLLs are redistributed as Distributable Code under the [Visual Studio license terms](https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/).
+
+xatlas is built from the vendored source and included under the MIT license. Its component notices are reproduced above.
+
+## Used, not included in a source checkout
+
+The app bundles pyoidn, Open Image Denoise, NumPy, SciPy, Numba and Pillow; a source checkout uses separately installed copies instead.
 
 - [Blender](https://www.blender.org) (GNU GPL) runs as a separate program. `lightmapper/blender/bake.py` imports Blender's Python API, `bpy` and `mathutils`, so it must be under a GPL-compatible license. It is, as part of OpenTool under GPLv3.
 - [Intel Open Image Denoise](https://www.openimagedenoise.org) (Apache 2.0), through the separate [pyoidn](https://github.com/Hyiker/pyoidn) binding (MIT license).

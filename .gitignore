@@ -12,3 +12,7 @@ bake/
 .vscode/
 .idea/
 .venv/
+
+# Windows app packaging outputs
+build/
+dist/
