@@ -25,7 +25,9 @@ def test_gpu_text_skips_adapters_without_ray_queries():
     ('amd', [RTX, RADEON], 'Bakes on AMD Radeon(TM) Graphics.'),
     ('nvidia', [RADEON], 'No NVIDIA GPU with ray tracing was found, so the bake would stop. Pick Auto or CPU only.'),
     ('amd', [RTX], 'No AMD GPU with ray tracing was found, so the bake would stop. Pick Auto or CPU only.'),
-    ('auto', [], 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'),
+    ('auto', [], "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."),
+    ('auto', [Adapter('Older NVIDIA', 0x10DE, (3,), 'vulkan', False)],
+     "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."),
     ('cpu', [RTX], 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'),
     ('auto', None, '')])
 def test_device_hint(setting, adapters, hint):

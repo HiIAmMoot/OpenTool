@@ -20,7 +20,11 @@ def device_hint(setting, adapters, reason):
     except gpu.DeviceError:
         name = {'nvidia': 'NVIDIA', 'amd': 'AMD'}[gpu.normalise_device(setting)]
         return f'No {name} GPU with ray tracing was found, so the bake would stop. Pick Auto or CPU only.'
-    return f'Bakes on {choice.adapter.name}.' if choice.adapter else CPU_HINT
+    if choice.adapter:
+        return f'Bakes on {choice.adapter.name}.'
+    if choice.setting == 'cpu':
+        return CPU_HINT
+    return "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."
 
 
 def result_line(devices, rays, warnings):
