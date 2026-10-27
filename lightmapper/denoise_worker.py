@@ -48,6 +48,11 @@ def serve(kind: str, stdin, stdout) -> int:
     import numpy as np
     import pyoidn
 
+    def check_error():
+        error = device.get_error()
+        if error:
+            raise RuntimeError(str(error))
+
     def receive():
         size = struct.unpack('<Q', stdin.read(8))[0]
         return np.load(io.BytesIO(stdin.read(size)))
@@ -69,11 +74,10 @@ def serve(kind: str, stdin, stdout) -> int:
                      'NOPE': 255}
             device = pyoidn.Device(types[kind])
             device.commit()
-            error = device.get_error()
-            if error:
-                raise RuntimeError(str(error))
+            check_error()
             filt = pyoidn.Filter(device, 'RTLightmap')
             filt.set_quality(pyoidn.OIDN_QUALITY_HIGH)
+            check_error()
             src = dst = None
             buffer_size = 0
         send(np.array([1], dtype=np.uint8))
@@ -89,22 +93,33 @@ def serve(kind: str, stdin, stdout) -> int:
         if kind == 'CPU':
             result = pyoidn.denoise(img, filter_type='RTLightmap')
         else:
-            nbytes = img.nbytes
-            if nbytes != buffer_size:
-                if src is not None:
-                    src.release()
-                    dst.release()
-                src = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
-                dst = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
-                buffer_size = nbytes
-            src.write(0, nbytes, img)
-            filt.set_image(pyoidn.OIDN_IMAGE_COLOR, src, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
-            filt.set_image(pyoidn.OIDN_IMAGE_OUTPUT, dst, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
-            filt.commit()
-            filt.execute()
-            device.wait()
-            result = np.empty_like(img)
-            dst.read(0, nbytes, result)
+            try:
+                nbytes = img.nbytes
+                if nbytes != buffer_size:
+                    if src is not None:
+                        src.release()
+                        dst.release()
+                    src = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
+                    dst = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
+                    check_error()
+                    buffer_size = nbytes
+                src.write(0, nbytes, img)
+                check_error()
+                filt.set_image(pyoidn.OIDN_IMAGE_COLOR, src, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
+                filt.set_image(pyoidn.OIDN_IMAGE_OUTPUT, dst, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
+                check_error()
+                filt.commit()
+                check_error()
+                filt.execute()
+                check_error()
+                device.wait()
+                check_error()
+                result = np.empty_like(img)
+                dst.read(0, nbytes, result)
+                check_error()
+            except Exception as error:
+                print(error, file=sys.stderr, flush=True)
+                return 2
         send(result)
     if filt is not None:
         filt.release()

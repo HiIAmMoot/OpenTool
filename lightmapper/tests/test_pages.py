@@ -33,6 +33,31 @@ def fake_worker(monkeypatch, code):
                         lambda kind=None: [sys.executable, '-c', code, *([kind] if kind else [])])
 
 
+@pytest.mark.parametrize('strict', [False, True])
+def test_native_gpu_error_retries_the_same_page_on_cpu_unless_required(monkeypatch, strict):
+    real_command = denoise_worker.worker_command
+    root = str(Path(__file__).resolve().parents[2])
+    code = (f'import sys; sys.path.insert(0, {root!r}); '
+            'from lightmapper.tests import fake_oidn; '
+            'sys.modules["pyoidn"] = fake_oidn; '
+            'from lightmapper.denoise_worker import serve; '
+            'sys.exit(serve("CUDA", sys.stdin.buffer, sys.stdout.buffer))')
+    monkeypatch.setattr(denoise_worker, 'worker_command',
+                        lambda kind=None: [sys.executable, '-c', code] if kind == 'CUDA' else real_command(kind))
+    first = np.full((40, 40, 3), .25, np.float32)
+    second = np.full_like(first, .75)
+    with pages.DenoiseWorker.start('CUDA', 60, strict=strict) as worker:
+        np.testing.assert_array_equal(worker.denoise(first), first)
+        if strict:
+            with pytest.raises(RuntimeError, match='native execute failure'):
+                worker.denoise(second)
+        else:
+            result = worker.denoise(second)
+            assert worker.device == 'CPU'
+            np.testing.assert_array_equal(result, pages._denoise(second, 60))
+            assert 'denoising on the CPU' in worker.warnings[0]
+
+
 def test_worker_starts_without_a_window(monkeypatch):
     seen = {}
     real = pages.subprocess.Popen

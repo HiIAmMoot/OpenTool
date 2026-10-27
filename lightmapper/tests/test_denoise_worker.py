@@ -1,5 +1,6 @@
 import io
 import os
+import struct
 from pathlib import Path
 import subprocess
 import sys
@@ -11,6 +12,30 @@ import pytest
 from lightmapper import denoise_worker, entry, gpu, vertex_gpu
 
 REPO = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize('operation', ['setup', 'write', 'commit', 'execute', 'wait', 'read'])
+def test_native_error_never_sends_a_stale_page(monkeypatch, capsys, operation):
+    from lightmapper.tests import fake_oidn
+    monkeypatch.setattr(fake_oidn, 'failure', operation)
+    monkeypatch.setitem(sys.modules, 'pyoidn', fake_oidn)
+    src, dst = io.BytesIO(), io.BytesIO()
+    for value in (.25, .75):
+        payload = io.BytesIO()
+        np.save(payload, np.full((4, 4, 3), value, np.float32))
+        data = payload.getvalue()
+        src.write(struct.pack('<Q', len(data)) + data)
+    src.seek(0)
+    assert denoise_worker.serve('CUDA', src, dst) != 0
+    assert f'native {operation} failure' in capsys.readouterr().err
+    dst.seek(0)
+    size = struct.unpack('<Q', dst.read(8))[0]
+    ready = np.load(io.BytesIO(dst.read(size)))
+    assert ready.tolist() == ([0] if operation == 'setup' else [1])
+    if operation != 'setup':
+        size = struct.unpack('<Q', dst.read(8))[0]
+        np.testing.assert_array_equal(np.load(io.BytesIO(dst.read(size))), np.full((4, 4, 3), .25, np.float32))
+    assert dst.read() == b''
 
 
 def test_source_worker_runs_lightmap_py(monkeypatch):
