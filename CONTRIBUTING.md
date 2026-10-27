@@ -42,13 +42,21 @@ Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BL
 
 ## Releases
 
+To build the app zip on your own machine you need Python 3.11 from python.org (not Anaconda), [LLVM](https://releases.llvm.org) and Visual Studio 2022's C++ runtime files (the "Desktop development with C++" workload). Then, in PowerShell:
+
+```powershell
+packaging\build.ps1 -Python <path to python.org python.exe>
+```
+
+The zip lands in `dist\`. The script stops if the Python is Anaconda or not 3.11, or if a bundled runtime file is too old.
+
 Only a maintainer cuts a release. Update `main`, tag it with `vX.Y.Z` and push the tag:
 
 ```powershell
 git switch main
 git pull
-git tag v0.2.0
-git push origin v0.2.0
+git tag vX.Y.Z
+git push origin vX.Y.Z
 ```
 
 The release workflow then builds the Windows app with `packaging/build.ps1`, checks that the tagged commit is on `main`, and creates a GitHub release named after the tag with the zip attached. A tag that is not on `main` is not released. That check only catches a mistake: a pushed tag runs the workflow file of the tagged commit, so it does not stop someone who can push tags. The repository owner should add a tag ruleset that restricts who may create `v*` tags. The build skips the Blender self-test, because the runner has no Blender.

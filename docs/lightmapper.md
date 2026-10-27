@@ -4,6 +4,8 @@ The lightmapper replaces the editing kit's `tool lightmaps`. It lights a level's
 
 For the stages it goes through, see [lightmapper-internals.md](lightmapper-internals.md). For every setting, see [lightmapper-settings.md](lightmapper-settings.md).
 
+On Windows you can use the app instead of Python: see [Download the app](../README.md#download-the-app). Its `OpenTool-cli.exe` takes the commands on this page in place of `python lightmap.py`, plus `check`, which tests every part of the download.
+
 ## What it does differently from tool
 
 Tool stores a level's lighting in two tags: the lightmap pages in a `bitmap` tag, and per-vertex lighting data in the `scenario_structure_bsp`. The lightmapper fills the same two tags, but builds them its own way:

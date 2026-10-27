@@ -30,7 +30,26 @@ Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool
 - Next: the structure BSP builder, a replacement for `tool structure` with clearer portal errors and room for larger levels.
 - Later, OpenCE only: instanced geometry and per-texel directional lightmaps, behind a switch that keeps stock output the default.
 
+## Download the app
+
+The quickest way to use OpenTool is the Windows app. It needs nothing installed except Blender.
+
+1. Download `OpenTool-<version>-windows-x64.zip` from the [releases page](https://github.com/HiIAmMoot/OpenTool/releases) and unzip it anywhere.
+2. Install [Blender 5.2](https://www.blender.org/download/) or newer if you don't have it. The app finds it on its own.
+3. Double-click `OpenTool.exe`.
+4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake.
+
+With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual.
+
+On an RTX 4060 laptop GPU, Blood Gulch bakes in about 24 seconds at Draft, 70 at Normal and 220 at High.
+
+`OpenTool-cli.exe` in the same folder takes the same commands as `python lightmap.py`. Its `check` command tests every part of the download and prints one line per part.
+
+To build the zip yourself, see [Releases in CONTRIBUTING.md](CONTRIBUTING.md#releases).
+
 ## Requirements
+
+To run from source:
 
 - Windows.
 - [Python 3.11](https://www.python.org/downloads/).
@@ -39,7 +58,7 @@ Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool
 
 ## Installing
 
-Since v0.2.0, a ready-to-run Windows build is attached to each release on the GitHub releases page (made by the [release workflow](.github/workflows/release.yml)). To run from source instead:
+To run from source:
 
 1. Download this repository (Code, then Download ZIP) and unzip it, or `git clone` it.
 2. In PowerShell, in that folder:
@@ -100,7 +119,7 @@ python -m pytest -q lightmapper/tests
 ```
 lightmap.py               the lightmapper's command-line entry point
 lightmapper/              the lightmapper
-  cli.py                  commands: bake, copy, validate, diff, calibrate
+  cli.py                  commands: bake, copy, validate, diff, calibrate, check
   pipeline.py             the bake from start to finish
   tagio/                  reading and writing tag files, with the tag layouts
   formats/                BSP geometry, vertices, bitmaps and scenery
@@ -112,6 +131,9 @@ lightmapper/              the lightmapper
   validate.py, diff.py    format checks and comparison with tool
   vendor/xatlas/          xatlas source, compiled on first use
   tests/                  the test suite
+opentool/                 the Windows app's window, presets and bake runner
+packaging/                the app build: PyInstaller spec, build script, licences, release notes
+.github/workflows/        the workflow that builds the app and makes releases
 docs/                     a guide, internals and settings for each tool
 ```
 
