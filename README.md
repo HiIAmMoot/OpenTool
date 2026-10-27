@@ -39,7 +39,7 @@ Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool
 
 ## Installing
 
-Windows builds of the app are made by the [release workflow](.github/workflows/release.yml) and attached to each release on the GitHub releases page.
+Since v0.2.0, a ready-to-run Windows build is attached to each release on the GitHub releases page (made by the [release workflow](.github/workflows/release.yml)). To run from source instead:
 
 1. Download this repository (Code, then Download ZIP) and unzip it, or `git clone` it.
 2. In PowerShell, in that folder:

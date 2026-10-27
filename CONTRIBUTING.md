@@ -42,14 +42,16 @@ Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BL
 
 ## Releases
 
-Only a maintainer cuts a release. Tag a commit that is on `main` with `vX.Y.Z` and push the tag:
+Only a maintainer cuts a release. Update `main`, tag it with `vX.Y.Z` and push the tag:
 
 ```powershell
+git switch main
+git pull
 git tag v0.2.0
 git push origin v0.2.0
 ```
 
-The release workflow then builds the Windows app with `packaging/build.ps1`, checks that the tagged commit is on `main`, and creates a GitHub release named after the tag with the zip attached. A tag that is not on `main` is not released. The build skips the Blender self-test, because the runner has no Blender.
+The release workflow then builds the Windows app with `packaging/build.ps1`, checks that the tagged commit is on `main`, and creates a GitHub release named after the tag with the zip attached. A tag that is not on `main` is not released. That check only catches a mistake: a pushed tag runs the workflow file of the tagged commit, so it does not stop someone who can push tags. The repository owner should add a tag ruleset that restricts who may create `v*` tags. The build skips the Blender self-test, because the runner has no Blender.
 
 The release body is `packaging/release-notes/vX.Y.Z.md` if that file exists, otherwise GitHub's generated notes. Commit the notes file before you tag.
 

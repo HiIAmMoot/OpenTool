@@ -1,5 +1,8 @@
 name: Release
 
+permissions:
+  contents: read
+
 on:
   push:
     tags: ['v*']
@@ -8,8 +11,8 @@ on:
 
 jobs:
   build:
-    # pinned: build.ps1 looks for the VS 2022 C++ runtime under Program Files, and
-    # windows-latest moves to a newer image without that path
+    # pinned (not windows-latest) so the image, and with it the VS 2022 redist and LLVM
+    # paths build.ps1 and the xatlas build look in, only change when we change them
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -28,7 +31,7 @@ jobs:
           # xatlas is compiled with the runner's own LLVM during the build
           $Clang = 'C:\Program Files\LLVM\bin\clang++.exe'
           if (-not (Test-Path $Clang)) {
-            throw "clang++ not found at $Clang: the runner image changed, install LLVM in this workflow"
+            throw "clang++ not found at ${Clang}: the runner image changed, install LLVM in this workflow"
           }
           & $Clang --version
 
@@ -45,7 +48,7 @@ jobs:
 
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -55,7 +58,8 @@ jobs:
           fetch-depth: 0
 
       - name: Check the tag is on main
-        # anyone who can push a tag could otherwise publish a build of an unreviewed branch
+        # a guard against tagging the wrong commit, not a security boundary: a pushed tag
+        # runs the workflow file of the tagged commit, which could leave this step out
         run: |
           git fetch origin main
           if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
@@ -80,5 +84,10 @@ jobs:
           else
             NOTES_ARGS=(--generate-notes)
           fi
-          gh release create "$TAG" dist/OpenTool-*-windows-x64.zip \
-            --verify-tag --title "$TAG" "${NOTES_ARGS[@]}"
+          # a re-run of the job finds the release already made
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            gh release upload "$TAG" dist/OpenTool-*-windows-x64.zip --clobber
+          else
+            gh release create "$TAG" dist/OpenTool-*-windows-x64.zip \
+              --verify-tag --title "$TAG" "${NOTES_ARGS[@]}"
+          fi

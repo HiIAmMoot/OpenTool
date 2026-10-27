@@ -58,12 +58,25 @@ def test_runtime_problems_compare_paths_against_the_bundle(tmp_path):
     assert check.runtime_problems(str(tmp_path / '_internal'), {'msvcp140.dll': sibling})
 
 
-def test_skip_blender_reports_it_unchecked_and_passes(monkeypatch, capsys):
+def test_skip_blender_reports_it_unchecked_and_passes(monkeypatch):
     def no_blender(*args):
         raise AssertionError('find_blender must not run when blender is skipped')
+    def broken(*args, **kwargs):
+        raise RuntimeError('not under test')
     monkeypatch.setattr(check.blender_find, 'find_blender', no_blender)
+    # (the other rows are not what this test is about; they only have to not run for real)
+    monkeypatch.setattr(check.xatlas_c, 'library', broken)
+    monkeypatch.setattr(check.raster, 'dilate', broken)
+    monkeypatch.setattr(check.pages, '_denoise', broken)
     results = check.run_checks(skip=('blender',))
-    assert results[-1] == ('blender', True, check.SKIPPED)
+    assert [row for row in results if row[0] == 'blender'] == [('blender', True, check.SKIPPED)]
+
+
+def test_plain_check_skips_nothing(monkeypatch):
+    seen = []
+    monkeypatch.setattr(check, 'run_checks', lambda skip=(): seen.append(skip) or [('files', True, '')])
+    assert cli.main(['check']) == 0
+    assert seen == [()]
 
 
 def test_check_skip_flag_prints_the_skip_line_and_exits_zero(monkeypatch, capsys):
