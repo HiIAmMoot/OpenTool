@@ -25,7 +25,7 @@ def test_missing_names_the_absent_file(tmp_path):
 
 
 def test_check_command_reports_and_fails_on_a_missing_part(monkeypatch, capsys):
-    monkeypatch.setattr(check, 'run_checks', lambda: [('files', True, 'all there'), ('blender', False, 'not found')])
+    monkeypatch.setattr(check, 'run_checks', lambda skip=(): [('files', True, 'all there'), ('blender', False, 'not found')])
     assert cli.main(['check']) == 1
     out = capsys.readouterr().out
     assert 'ok   files: all there' in out and 'FAIL blender: not found' in out
@@ -33,7 +33,7 @@ def test_check_command_reports_and_fails_on_a_missing_part(monkeypatch, capsys):
 
 def test_check_needs_no_tags(monkeypatch):
     monkeypatch.delenv('HCEEK_TAGS', raising=False)
-    monkeypatch.setattr(check, 'run_checks', lambda: [('files', True, '')])
+    monkeypatch.setattr(check, 'run_checks', lambda skip=(): [('files', True, '')])
     assert cli.main(['check']) == 0
 
 
@@ -56,3 +56,27 @@ def test_runtime_problems_compare_paths_against_the_bundle(tmp_path):
     # a sibling folder sharing the bundle's name as a prefix is outside it
     sibling = str(tmp_path / '_internal2' / 'msvcp140.dll')
     assert check.runtime_problems(str(tmp_path / '_internal'), {'msvcp140.dll': sibling})
+
+
+def test_skip_blender_reports_it_unchecked_and_passes(monkeypatch, capsys):
+    def no_blender(*args):
+        raise AssertionError('find_blender must not run when blender is skipped')
+    monkeypatch.setattr(check.blender_find, 'find_blender', no_blender)
+    results = check.run_checks(skip=('blender',))
+    assert results[-1] == ('blender', True, check.SKIPPED)
+
+
+def test_check_skip_flag_prints_the_skip_line_and_exits_zero(monkeypatch, capsys):
+    seen = []
+    def fake(skip=()):
+        seen.append(skip)
+        return [('files', True, 'all there'), ('blender', True, check.SKIPPED)]
+    monkeypatch.setattr(check, 'run_checks', fake)
+    assert cli.main(['check', '--skip', 'blender']) == 0
+    assert seen == [('blender',)]
+    assert 'skip blender: not checked in this build' in capsys.readouterr().out
+
+
+def test_check_rejects_an_unknown_skip_name():
+    with pytest.raises(SystemExit):
+        cli.main(['check', '--skip', 'files'])

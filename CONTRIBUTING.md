@@ -40,6 +40,21 @@ Point `HCEEK_TAGS` at an editing-kit tags folder and, if needed, `LIGHTMAPPER_BL
 - Work on a branch and open a pull request against `main`. Every pull request gets a review before it is merged.
 - Describe what you changed, why, how you tested it, and any change in the output.
 
+## Releases
+
+Only a maintainer cuts a release. Tag a commit that is on `main` with `vX.Y.Z` and push the tag:
+
+```powershell
+git tag v0.2.0
+git push origin v0.2.0
+```
+
+The release workflow then builds the Windows app with `packaging/build.ps1`, checks that the tagged commit is on `main`, and creates a GitHub release named after the tag with the zip attached. A tag that is not on `main` is not released. The build skips the Blender self-test, because the runner has no Blender.
+
+The release body is `packaging/release-notes/vX.Y.Z.md` if that file exists, otherwise GitHub's generated notes. Commit the notes file before you tag.
+
+A push to `main` or a manual run of the workflow builds the zip and keeps it as a workflow artifact, with no release.
+
 ## Questions
 
 For questions that are not bugs, find Moot on the [OpenCE Discord server](https://discord.gg/9gqcHyr5km).

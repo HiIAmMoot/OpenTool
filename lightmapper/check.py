@@ -6,6 +6,7 @@ import numpy as np
 from . import blender_find, pages, raster, resources, xatlas_c
 
 RUNTIME_MODULES = ('msvcp140.dll', 'vcruntime140_1.dll')
+SKIPPED = 'not checked in this build'
 
 
 def _loaded_module_path(name: str) -> str | None:
@@ -45,7 +46,7 @@ def check_runtime() -> tuple[str, bool, str]:
     return ('runtime', True, 'C++ runtime loaded from the bundle')
 
 
-def run_checks() -> list[tuple[str, bool, str]]:
+def run_checks(skip: tuple[str, ...] = ()) -> list[tuple[str, bool, str]]:
     results = []
 
     try:
@@ -95,10 +96,14 @@ def run_checks() -> list[tuple[str, bool, str]]:
     except Exception as exc:
         results.append(('denoiser', False, str(exc)))
 
-    try:
-        blender = blender_find.find_blender()
-        major, minor = blender.version
-        results.append(('blender', True, f'Blender {major}.{minor} at {blender.path}'))
-    except Exception as exc:
-        results.append(('blender', False, str(exc)))
+    if 'blender' in skip:
+        # (a CI runner has no Blender; the build still self-tests everything else)
+        results.append(('blender', True, SKIPPED))
+    else:
+        try:
+            blender = blender_find.find_blender()
+            major, minor = blender.version
+            results.append(('blender', True, f'Blender {major}.{minor} at {blender.path}'))
+        except Exception as exc:
+            results.append(('blender', False, str(exc)))
     return results

@@ -33,6 +33,7 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     check = commands.add_parser('check')
     check.add_argument('-v', '--verbose', action='store_true')
+    check.add_argument('--skip', action='append', choices=('blender',), default=[])
     for name in ('bake', 'copy', 'validate', 'diff', 'calibrate'):
         command = commands.add_parser(name)
         command.add_argument('-v', '--verbose', action='store_true')
@@ -69,10 +70,11 @@ def main(argv=None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == 'check':
-        from .check import run_checks
-        results = run_checks()
+        from .check import SKIPPED, run_checks
+        results = run_checks(tuple(args.skip))
         for name, ok, detail in results:
-            print(f'{"ok  " if ok else "FAIL"} {name}: {detail}')
+            label = 'skip' if detail == SKIPPED else 'ok  ' if ok else 'FAIL'
+            print(f'{label} {name}: {detail}')
         return int(not all(ok for _, ok, _ in results))
     if args.tags is None:
         parser.error('pass --tags with the editing-kit tags folder, or set HCEEK_TAGS')

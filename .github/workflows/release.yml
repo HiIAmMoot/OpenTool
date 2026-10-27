@@ -1,0 +1,84 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    # pinned: build.ps1 looks for the VS 2022 C++ runtime under Program Files, and
+    # windows-latest moves to a newer image without that path
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # the zip name comes from git describe, which needs the tags
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          # the python.org build; build.ps1 refuses Anaconda
+          python-version: '3.11'
+
+      - name: Check clang++
+        shell: pwsh
+        run: |
+          # xatlas is compiled with the runner's own LLVM during the build
+          $Clang = 'C:\Program Files\LLVM\bin\clang++.exe'
+          if (-not (Test-Path $Clang)) {
+            throw "clang++ not found at $Clang: the runner image changed, install LLVM in this workflow"
+          }
+          & $Clang --version
+
+      - name: Build the app
+        shell: pwsh
+        # GitHub's runner has no Blender, so that one self-test line is skipped
+        run: packaging\build.ps1 -Python "$env:pythonLocation\python.exe" -SkipBlenderCheck
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenTool-windows-x64
+          path: dist/OpenTool-*-windows-x64.zip
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check the tag is on main
+        # anyone who can push a tag could otherwise publish a build of an unreviewed branch
+        run: |
+          git fetch origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main, so it is not released"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: OpenTool-windows-x64
+          path: dist
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # packaging/release-notes/<tag>.md is the body when it exists
+          NOTES="packaging/release-notes/$TAG.md"
+          if [ -f "$NOTES" ]; then
+            NOTES_ARGS=(--notes-file "$NOTES")
+          else
+            NOTES_ARGS=(--generate-notes)
+          fi
+          gh release create "$TAG" dist/OpenTool-*-windows-x64.zip \
+            --verify-tag --title "$TAG" "${NOTES_ARGS[@]}"

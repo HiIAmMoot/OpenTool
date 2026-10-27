@@ -1,7 +1,8 @@
 param(
     [string]$Python = 'python.exe',
     [string]$VCRedist,
-    [switch]$CheckRuntimeOnly
+    [switch]$CheckRuntimeOnly,
+    [switch]$SkipBlenderCheck
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,7 +127,10 @@ if sys.maxsize <= 2**32:
     if ($LASTEXITCODE -ne 0) { throw 'License collection failed' }
 
     Write-Output '7. Frozen self-test'
-    & (Join-Path $Bundle 'OpenTool-cli.exe') check
+    # (CI has no Blender; every other check still runs)
+    $CheckArgs = @('check')
+    if ($SkipBlenderCheck) { $CheckArgs += @('--skip', 'blender') }
+    & (Join-Path $Bundle 'OpenTool-cli.exe') @CheckArgs
     if ($LASTEXITCODE -ne 0) { throw 'Frozen self-test failed' }
 
     Write-Output '8. Zip app folder'
