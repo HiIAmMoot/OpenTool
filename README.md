@@ -67,7 +67,8 @@ The lightmapper starts Blender in the background, builds the scene from your tag
    | `--tags "C:\HCEEK\tags"` | The editing kit's `tags` folder. Or set `HCEEK_TAGS` once and leave this out. |
    | `levels\test\bloodgulch\bloodgulch` | The scenario to light: its tag path relative to the tags folder, without the extension. |
    | `bloodgulch` | The name of the BSP inside that scenario. A multiplayer level usually has one, named like the level. |
-   | `--out-bsp levels\...\bloodgulch_lit` | Where to write the lit BSP and its lightmap bitmap. Optional: without it the original BSP is overwritten, and the old file is kept as a backup. |
+   | `--out-bsp levels\...\bloodgulch_lit` | Where to write the lit BSP and its lightmap bitmap. Optional: without it the original BSP is overwritten. Backups go in a `backups` folder next to each tag. |
+   | `--no-backups` | Optional. Do not keep copies of tags that are replaced. Backups are kept by default. |
    | `--out-scenario levels\...\bloodgulch_lit` | Where to write a scenario that uses the new BSP. This is the one you build and play. |
    | `--work bake\bloodgulch` | A folder for the bake's working files and `summary.json`. Optional. |
    | `--settings settings.json` | Optional. Changes how the bake looks, for example `{"texels_per_unit": 8}` for sharper shadows. See the [settings](docs/lightmapper-settings.md). |

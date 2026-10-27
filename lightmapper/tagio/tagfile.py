@@ -219,14 +219,17 @@ def tag_bytes(tag: Tag) -> bytes:
     return bytes(header) + payload
 
 
-def write_tag(tag: Tag, path: Path) -> None:
+def write_tag(tag: Tag, path: Path, backup: bool = True) -> None:
     path = Path(path)
     raw = tag_bytes(tag)
-    if path.exists():
+    if path.exists() and backup:
+        backup_dir = path.parent / "backups"
+        backup_dir.mkdir(exist_ok=True)
+        # a failed recovery copy must stop before the atomic replacement can destroy the old tag.
         while True:
-            backup = path.with_name(path.name + datetime.now().strftime(".lm-backup-%Y%m%d-%H%M%S"))
+            backup_path = backup_dir / (datetime.now().strftime("%Y%m%d-%H%M%S_") + path.name)
             try:
-                destination = backup.open("xb")
+                destination = backup_path.open("xb")
                 break
             except FileExistsError:
                 # a timestamp collision must never overwrite an earlier recovery copy

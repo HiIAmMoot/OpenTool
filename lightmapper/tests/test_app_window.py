@@ -79,20 +79,25 @@ def test_first_screen_widgets(app):
     assert str(app.bake_button['state']) == 'disabled' and str(app.open_button['state']) == 'disabled'
     assert app.new_names_var.get() is False and app.preset_var.get() == 'Normal'
     assert app.verbose_var.get() is False
+    assert app.backups_var.get() is True
+    assert app.backups_check['text'] == 'Keep backups'
+    assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
     assert app.tags_label['text'] == 'HCEK tags folder'
     assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
-    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups go in a backups folder next to them."
     assert app.advanced_frame.winfo_manager() == ''
     app._toggle_advanced()
     assert app.advanced_frame.winfo_manager() == 'grid'
 
 
 def test_new_names_hint_tracks_checkbox(app):
-    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups go in a backups folder next to them."
     app.new_names_check.invoke()
     assert app.new_names_hint['text'] == 'Saves the lit level as <name>_lit and leaves your tags as they are.'
     app.new_names_check.invoke()
-    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups go in a backups folder next to them."
+    app.backups_check.invoke()
+    assert app.new_names_hint['text'] == "Replaces your level's tags. No backups are kept."
 
 
 def test_single_bsp_is_selected_and_bake_enabled(app, tiny):
@@ -113,6 +118,9 @@ def test_request_carries_the_form(app, tiny):
     app._select_preset('Draft')
     req = app.request()
     assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', False, 64, None)
+    assert req.backups is True
+    app.backups_var.set(False)
+    assert app.request().backups is False
     app.verbose_var.set(True)
     assert app.request().verbose is True
 
@@ -171,10 +179,12 @@ def test_settings_are_remembered(tmp_path, tiny, make_app):
     pump(a.root, lambda: a.bsp_box.get() == 'room' and a.blender is not None)
     a._select_preset('High')
     a.verbose_var.set(True)
+    a.backups_var.set(False)
     a.remember()
     b = make_app(store_path=tmp_path / 's.json')
     assert b.preset_var.get() == 'High' and b.tags_entry.get() == str(tags)
     assert b.verbose_var.get() is True
+    assert b.backups_var.get() is False
 
 
 def test_missing_blender_shows_the_message(make_app):

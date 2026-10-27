@@ -82,6 +82,17 @@ def test_runner_overwrites_in_place_only_when_asked(tiny):
     assert not (tiny[0] / 'level_lit.scenario').exists()
 
 
+def test_runner_can_disable_all_backups(tiny):
+    tags, settings, work = tiny
+    assert BakeRequest(tags, 'level', 'room', settings, False).backups is True
+    out = run_bake(BakeRequest(tags, 'level', 'room', settings, False, work, backups=False), lambda e: None)
+    assert out.status == 'done'
+    assert not list(tags.rglob('backups/*'))
+    runner.write_lit_scenario(tags, 'level', 'room', 'room_lit', 'level_lit', backups=False)
+    runner.write_lit_scenario(tags, 'level', 'room', 'room_lit', 'level_lit', backups=False)
+    assert not list(tags.rglob('backups/*'))
+
+
 def test_runner_stages_end_with_validate(tiny):
     _, events = run(tiny)
     assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'finish', 'write', 'validate']

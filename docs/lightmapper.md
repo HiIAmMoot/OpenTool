@@ -69,7 +69,7 @@ The arguments are the scenario and then the name of the BSP inside it. `--out-bs
 python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch_ot bloodgulch_ot --work bake\bloodgulch -v
 ```
 
-The bake reads the scenario and the BSP, lights the level, and writes the new BSP and lightmap bitmap back into the tags folder. It writes only after every stage has finished. Before it replaces a tag, it saves the old file next to it as `<name>.lm-backup-<date>-<time>`. Those backups stay until you delete them.
+The bake reads the scenario and BSP, then writes the lit BSP and bitmap after every stage finishes. Before replacing a tag, it saves a copy in a `backups` folder next to the tag. Backups are on by default; pass `--no-backups` to turn them off.
 
 Add `-v` to see progress lines.
 

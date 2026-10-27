@@ -1,7 +1,9 @@
 """Exercise stock tag traversal, edits and atomic output on real EK tags."""
 
+import re
 import struct
 import zlib
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -137,11 +139,29 @@ def test_in_place_backup_and_replace_failure(tmp_path, monkeypatch):
     old = b"original"
     path.write_bytes(old)
     tag = tagfile.new_tag("bitm")
+    clock = [datetime(2026, 10, 27, 10, 15, 0)]
+    sleeps = []
+
+    class FixedDateTime:
+        @classmethod
+        def now(cls):
+            return clock[0]
+
+    def advance(seconds):
+        sleeps.append(seconds)
+        clock[0] += timedelta(seconds=1)
+
+    monkeypatch.setattr(tagfile, "datetime", FixedDateTime)
+    monkeypatch.setattr(tagfile.time, "sleep", advance)
     tagfile.write_tag(tag, path)
     tagfile.write_tag(tag, path)
-    backups = list(tmp_path.glob("tag.lm-backup-*"))
+    backups = list((tmp_path / "backups").glob("*_*"))
     assert len(backups) == 2
+    assert all(re.fullmatch(r"\d{8}-\d{6}_tag", p.name) for p in backups)
+    assert {p.name for p in backups} == {"20261027-101500_tag", "20261027-101501_tag"}
+    assert sleeps == [0.05]
     assert old in [p.read_bytes() for p in backups]
+    assert not list(tmp_path.glob("tag.lm-backup-*"))
     before = path.read_bytes()
     tag.root.set("processing.detail_fade_factor", 0.5)
 
@@ -153,6 +173,21 @@ def test_in_place_backup_and_replace_failure(tmp_path, monkeypatch):
         tagfile.write_tag(tag, path)
     assert path.read_bytes() == before
     assert not list(tmp_path.glob("*.tmp"))
+
+
+def test_write_without_backup_does_not_create_backup_folder(tmp_path):
+    path = tmp_path / "tag"
+    path.write_bytes(b"original")
+    tagfile.write_tag(tagfile.new_tag("bitm"), path, backup=False)
+    assert path.read_bytes() != b"original"
+    assert not (tmp_path / "backups").exists()
+
+
+def test_new_tag_does_not_create_backup_folder(tmp_path):
+    path = tmp_path / "tag"
+    tagfile.write_tag(tagfile.new_tag("bitm"), path)
+    assert path.is_file()
+    assert not (tmp_path / "backups").exists()
 
 
 def test_largest_supported_surface_block(tmp_path):

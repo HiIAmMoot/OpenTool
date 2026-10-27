@@ -26,6 +26,7 @@ class BakeRequest:
     new_names: bool
     work: Path | None = None
     verbose: bool = False
+    backups: bool = True
 
 
 @dataclass
@@ -60,7 +61,7 @@ class _EventHandler(logging.Handler):
             pass
 
 
-def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario):
+def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True):
     _, index, _ = pipeline.find_bsp(tags, scenario, bsp)
     path = resolve_reference_path(tags, 'scnr', out_scenario)
     if path.is_file():
@@ -73,7 +74,7 @@ def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario):
         tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
     entries = tag.root.block('structure_bsps')
     entries[index].set_reference('structure_bsp', 'sbsp', out_bsp)
-    write_tag(tag, path)
+    write_tag(tag, path, backup=backups)
 
 
 def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome:
@@ -140,9 +141,11 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         out_bsp, out_scenario = new_names(request.scenario, bsp_tag_path(request.tags, request.scenario, request.bsp)) if request.new_names else (None, None)
         # keep pipeline reads on the modder's original tags; runner writes the lit scenario so references for other BSPs survive.
         result = pipeline.bake(request.tags, request.scenario, request.bsp, request.settings,
-                               out_bsp=out_bsp, out_scenario=None, work=work, progress=progress)
+                               out_bsp=out_bsp, out_scenario=None, work=work, progress=progress,
+                               backups=request.backups)
         if out_scenario is not None:
-            write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario)
+            write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario,
+                               backups=request.backups)
         safe_emit(('stage', 'validate'))
         written_bsp = out_bsp or bsp_tag_path(request.tags, request.scenario, request.bsp)
         bsp_tag = read_tag(resolve_reference_path(request.tags, 'sbsp', written_bsp))

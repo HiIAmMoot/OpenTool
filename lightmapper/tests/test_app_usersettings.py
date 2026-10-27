@@ -16,6 +16,14 @@ def test_custom_verbose_round_trip_and_defaults(tmp_path):
     save(us, tmp_path / 's.json')
     assert load(tmp_path / 's.json') == us
     assert UserSettings().new_names is False and UserSettings().verbose is False
+    assert UserSettings().backups is True
+
+
+def test_backup_setting_round_trips_and_defaults_true(tmp_path):
+    assert UserSettings().backups is True
+    settings = UserSettings(backups=False)
+    save(settings, tmp_path / 's.json')
+    assert load(tmp_path / 's.json').backups is False
 
 
 def test_default_path_is_under_appdata(monkeypatch, tmp_path):

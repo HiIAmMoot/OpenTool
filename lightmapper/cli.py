@@ -54,6 +54,8 @@ def _parser():
             continue
         command.add_argument('--out-bsp', required=name == 'copy')
         command.add_argument('--out-scenario', required=name == 'copy')
+        if name in ('bake', 'copy'):
+            command.add_argument('--no-backups', action='store_true')
         if name == 'bake':
             command.add_argument('--settings', type=Path)
             command.add_argument('--work', type=Path)
@@ -76,11 +78,13 @@ def main(argv=None) -> int:
         parser.error('pass --tags with the editing-kit tags folder, or set HCEEK_TAGS')
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format='%(levelname)s: %(message)s')
     if args.command == 'copy':
-        copy_tags(args.tags, args.scenario, args.bsp, args.out_bsp, args.out_scenario)
+        copy_tags(args.tags, args.scenario, args.bsp, args.out_bsp, args.out_scenario,
+                  backups=not args.no_backups)
         return 0
     if args.command == 'bake':
         result = bake(args.tags, args.scenario, args.bsp, _blender_fallback(load_settings(args.settings)),
-                      args.out_bsp, args.out_scenario, args.work, args.sources, args.charts, args.dry_run)
+                      args.out_bsp, args.out_scenario, args.work, args.sources, args.charts, args.dry_run,
+                      backups=not args.no_backups)
         print(f'Work: {result.work}')
         return 0
     if args.command == 'calibrate':

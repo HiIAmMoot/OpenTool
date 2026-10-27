@@ -64,13 +64,13 @@ def chart_cache_key(input_file: Path, chart_s: ChartSettings, radiosity) -> str:
     return digest.hexdigest()
 
 
-def _write(tags, group, path, tag):
+def _write(tags, group, path, tag, backups=True):
     target = resolve_reference_path(tags, group, path)
     target.parent.mkdir(parents=True, exist_ok=True)
-    write_tag(tag, target)
+    write_tag(tag, target, backup=backups)
 
 
-def copy_tags(tags: Path, scenario: str, bsp: str, out_bsp: str, out_scenario: str):
+def copy_tags(tags: Path, scenario: str, bsp: str, out_bsp: str, out_scenario: str, backups=True):
     tags = Path(tags)
     scenario_tag, index, path = find_bsp(tags, scenario, bsp)
     bsp_tag = read_tag(resolve_reference_path(tags, 'sbsp', path))
@@ -78,9 +78,9 @@ def copy_tags(tags: Path, scenario: str, bsp: str, out_bsp: str, out_scenario: s
     bitmap_tag = read_tag(resolve_reference_path(tags, group, bitmap_path))
     bsp_tag.root.set_reference('lightmaps_bitmap', 'bitm', out_bsp)
     scenario_tag.root.block('structure_bsps')[index].set_reference('structure_bsp', 'sbsp', out_bsp)
-    _write(tags, 'bitm', out_bsp, bitmap_tag)
-    _write(tags, 'sbsp', out_bsp, bsp_tag)
-    _write(tags, 'scnr', out_scenario, scenario_tag)
+    _write(tags, 'bitm', out_bsp, bitmap_tag, backups)
+    _write(tags, 'sbsp', out_bsp, bsp_tag, backups)
+    _write(tags, 'scnr', out_scenario, scenario_tag, backups)
 
 
 def _unlit_emitters(tags, geometry, textures):
@@ -204,7 +204,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
-          progress: Callable[[str], None] | None = None) -> BakeOutput:
+          progress: Callable[[str], None] | None = None, backups: bool = True) -> BakeOutput:
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
@@ -303,11 +303,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     np.save(work / 'new_to_input.npy', mapping)
     np.savez(work / 'float_pages.npz', **{f'page_{i}': page for i, page in enumerate(float_pages)})
     if sources == 'all' and not dry_run:
-        _write(tags, 'bitm', output_path, bitmap_tag)
-        _write(tags, 'sbsp', output_path, bsp_tag)
+        _write(tags, 'bitm', output_path, bitmap_tag, backups)
+        _write(tags, 'sbsp', output_path, bsp_tag, backups)
         if out_scenario is not None:
             scenario_tag.root.block('structure_bsps')[bsp_index].set_reference('structure_bsp', 'sbsp', output_path)
-            _write(tags, 'scnr', out_scenario, scenario_tag)
+            _write(tags, 'scnr', out_scenario, scenario_tag, backups)
     stage('write')
     seconds['total'] = perf_counter() - start
     (work / 'summary.json').write_text(json.dumps({

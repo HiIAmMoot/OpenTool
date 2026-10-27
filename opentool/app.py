@@ -27,7 +27,6 @@ class App:
         self.events: queue.Queue = queue.Queue()
         self.blender: blender_find.Blender | None = None
         self._user_chose_blender = False
-        self._blender_change_pending = False
         self._setting_preset = False
         self._tags: Path | None = None
         self._scenario = ''
@@ -99,11 +98,19 @@ class App:
         self.preset_hint.pack(side='left', padx=(12, 0))
 
         self.new_names_var = tk.BooleanVar(value=self.settings.new_names)
+        options = ttk.Frame(self.frame)
+        options.grid(row=7, column=0, sticky='w', pady=(8, 0))
         self.new_names_check = ttk.Checkbutton(
-            self.frame, text='Write to new tag names', variable=self.new_names_var,
+            options, text='Write to new tag names', variable=self.new_names_var,
             command=self._update_new_names_hint,
         )
-        self.new_names_check.grid(row=7, column=0, sticky='w', pady=(8, 0))
+        self.new_names_check.grid(row=0, column=0, sticky='w')
+        self.backups_var = tk.BooleanVar(value=self.settings.backups)
+        self.backups_check = ttk.Checkbutton(
+            options, text='Keep backups', variable=self.backups_var,
+            command=self._update_new_names_hint,
+        )
+        self.backups_check.grid(row=0, column=1, sticky='w', padx=(12, 0))
         self.new_names_hint = ttk.Label(self.frame)
         self.new_names_hint.grid(row=8, column=0, sticky='w')
         self._update_new_names_hint()
@@ -283,7 +290,8 @@ class App:
             raise
         self.advanced_error.configure(text='')
         settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path))
-        return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(), verbose=self.verbose_var.get())
+        return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
+                                  verbose=self.verbose_var.get(), backups=self.backups_var.get())
 
     def remember(self):
         advanced = {
@@ -294,6 +302,7 @@ class App:
             tags=self.tags_entry.get(), scenario=self._scenario, bsp=self.bsp_var.get(),
             blender=str(self.blender.path) if self.blender else self.settings.blender,
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
+            backups=self.backups_var.get(),
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(),
         )
@@ -307,7 +316,9 @@ class App:
     def _update_new_names_hint(self):
         text = ('Saves the lit level as <name>_lit and leaves your tags as they are.'
                 if self.new_names_var.get()
-                else "Replaces your level's tags. Backups are kept next to them.")
+                else ("Replaces your level's tags. Backups go in a backups folder next to them."
+                      if self.backups_var.get()
+                      else "Replaces your level's tags. No backups are kept."))
         self.new_names_hint.configure(text=text)
 
     def _update_hint(self):

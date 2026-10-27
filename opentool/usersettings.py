@@ -15,6 +15,7 @@ class UserSettings:
     blender: str = ''
     preset: str = 'Normal'
     new_names: bool = False
+    backups: bool = True
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
     verbose: bool = False

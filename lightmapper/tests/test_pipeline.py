@@ -213,7 +213,7 @@ def test_surface_cap_refuses(tiny, monkeypatch, caplog):
             module.bake(tags, 'level', 'room', settings, work=work)
     module.bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     assert 'surfaces' in caplog.text
-    assert not list(tags.rglob('*.lm-backup-*'))
+    assert not list(tags.rglob('backups/*'))
 
 
 def test_charts_cache(tiny, monkeypatch):
@@ -262,10 +262,12 @@ def test_backup_never_overwritten(tiny):
     original = (tags / 'room.scenario_structure_bsp').read_bytes()
     api().bake(tags, 'level', 'room', settings, work=work)
     api().bake(tags, 'level', 'room', settings, work=work)
-    backups = sorted(tags.glob('room.scenario_structure_bsp.lm-backup-*'))
+    backups = sorted((tags / 'backups').glob('*_room.scenario_structure_bsp'))
     assert len(backups) == 2
+    assert all(len(p.name) == 15 + len('_room.scenario_structure_bsp') for p in backups)
+    assert all(p.name[8] == '-' and p.name[15] == '_' for p in backups)
     assert backups[0].read_bytes() == original
-    assert len(list(tags.glob('room.bitmap.lm-backup-*'))) == 1
+    assert len(list((tags / 'backups').glob('*_room.bitmap'))) == 1
 
 
 def test_copy_command(tiny):

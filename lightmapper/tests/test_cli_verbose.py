@@ -42,3 +42,28 @@ def test_every_command_takes_verbose():
                  ['diff', 'a', 'b', '--work', 'w', '-v'], ['calibrate', 's', 'b', '--work', 'w', '-v'], ['check', '-v']):
         args = cli._parser().parse_args(argv)
         assert args.verbose
+
+
+def test_no_backups_flag_for_bake_and_copy():
+    assert cli._parser().parse_args(['bake', 'level', 'room']).no_backups is False
+    assert cli._parser().parse_args(
+        ['copy', 'level', 'room', '--out-bsp', 'out', '--out-scenario', 'out']
+    ).no_backups is False
+    for argv in (['bake', 'level', 'room', '--no-backups'],
+                 ['copy', 'level', 'room', '--out-bsp', 'out', '--out-scenario', 'out', '--no-backups']):
+        assert cli._parser().parse_args(argv).no_backups is True
+
+
+def test_cli_forwards_no_backups(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append(kwargs) or type('O', (), {'work': 'W'})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--no-backups'])
+    assert calls[0]['backups'] is False
+
+
+def test_cli_forwards_no_backups_to_copy(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, 'copy_tags', lambda *args, **kwargs: calls.append(kwargs))
+    cli.main(['copy', '--tags', str(tmp_path), 'level', 'room', '--out-bsp', 'out',
+              '--out-scenario', 'out', '--no-backups'])
+    assert calls == [{'backups': False}]

@@ -79,7 +79,8 @@ The per-vertex results become the `incident_radiosity` vectors (`radiosity.py`).
 `formats/bsp.py` rewrites the BSP's lightmap materials, lightmap vertices and surface order for the new layout. `formats/bitmap.py` writes the pages into the lightmap bitmap, reusing the old bitmap tag's settings. Only when everything has succeeded are the tags written:
 
 - each tag is written to a temporary file and moved into place, so a failed write never leaves half a tag;
-- the old file is kept as `<name>.lm-backup-<date>-<time>`, and backups are never overwritten;
+- the old file is kept in a `backups` folder next to the tag, named `<YYYYMMDD-HHMMSS>_<tag file name>`; backups are never overwritten;
+- backups are on by default and can be disabled with `--no-backups`;
 - `--dry-run` and diagnostic bakes (`--sources sun` or `emit`) write no tags at all.
 
 After a successful bake the work folder also holds `summary.json` (settings, page sizes, how full each page is, and stage timings), the pages before encoding in `float_pages.npz`, Blender's raw output in `out.npz`, and `new_to_input.npy`, which `diff` uses to pair the old and new surface order.
