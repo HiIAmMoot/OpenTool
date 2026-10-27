@@ -2,7 +2,7 @@
 
 OpenTool is a set of command-line tools that rebuild parts of the Halo: Combat Evolved editing kit's `tool.exe` in Python, so each step can be read, tested and changed. It is a research and learning project: it changes often, and its results are checked against tool's own.
 
-OpenTool is developed alongside [OpenCE](https://github.com/OpenCommunityEdition/OpenCE), the open-source port of Halo: Combat Evolved to Linux, Windows, Android and the web. Everything it writes today is ordinary tags in the stock format of the Halo: Combat Evolved Anniversary (H1A) editing kit in MCC, so the results also work in MCC and with the editing kit's own tools. Nothing in it needs OpenCE yet. Features that only OpenCE can use are planned for later and will sit behind a switch.
+Everything it writes today is ordinary tags in the stock format of the Halo: Combat Evolved Anniversary (H1A) editing kit in MCC, so the results also work in MCC and with the editing kit's own tools.
 
 ## Tools
 
@@ -26,13 +26,14 @@ Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool
 ## Roadmap
 
 - Done: the lightmapper, with lightmaps that closely match tool's.
+- Done: App and CLI for lightmapper.
 - Next: better lightmaps in the stock format, with higher resolution, better bounced light, better shadows and faster bakes.
 - Next: the structure BSP builder, a replacement for `tool structure` with clearer portal errors and room for larger levels.
 - Later, OpenCE only: instanced geometry and per-texel directional lightmaps, behind a switch that keeps stock output the default.
 
 ## Download the app
 
-The quickest way to use OpenTool is the Windows app. It needs nothing installed except Blender.
+The quickest way to use OpenTool is the Windows app. It needs nothing installed except Blender 5.2 or later.
 
 1. Download `OpenTool-<version>-windows-x64.zip` from the [releases page](https://github.com/HiIAmMoot/OpenTool/releases) and unzip it anywhere.
 2. Install [Blender 5.2](https://www.blender.org/download/) or newer if you don't have it. The app finds it on its own.
@@ -98,7 +99,7 @@ The lightmapper starts Blender in the background, builds the scene from your tag
 2. Build the map as usual, for example with the editing kit, from its folder:
 
    ```powershell
-   .\tool.exe build-cache-file levels\test\bloodgulch\bloodgulch_lit remastered
+   .\tool.exe build-cache-file levels\test\bloodgulch\bloodgulch_lit
    ```
 
 - Blender is expected in its standard folder. If it is elsewhere, set `LIGHTMAPPER_BLENDER` to the path of `blender.exe`.
