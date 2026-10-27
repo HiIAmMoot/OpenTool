@@ -26,9 +26,11 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 | Setting | Default | What it does |
 |---|---|---|
 | `samples` | 256 | Cycles samples per texel. Each texel is baked as a 3 by 3 grid, so each of the nine gets a ninth. |
+| `cpu_samples` | null | Samples per texel when Cycles runs on the CPU, including Auto fallback. `null` follows `samples`; a value must be at least 1. When `texel_samples` is `null`, the edge target follows this count on the CPU. |
 | `texel_samples` | null | Texels at a chart's edge that own few of their nine samples are baked again until they reach about this many. `null` follows `samples`, `0` turns the extra pass off, a number sets the target. |
 | `bounces` | 1 | Diffuse bounces. One bounce matches tool's shadow brightness. More bounces give brighter, more physically correct shadows. |
 | `vertex_rays` | 4096 | Rays per unique position and normal query for incident light vectors, plus separate sun-shadow rays. Fewer rays bake faster but can show triangle patterns in bump-mapped surfaces. |
+| `cpu_vertex_rays` | null | Rays per query when the vertex pass runs on the CPU, including fallback after a GPU pass fails. `null` follows `vertex_rays`; a value must be at least 1. |
 | `sky_grid` | 4 | Each sky light becomes a `sky_grid` by `sky_grid` grid of sun lamps, as in tool's final quality (tool's draft uses 2). |
 | `scenery_emission` | true | Let scenery shaders give off light. This adds a source beyond tool's lighting model. Turn it off to compare with tool. |
 | `reach` | 0.225 | On faces turned away from the sun, how far in world units the sun's light reaches in from the lit corners. Tool's value. |

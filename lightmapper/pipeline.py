@@ -373,5 +373,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
+        'rays': {'samples': result.samples_used, 'texel_samples': result.texel_samples_used,
+                 'vertex_rays': s.vertex_rays if vertex_device != 'cpu' else s.resolved_cpu_vertex_rays()},
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))
     return BakeOutput(bsp_tag, bitmap_tag, float_pages, mapping, work)

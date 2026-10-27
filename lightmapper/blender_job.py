@@ -85,6 +85,8 @@ class BakeResult:
     diffuse_pages: list | None = None
     vertex_rays_cast: int | None = None
     stages: dict | None = None
+    samples_used: int | None = None
+    texel_samples_used: int | None = None
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
@@ -146,6 +148,9 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'ambient': job_ambient,
         'samples': s.samples,
         'texel_samples': s.resolved_texel_samples(),
+        'cpu_samples': s.resolved_cpu_samples(),
+        'cpu_texel_samples': s.resolved_cpu_texel_samples(),
+        'cpu_vertex_rays': s.resolved_cpu_vertex_rays(),
         'bounces': s.bounces,
         'albedo_scale': s.albedo_scale,
         'albedo_fallback': s.albedo_fallback,
@@ -211,7 +216,9 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                           int(data['vertex_rays_cast']),
                           ({'start': float(data['seconds_start']), 'scene': float(data['seconds_scene']),
                             'pages': float(data['seconds_pages']), 'vertex': float(data['seconds_vertex'])}
-                           if 'seconds_start' in data.files else None))
+                           if 'seconds_start' in data.files else None),
+                          int(data['samples_used']) if 'samples_used' in data.files else None,
+                          int(data['texel_samples_used']) if 'texel_samples_used' in data.files else None)
 
 
 def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:

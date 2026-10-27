@@ -120,3 +120,31 @@ def test_texel_samples_follows_samples_unless_set():
     assert Settings(samples=4).resolved_texel_samples() == 9
     assert Settings(samples=1024, texel_samples=100).resolved_texel_samples() == 100
     assert Settings(samples=1024, texel_samples=0).resolved_texel_samples() == 0
+
+
+def test_cpu_counts_default_to_the_gpu_counts():
+    s = Settings(samples=1024, vertex_rays=4096)
+    assert (s.resolved_cpu_samples(), s.resolved_cpu_vertex_rays(), s.resolved_cpu_texel_samples()) == (1024, 4096, 1026)
+
+
+def test_cpu_counts_resolve_their_own_texel_samples():
+    s = Settings(samples=1024, cpu_samples=256)
+    assert s.resolved_cpu_texel_samples() == 252 and s.resolved_texel_samples() == 1026
+
+
+@pytest.mark.parametrize('target', [0, 100])
+def test_explicit_texel_target_applies_to_both_devices(target):
+    s = Settings(samples=1024, cpu_samples=256, texel_samples=target)
+    assert s.resolved_cpu_texel_samples() == target and s.resolved_texel_samples() == target
+
+
+@pytest.mark.parametrize('field', ['cpu_samples', 'cpu_vertex_rays'])
+def test_cpu_counts_must_be_positive(field):
+    with pytest.raises(ValueError, match=field):
+        Settings(**{field: 0})
+
+
+@pytest.mark.parametrize('field', ['cpu_samples', 'cpu_vertex_rays'])
+def test_cpu_counts_reject_negative_values(field):
+    with pytest.raises(ValueError, match=field):
+        Settings(**{field: -1})

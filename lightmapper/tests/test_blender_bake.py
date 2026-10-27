@@ -388,6 +388,20 @@ def test_cpu_setting_bakes_on_the_cpu_without_a_warning(tmp_path):
 
 
 @pytest.mark.blender
+def test_cpu_bake_uses_the_cpu_counts_in_both_stages(tmp_path, blender_exe):
+    s = Settings(blender=str(blender_exe), device='cpu', samples=90, cpu_samples=18,
+                 vertex_rays=64, cpu_vertex_rays=16)
+    work = tmp_path
+    write_job(work, build([full_quad()]), [(8, 8)], [], {}, s)
+    result = run_blender(work, s)
+    assert (result.samples_used, result.texel_samples_used) == (18, 18)
+    with np.load(work / 'out.npz') as out:
+        assert int(out['vertex_rays_used']) == 16
+        assert int(out['vertex_rays_cast']) == 16
+    assert 'samples 18, texel samples 18' in (work / 'blender.log').read_text()
+
+
+@pytest.mark.blender
 def test_required_cycles_device_that_is_missing_fails_the_bake(tmp_path):
     s = Settings(samples=8, vertex_rays=1)
     path = write_job(tmp_path, build([full_quad()]), [(16, 16)], [sun()], {}, s)

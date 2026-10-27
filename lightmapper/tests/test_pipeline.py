@@ -340,6 +340,59 @@ def test_cpu_device_runs_todays_pass_in_blender(gpu_bake, monkeypatch):
     assert summary['devices']['vertex_pass'] == 'cpu' and summary['warnings'] == []
 
 
+def test_gpu_stages_use_the_gpu_counts(gpu_bake, monkeypatch):
+    tags, s, work = gpu_bake
+    s = replace(s, samples=90, cpu_samples=18, vertex_rays=64, cpu_vertex_rays=16)
+
+    def run(work, pages, adapter, timeout):
+        with np.load(work / 'scene.npz') as scene:
+            q, e = len(scene['query_pos']), len(scene['edge_pos'])
+        return vertex_gpu.VertexPassResult(np.zeros((q, 3)), np.ones(q), np.zeros((q, 0), bool),
+                                          np.zeros((e, 0), bool), q * 64)
+
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', run)
+    api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['rays'] == {'samples': s.samples, 'texel_samples': s.resolved_texel_samples(), 'vertex_rays': s.vertex_rays}
+
+
+def test_cpu_device_uses_the_cpu_counts_for_both_stages(tiny, fake, monkeypatch):
+    tags, s, work = tiny
+    s = replace(s, blender=fake, device='cpu', samples=90, cpu_samples=18, vertex_rays=64, cpu_vertex_rays=16)
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['rays'] == {'samples': 18, 'texel_samples': 18, 'vertex_rays': 16}
+    with np.load(work / 'scene.npz') as scene:
+        assert summary['vertex_rays_cast'] == len(scene['query_pos']) * 16
+
+
+def test_gpu_vertex_failure_reruns_on_the_cpu_with_the_cpu_rays(gpu_bake, monkeypatch):
+    tags, s, work = gpu_bake
+    s = replace(s, samples=90, cpu_samples=18, vertex_rays=64, cpu_vertex_rays=16)
+
+    def fail(*args):
+        raise vertex_gpu.GpuPassError('gather: device lost')
+
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', fail)
+    api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert json.loads((work / 'job_vertex.json').read_text())['cpu_vertex_rays'] == 16
+    assert summary['rays']['vertex_rays'] == 16 and any('GPU vertex pass failed' in w for w in summary['warnings'])
+    assert summary['rays']['samples'] == 90 and summary['rays']['texel_samples'] == 90
+    with np.load(work / 'scene.npz') as scene:
+        assert summary['vertex_rays_cast'] == len(scene['query_pos']) * 16
+
+
+def test_counts_without_cpu_values_stay_the_same_on_the_cpu(tiny, fake, monkeypatch):
+    tags, s, work = tiny
+    s = replace(s, blender=fake, device='cpu')
+    monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['rays'] == {'samples': s.samples, 'texel_samples': s.resolved_texel_samples(), 'vertex_rays': s.vertex_rays}
+
+
 def test_device_probe_failure_precedes_charting_and_tag_writes(tiny, monkeypatch):
     tags, settings, work = tiny
 

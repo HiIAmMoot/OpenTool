@@ -34,6 +34,7 @@ def _calibrated(key):
 class Settings(ChartSettings):
     seed: int = 0
     samples: int = 256
+    cpu_samples: int | None = None
     # edge texels own few of their 9 sub-texels, so they are baked again until each has about this many samples in
     # all; None follows the interior's count, so the edges keep up when samples changes; 0 bakes every texel once
     texel_samples: int | None = None
@@ -47,6 +48,7 @@ class Settings(ChartSettings):
     # 64 let one ray that hit a bright emitter carry most of a corner's light, so the incident vectors went 15-39
     # degrees off and the bump shading showed triangles on flat walls (Chiron); 4096 brings them within 2-5 degrees
     vertex_rays: int = 4096
+    cpu_vertex_rays: int | None = None
     # tool's final-quality grid of suns per sky light (its draft uses 2)
     sky_grid: int = 4
     # tool never lets object shaders emit; off leaves only the BSP's own emitters, for an in-game A/B
@@ -67,6 +69,10 @@ class Settings(ChartSettings):
     def __post_init__(self):
         super().__post_init__()
         self.device = gpu.normalise_device(self.device)
+        for name in ('cpu_samples', 'cpu_vertex_rays'):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ValueError(f'{name} must be at least 1, not {value}')
         if self.seed < 0 or self.seed > 999:
             raise ValueError(f'seed must be between 0 and 999, not {self.seed}')
         if self.sky_grid < 1:
@@ -80,6 +86,17 @@ class Settings(ChartSettings):
         # the interior bakes 9 sub-texels at round(samples / 9) each, as the Blender side rounds it
         if self.texel_samples is None:
             return 9 * max(1, round(self.samples / 9))
+        return self.texel_samples
+
+    def resolved_cpu_samples(self) -> int:
+        return self.samples if self.cpu_samples is None else self.cpu_samples
+
+    def resolved_cpu_vertex_rays(self) -> int:
+        return self.vertex_rays if self.cpu_vertex_rays is None else self.cpu_vertex_rays
+
+    def resolved_cpu_texel_samples(self) -> int:
+        if self.texel_samples is None:
+            return 9 * max(1, round(self.resolved_cpu_samples() / 9))
         return self.texel_samples
 
     def to_json(self) -> str:

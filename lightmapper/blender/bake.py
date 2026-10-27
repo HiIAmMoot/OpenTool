@@ -67,11 +67,26 @@ def pick_device(kinds: list[str], required: bool, hiprt: bool) -> str:
     return 'CPU'
 
 
+def cpu_counts(job: dict, device: str) -> dict:
+    counts = job.copy()
+    if device == 'CPU':
+        for name in ('samples', 'texel_samples'):
+            if f'cpu_{name}' in job:
+                counts[name] = job[f'cpu_{name}']
+    return counts
+
+
 def setup_scene(job):
     bpy.ops.wm.read_factory_settings(use_empty=True)
     scene = bpy.context.scene
     scene.render.engine = 'CYCLES'
     cycles = scene.cycles
+    wanted = job.get('device', 'OPTIX')
+    kinds = list(DEVICE_TYPES[DEVICE_TYPES.index(wanted):]) if wanted in DEVICE_TYPES else []
+    device = pick_device(job.get('cycles_devices', kinds), job.get('cycles_required', False),
+                         job.get('hiprt', False))
+    job.update(cpu_counts(job, device))
+    log(f'samples {job["samples"]}, texel samples {job["texel_samples"]}')
     cycles.samples = max(1, round(job['samples'] / 9))
     cycles.seed = job.get('seed', 0) * SEED_STRIDE
     log(f'cycles seed {cycles.seed}')
@@ -84,10 +99,7 @@ def setup_scene(job):
     background.inputs['Color'].default_value = (0, 0, 0, 1)
     background.inputs['Strength'].default_value = 0
     scene.world = world
-    wanted = job.get('device', 'OPTIX')
-    kinds = list(DEVICE_TYPES[DEVICE_TYPES.index(wanted):]) if wanted in DEVICE_TYPES else []
-    return scene, pick_device(job.get('cycles_devices', kinds), job.get('cycles_required', False),
-                              job.get('hiprt', False))
+    return scene, device
 
 
 def make_images(textures_path, pages, masked=False):
@@ -725,7 +737,8 @@ class VertexPass:
 
     def run(self):
         scene, job = self.scene, self.job
-        rays = int(job['vertex_rays'])
+        rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
+        self.rays_used = rays
         queries = len(scene['query_pos'])
         local, phi, r = self.hemisphere(rays)
         height = local[:, 2]
@@ -833,6 +846,8 @@ def main():
             diffuse_pages = [data[f'diffuse_{i}'] for i in range(len(job['pages']))]
     else:
         scene, device = setup_scene(job)
+        out['samples_used'] = np.int64(job['samples'])
+        out['texel_samples_used'] = np.int64(job['texel_samples'])
         log(f'device {device}')
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
                                                         job['texel_samples'] > 0)
@@ -858,6 +873,7 @@ def main():
         out['vertex_sun_lit'] = vertex_pass.sun_lit
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
         out['vertex_rays_cast'] = np.int64(rays)
+        out['vertex_rays_used'] = np.int64(vertex_pass.rays_used)
         elapsed = time.perf_counter() - began
         out['seconds_vertex'] = np.float64(elapsed)
         log(f'vertex pass: {len(out["vertex_vector"])} queries, {rays} rays in {elapsed:.2f} s ({rays / max(elapsed, 1e-9):.0f} rays/s)')

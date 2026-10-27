@@ -103,7 +103,8 @@ def test_write_job_files_load_back(tmp_path):
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
-        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ambiguous_twin_groups'])
+        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ambiguous_twin_groups',
+        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -116,6 +117,14 @@ def test_query_inverse_survives_job_exchange(tmp_path):
     write_job(tmp_path, scene, [(16, 8)], [], {}, Settings())
     with np.load(tmp_path / 'scene.npz') as data:
         np.testing.assert_array_equal(data['query_inverse'], [2, 0, 1])
+
+
+def test_job_carries_the_cpu_counts(tmp_path):
+    write_job(tmp_path, make_scene(), [(16, 8)], make_suns(), AMBIENT,
+              Settings(samples=1024, vertex_rays=4096, cpu_samples=256, cpu_vertex_rays=1024))
+    job = json.loads((tmp_path / 'job.json').read_text())
+    assert (job['samples'], job['texel_samples'], job['vertex_rays']) == (1024, 1026, 4096)
+    assert (job['cpu_samples'], job['cpu_texel_samples'], job['cpu_vertex_rays']) == (256, 252, 1024)
 
 
 def test_weights_applied_for_all(tmp_path):
@@ -213,6 +222,22 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     args = json.loads((work / 'args.json').read_text())
     assert args[:4] == ['-b', '--factory-startup', '--python-exit-code', '1']
     assert args[4] == '--python' and args[5].endswith('bake.py') and args[6:] == ['--', str(work / 'job.json')]
+
+
+def test_run_blender_accepts_results_without_used_counts(tmp_path, fake, monkeypatch):
+    from lightmapper import blender_job
+
+    s = Settings(blender=fake)
+    write_job(tmp_path, make_scene(), [(8, 8)], make_suns(), AMBIENT, s)
+    run_blender(tmp_path, s)
+    out = tmp_path / 'out.npz'
+    with np.load(out) as data:
+        arrays = {key: data[key] for key in data.files if key not in ('samples_used', 'texel_samples_used')}
+    np.savez(out, **arrays)
+    job = json.loads((tmp_path / 'job.json').read_text())
+    monkeypatch.setattr(blender_job, '_run_blender', lambda *args: (job, out))
+    result = run_blender(tmp_path, s)
+    assert result.samples_used is None and result.texel_samples_used is None
 
 
 def test_run_blender_returns_stage_seconds(tmp_path, fake, monkeypatch):

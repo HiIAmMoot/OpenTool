@@ -58,3 +58,12 @@ def test_pick_device_walks_the_order(available, expected, monkeypatch):
 def test_cpu_wanted_stays_on_cpu(monkeypatch):
     bake, _ = load_bake(monkeypatch, ['HIP'])
     assert bake.pick_device([], False, False) == 'CPU'
+
+
+def test_cpu_counts_replace_the_gpu_counts_on_the_cpu(monkeypatch):
+    bake, _ = load_bake(monkeypatch)
+    job = {'samples': 1024, 'texel_samples': 1026, 'cpu_samples': 256, 'cpu_texel_samples': 252}
+    assert bake.cpu_counts(job, 'CPU') == {**job, 'samples': 256, 'texel_samples': 252}
+    assert bake.cpu_counts(job, 'OPTIX') == job
+    assert bake.cpu_counts({'samples': 64, 'texel_samples': 63}, 'CPU') == {'samples': 64, 'texel_samples': 63}
+    assert job['samples'] == 1024 and job['texel_samples'] == 1026

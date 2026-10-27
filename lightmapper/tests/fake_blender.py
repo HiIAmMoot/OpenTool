@@ -40,6 +40,10 @@ def main():
         arrays.update(seconds_start=np.float64(stage_start),
                       seconds_scene=np.float64(2), seconds_pages=np.float64(3), seconds_vertex=np.float64(0))
     if not job.get('vertex_only'):
+        cpu = not job['cycles_devices']
+        arrays['samples_used'] = np.int64(job.get('cpu_samples', job['samples']) if cpu else job['samples'])
+        arrays['texel_samples_used'] = np.int64(job.get('cpu_texel_samples', job['texel_samples'])
+                                              if cpu else job['texel_samples'])
         for i, (w, h) in enumerate(job['pages']):
             arrays[f'page_{i}'] = page(i, w, h)
             arrays[f'diffuse_{i}'] = page(i, w, h)
@@ -53,7 +57,9 @@ def main():
         arrays['vertex_irradiance'] = (query_pos.sum(axis=1) + query_class).astype(np.float32)
         arrays['vertex_sun_lit'] = np.zeros((len(query_pos), len(job['suns'])), bool)
         arrays['edge_sun_lit'] = np.zeros((edges, len(job['suns'])), bool)
-        arrays['vertex_rays_cast'] = np.int64(len(query_pos) * job['vertex_rays'])
+        rays = job.get('cpu_vertex_rays', job['vertex_rays'])
+        arrays['vertex_rays_used'] = np.int64(rays)
+        arrays['vertex_rays_cast'] = np.int64(len(query_pos) * rays)
     arrays['device'] = np.array(('+'.join(job['cycles_devices']) or 'CPU') + '-FAKE')
     np.savez(job_path.with_name(job['out']), **arrays)
     if mode == 'fail':
