@@ -1,8 +1,11 @@
+import re
 from pathlib import Path
 
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError
 from lightmapper.charts import CapError
+from lightmapper.gpu import DeviceError
+from lightmapper.pipeline import BakeError
 
 
 def explain(exc: BaseException, work: Path | None = None) -> str:
@@ -16,6 +19,17 @@ def explain(exc: BaseException, work: Path | None = None) -> str:
     if isinstance(exc, CapError):
         return ('This level needs more lightmap space than the stock format allows at these settings. '
                 'Lower the texel density, or raise Max resolution under Advanced.')
+    if isinstance(exc, DeviceError):
+        vendor = {'nvidia': 'NVIDIA', 'amd': 'AMD'}.get(str(exc).split(':', 1)[0])
+        if vendor:
+            return (f'No {vendor} GPU with ray tracing was found. Pick Auto or CPU only under Device, '
+                    'or update the graphics driver.')
+    if isinstance(exc, BakeError) and (failed := re.match(r'(nvidia|amd) vertex pass failed', str(exc))):
+        vendor = {'nvidia': 'NVIDIA', 'amd': 'AMD'}[failed.group(1)]
+        return (f'The vertex pass failed on the {vendor} GPU. Pick Auto to fall back to the CPU, or CPU only. '
+                'The full error is in the log.')
+    if isinstance(exc, RuntimeError) and re.match(r'OIDN (CUDA|HIP) failed', str(exc)):
+        return 'The denoiser could not start on the GPU. Pick Auto to fall back to the CPU, or CPU only.'
     if isinstance(exc, ValueError):
         text = str(exc)
         if 'exceed stock cap' in text:

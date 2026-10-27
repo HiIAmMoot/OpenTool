@@ -8,7 +8,9 @@ tk = pytest.importorskip('tkinter')
 
 from test_pipeline import tiny
 from lightmapper.blender_find import Blender, BlenderNotFound
+from lightmapper.gpu import Adapter, DeviceError
 from opentool.app import App
+from opentool.devices import result_line
 from opentool.runner import BakeOutcome
 from opentool import app as app_module
 from opentool import usersettings
@@ -21,6 +23,10 @@ def tk_root():
     root.withdraw()
     yield root
     root.destroy()
+
+
+RTX = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', 0x10DE, (1,), 'vulkan', True)
+RADEON = Adapter('AMD Radeon(TM) Graphics', 0x1002, (2,), 'vulkan', True)
 
 
 @pytest.fixture
@@ -39,6 +45,7 @@ def make_app(tmp_path, monkeypatch, request, tk_root):
             'find_blender',
             lambda remembered=None: Blender(Path('C:/b/blender.exe'), (5, 2)),
         )
+        kwargs.setdefault('probe_gpu', lambda: ([RTX], None))
         app = App(
             root,
             store_path=store_path,
@@ -830,3 +837,135 @@ def test_finishing_label_survives_later_events(ready_app, monkeypatch):
 def test_idle_close_saves_the_settings(ready_app):
     ready_app.on_close()
     assert usersettings.load(ready_app.store_path).bsp == 'room'
+
+
+def probe_for(adapters, reason=None):
+    return lambda: (adapters, reason)
+
+
+def test_device_row_shows_the_probed_gpu(make_app):
+    a = make_app(probe_gpu=probe_for([RTX, RADEON]))
+    pump(a.root, lambda: a.gpu_label['text'].startswith('GPU: '))
+    assert a.gpu_label['text'] == 'GPU: NVIDIA GeForce RTX 4060 Laptop GPU, AMD Radeon(TM) Graphics'
+    assert a.device_hint['text'] == 'Bakes on NVIDIA GeForce RTX 4060 Laptop GPU.'
+    assert tuple(a.device_box['values']) == ('Auto', 'NVIDIA', 'AMD', 'CPU only')
+    assert a.device_var.get() == 'Auto' and str(a.device_box['state']) == 'readonly'
+    assert a.device_box.master.grid_info()['row'] == 12 and a.stage_label.grid_info()['row'] == 14
+
+
+def test_device_row_says_looking_until_the_probe_answers(make_app):
+    gate = threading.Event()
+
+    def slow():
+        gate.wait(5)
+        return [RTX], None
+
+    a = make_app(probe_gpu=slow)
+    assert a.gpu_label['text'] == 'Looking for GPUs…' and a.device_hint['text'] == ''
+    gate.set()
+    pump(a.root, lambda: a.gpu_label['text'].startswith('GPU: '))
+
+
+def test_probe_runs_off_the_ui_thread(make_app):
+    seen = []
+
+    def probe():
+        seen.append(threading.current_thread())
+        return [RTX], None
+
+    a = make_app(probe_gpu=probe)
+    pump(a.root, lambda: a.gpu_label['text'].startswith('GPU: '))
+    assert seen and seen[0] is not threading.main_thread()
+
+
+def test_probe_worker_does_not_capture_app(make_app, monkeypatch):
+    targets = []
+
+    class UnstartedThread:
+        def __init__(self, *, target, **_kwargs):
+            targets.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_module.threading, 'Thread', UnstartedThread)
+    app = make_app()
+    for target in targets:
+        assert all(cell.cell_contents is not app for cell in target.__closure__ or ())
+
+
+def test_device_choice_reaches_the_request_and_is_remembered(ready_app, tmp_path):
+    ready_app.device_box.set('CPU only')
+    ready_app.device_box.event_generate('<<ComboboxSelected>>')
+    assert ready_app.request().settings.device == 'cpu'
+    ready_app.remember()
+    assert usersettings.load(tmp_path / 's.json').device == 'cpu'
+
+
+def test_remembered_device_is_selected_on_start(make_app, tmp_path):
+    usersettings.save(usersettings.UserSettings(device='amd'), tmp_path / 's.json')
+    a = make_app(probe_gpu=probe_for([RADEON]))
+    assert a.device_var.get() == 'AMD'
+    pump(a.root, lambda: a.gpu_label['text'].startswith('GPU: '))
+    assert a.device_hint['text'] == 'Bakes on AMD Radeon(TM) Graphics.'
+
+
+def test_missing_vendor_hint_updates_on_selection(make_app):
+    a = make_app(probe_gpu=probe_for([RADEON]))
+    pump(a.root, lambda: a.gpu_label['text'].startswith('GPU: '))
+    a.device_box.set('NVIDIA')
+    a.device_box.event_generate('<<ComboboxSelected>>')
+    a.root.update()
+    assert a.device_hint['text'] == 'No NVIDIA GPU with ray tracing was found, so the bake would stop. Pick Auto or CPU only.'
+    a.device_box.set('CPU only')
+    a.device_box.event_generate('<<ComboboxSelected>>')
+    a.root.update()
+    assert a.device_hint['text'] == 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'
+
+
+def test_gpu_note_shows_for_named_presets_only(app):
+    note = 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
+    assert app.preset_note['text'] == note
+    app._select_preset('Custom')
+    assert app.preset_note['text'] == '' and app.preset_note.winfo_manager() == ''
+    app._select_preset('High')
+    assert app.preset_note['text'] == note
+
+
+def test_device_box_is_locked_during_a_bake(ready_app):
+    gate = threading.Event()
+
+    def fake(req, emit):
+        gate.wait(5)
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    assert str(ready_app.device_box['state']) == 'disabled'
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+    assert str(ready_app.device_box['state']) == 'readonly'
+
+
+def test_finished_bake_shows_the_devices_used_and_logs_warnings(ready_app):
+    devices = {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    rays = {'samples': 256, 'texel_samples': 252, 'vertex_rays': 1024}
+    outcome = BakeOutcome('done', 'Done. The lit level is level.', [], Path('C:/x'), Path(), 'CPU',
+                          devices, rays, ['a', 'b'])
+    run_events(ready_app, [('device', 'CPU'), ('done', outcome)])
+    assert ready_app.device_label['text'] == result_line(devices, rays, ['a', 'b'])
+    log = ready_app.log_box.get('1.0', 'end')
+    assert 'WARNING: a' in log and 'WARNING: b' in log
+
+
+def test_finished_bake_without_devices_keeps_the_baking_on_text(ready_app):
+    run_events(ready_app, [('device', 'OPTIX'), ('done', OUTCOME_DONE)])
+    assert ready_app.device_label['text'] == 'Baking on OPTIX'
+
+
+def test_late_probe_result_after_close_is_ignored(make_app):
+    a = make_app()
+    pump(a.root, lambda: a.blender is not None and a.gpu_label['text'].startswith('GPU: '))
+    a.events.put(('gpu', [RADEON], None))
+    a.window.destroy()
+    a._drain()

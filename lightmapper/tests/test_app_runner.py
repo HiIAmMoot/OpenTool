@@ -1,3 +1,4 @@
+import json
 import logging
 import shutil
 
@@ -311,3 +312,30 @@ def test_runner_follows_blender_log(tiny, monkeypatch, verbose):
 
 def test_runner_removes_its_log_handlers(tiny):
     before = list(logging.getLogger().handlers); run(tiny); assert logging.getLogger().handlers == before
+
+
+def test_outcome_carries_devices_rays_and_warnings_from_the_summary(tiny):
+    out, _ = run(tiny)
+    summary = json.loads((out.work / 'summary.json').read_text())
+    assert out.devices == summary['devices'] and out.devices
+    assert out.rays == summary['rays'] and out.rays
+    assert out.warnings == summary['warnings']
+
+
+def test_failed_bake_has_no_devices(tiny, monkeypatch):
+    monkeypatch.setattr(runner.pipeline, 'bake', lambda *a, **k: (_ for _ in ()).throw(RuntimeError('boom')))
+    out, _ = run(tiny)
+    assert out.status == 'failed' and out.devices is None and out.rays is None and out.warnings == []
+
+
+def test_unreadable_summary_leaves_devices_empty(tiny, monkeypatch):
+    real = runner.pipeline.bake
+
+    def bake_then_break(*a, **k):
+        result = real(*a, **k)
+        (k['work'] / 'summary.json').write_text('{not json')
+        return result
+
+    monkeypatch.setattr(runner.pipeline, 'bake', bake_then_break)
+    out, _ = run(tiny)
+    assert out.status == 'done' and out.devices is None and out.warnings == []

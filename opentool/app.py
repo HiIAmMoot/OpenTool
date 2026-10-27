@@ -9,9 +9,9 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from lightmapper import blender_find
+from lightmapper import blender_find, gpu
 from lightmapper.progress import STAGE_LABELS, fraction
-from . import form, jobobject, presets, runner, usersettings
+from . import devices, form, jobobject, presets, runner, usersettings
 
 
 class _BakeGate:
@@ -26,7 +26,7 @@ class _BakeGate:
 class App:
     def __init__(self, root: tk.Misc, *, store_path: Path | None = None,
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
-                 log_path: Path | None = None):
+                 log_path: Path | None = None, probe_gpu=gpu.probe_adapters):
         self.root = root
         self.window = root.winfo_toplevel()
         self.tk_root = root._root()
@@ -34,6 +34,9 @@ class App:
         self.log_path = Path(log_path) if log_path is not None else Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'OpenTool' / 'opentool.log'
         self.find_blender = find_blender
         self._run_bake = run_bake
+        self._probe_gpu = probe_gpu
+        self._adapters: list | None = None
+        self._gpu_reason: str | None = None
         self.busy = False
         self.stage: str | None = None
         self.close_after_write = False
@@ -58,6 +61,7 @@ class App:
         self._restore()
         self._set_blender_status('Looking for Blender…')
         self._discover_blender()
+        self._discover_gpu()
         root.after(100, self._poll)
 
     def _build(self):
@@ -102,8 +106,10 @@ class App:
         self.bsp_message.grid(row=5, column=0, sticky='w')
         self.bsp_message.grid_remove()
 
-        quality = ttk.Frame(self.frame)
-        quality.grid(row=6, column=0, sticky='ew', pady=(12, 0))
+        quality_block = ttk.Frame(self.frame)
+        quality_block.grid(row=6, column=0, sticky='ew', pady=(12, 0))
+        quality = ttk.Frame(quality_block)
+        quality.grid(row=0, column=0, sticky='w')
         ttk.Label(quality, text='Quality').pack(side='left')
         self.preset_var = tk.StringVar(value='Normal')
         for name in (*presets.PRESET_NAMES, presets.CUSTOM):
@@ -111,6 +117,8 @@ class App:
                             command=lambda selected=name: self._select_preset(selected)).pack(side='left', padx=(8, 0))
         self.preset_hint = ttk.Label(quality, text=presets.PRESET_HINTS['Normal'])
         self.preset_hint.pack(side='left', padx=(12, 0))
+        self.preset_note = ttk.Label(quality_block)
+        self.preset_note.grid(row=1, column=0, sticky='w')
 
         self.new_names_var = tk.BooleanVar(value=self.settings.new_names)
         options = ttk.Frame(self.frame)
@@ -163,26 +171,39 @@ class App:
         self.blender_label.pack(side='left', fill='x', expand=True)
         ttk.Button(blender_row, text='Change…', command=self._choose_blender).pack(side='right')
 
+        device_row = ttk.Frame(self.frame)
+        device_row.grid(row=12, column=0, sticky='ew', pady=(8, 0))
+        ttk.Label(device_row, text='Device').grid(row=0, column=0, sticky='w')
+        self.device_var = tk.StringVar(value=self._device_label(self.settings.device))
+        self.device_box = ttk.Combobox(device_row, textvariable=self.device_var, state='readonly', width=10,
+                                       values=[label for label, _ in presets.DEVICES])
+        self.device_box.grid(row=0, column=1, padx=(12, 0))
+        self.device_box.bind('<<ComboboxSelected>>', lambda _event: self._update_device_hint())
+        self.gpu_label = ttk.Label(device_row, text=devices.gpu_text(None, None))
+        self.gpu_label.grid(row=0, column=2, sticky='w', padx=(12, 0))
+        self.device_hint = ttk.Label(device_row)
+        self.device_hint.grid(row=1, column=1, columnspan=2, sticky='w', padx=(12, 0))
+
         controls = ttk.Frame(self.frame)
-        controls.grid(row=12, column=0, sticky='ew', pady=(12, 0))
+        controls.grid(row=13, column=0, sticky='ew', pady=(12, 0))
         self.bake_button = ttk.Button(controls, text='Bake', command=self.start_bake, state='disabled')
         self.bake_button.pack(side='left')
         self._output_folder: Path | None = None
 
         self.stage_label = ttk.Label(self.frame, text='Ready')
-        self.stage_label.grid(row=13, column=0, sticky='w', pady=(8, 0))
+        self.stage_label.grid(row=14, column=0, sticky='w', pady=(8, 0))
         self.progress = ttk.Progressbar(self.frame, maximum=1000, mode='determinate')
-        self.progress.grid(row=14, column=0, sticky='ew')
+        self.progress.grid(row=15, column=0, sticky='ew')
         self.device_label = ttk.Label(self.frame)
-        self.device_label.grid(row=15, column=0, sticky='w')
+        self.device_label.grid(row=16, column=0, sticky='w')
         self.device_label.grid_remove()
         self.log_box = ScrolledText(self.frame, height=7, state='disabled', wrap='word', font='TkFixedFont')
-        self.log_box.grid(row=16, column=0, sticky='nsew', pady=(4, 0))
-        self.frame.rowconfigure(16, weight=1)
+        self.log_box.grid(row=17, column=0, sticky='nsew', pady=(4, 0))
+        self.frame.rowconfigure(17, weight=1)
         self.open_button = ttk.Button(self.frame, text='Open output folder', command=self._open_output, state='disabled')
-        self.open_button.grid(row=17, column=0, sticky='e', pady=(4, 0))
+        self.open_button.grid(row=18, column=0, sticky='e', pady=(4, 0))
         self.verbose_var = tk.BooleanVar(value=self.settings.verbose)
-        ttk.Checkbutton(self.frame, text='Detailed log', variable=self.verbose_var).grid(row=18, column=0, sticky='w')
+        ttk.Checkbutton(self.frame, text='Detailed log', variable=self.verbose_var).grid(row=19, column=0, sticky='w')
 
     def _restore(self):
         self._select_preset(self.settings.preset)
@@ -304,7 +325,8 @@ class App:
             self.advanced_error.configure(text=str(exc))
             raise
         self.advanced_error.configure(text='')
-        settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path))
+        settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path),
+                                         self._device_value())
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get())
 
@@ -319,7 +341,7 @@ class App:
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
             backups=self.backups_var.get(),
             advanced_open=self._advanced_open,
-            verbose=self.verbose_var.get(),
+            verbose=self.verbose_var.get(), device=self._device_value(),
         )
         usersettings.save(self.settings, self.store_path)
 
@@ -339,6 +361,18 @@ class App:
 
     def _update_hint(self):
         self.preset_hint.configure(text=presets.PRESET_HINTS.get(self.preset_var.get(), ''))
+        self._set_optional_label(self.preset_note, presets.GPU_NOTE if self.preset_var.get() in presets.PRESET_NAMES else '')
+
+    @staticmethod
+    def _device_label(value):
+        return next((label for label, setting in presets.DEVICES if setting == value), presets.DEVICES[0][0])
+
+    def _device_value(self):
+        return dict(presets.DEVICES).get(self.device_var.get(), 'auto')
+
+    def _update_device_hint(self):
+        self.gpu_label.configure(text=devices.gpu_text(self._adapters, self._gpu_reason))
+        self.device_hint.configure(text=devices.device_hint(self._device_value(), self._adapters, self._gpu_reason))
 
     def _select_preset(self, name):
         self._setting_preset = True
@@ -418,6 +452,16 @@ class App:
 
         threading.Thread(target=discover, daemon=True).start()
 
+    def _discover_gpu(self):
+        probe = self._probe_gpu
+        events = self.events
+
+        def discover():
+            adapters, reason = probe()
+            events.put(('gpu', adapters, reason))
+
+        threading.Thread(target=discover, daemon=True).start()
+
     def _choose_blender(self):
         path = filedialog.askopenfilename(filetypes=[('Blender', 'blender.exe')])
         if not path:
@@ -479,6 +523,12 @@ class App:
                     self.settings.blender = str(result.path)
                     self._set_blender_status(f'Blender {result.version[0]}.{result.version[1]} ({result.path})')
                 self._update_bake_state()
+            elif event[0] == 'gpu':
+                self._adapters, self._gpu_reason = event[1:]
+                try:
+                    self._update_device_hint()
+                except tk.TclError:
+                    pass
             elif event[0] == 'device':
                 device = str(event[1])
                 self._set_optional_label(
@@ -523,6 +573,10 @@ class App:
             self._append_log('Problems')
             for problem in outcome.problems:
                 self._append_log(str(problem))
+        if outcome.devices:
+            self._set_optional_label(self.device_label, devices.result_line(outcome.devices, outcome.rays, outcome.warnings))
+        for warning in outcome.warnings:
+            self._append_log(f'WARNING: {warning}')
         self._output_folder = outcome.output_folder
         self.open_button.configure(state='normal' if outcome.output_folder else 'disabled')
         self._unlock_form()

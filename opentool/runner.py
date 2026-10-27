@@ -37,6 +37,9 @@ class BakeOutcome:
     output_folder: Path | None = None
     work: Path = Path()
     device: str | None = None
+    devices: dict | None = None
+    rays: dict | None = None
+    warnings: list[str] = field(default_factory=list)
 
 
 def default_work(bsp: str) -> Path:
@@ -79,6 +82,17 @@ def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True)
         entry.set_reference('structure_bsp', 'sbsp', lit_bsp)
     # The lit scenario must match the scenario the bake read; earlier lit BSPs are found by name, not position.
     write_tag(tag, path, backup=backups)
+
+
+def read_summary(work: Path) -> tuple[dict | None, dict | None, list[str]]:
+    try:
+        summary = json.loads((work / 'summary.json').read_text())
+        devices, rays, warnings = summary['devices'], summary.get('rays'), summary.get('warnings', [])
+        if isinstance(devices, dict) and isinstance(warnings, list):
+            return devices, rays if isinstance(rays, dict) else None, [str(text) for text in warnings]
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    return None, None, []
 
 
 def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome:
@@ -160,7 +174,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         message = ('Finished with problems. The tags were written; the problems are listed in the log.' if problems
                    else f'Done. The lit level is {out_scenario or request.scenario}.')
         output_folder = resolve_reference_path(request.tags, 'sbsp', written_bsp).parent
-        outcome = BakeOutcome(status, message, problems, output_folder, work, device)
+        outcome = BakeOutcome(status, message, problems, output_folder, work, device, *read_summary(work))
     except Exception as exc:
         logger.exception('Bake failed')
         outcome = BakeOutcome('failed', explain(exc, work), [], None, work, device)
