@@ -16,7 +16,9 @@ from lightmapper.vertex_gpu import (GOLDEN_FRACTION, GROUP_SIZE, SEED_SPIN, GpuP
                                     hemisphere, load_and_run, query_frames, run_vertex_pass, sun_rays)
 from conftest import LIGHTMAPPER_BLENDER
 from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
-from test_vertex_pass import AMBIENT, FULL_UV, S, roof, run_driver, wall_facing_minus_x
+from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
+                              roof, run_driver, twin_scene,
+                              unpaired_back_face_scene, wall_facing_minus_x)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -140,6 +142,31 @@ def cpu_and_gpu(tmp_path, vendor, **kwargs):
     with np.load(tmp_path / 'pages.npz') as data:
         pages = [data[f'page_{i}'] for i in range(len(data.files))]
     return cpu, load_and_run(tmp_path, pages, adapter_for(vendor))
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('cutout', [False, True])
+def test_twin_faces_light_both_sides_on_cpu_and_gpu(tmp_path, vendor, reverse, cutout):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **twin_scene(reverse, cutout))
+    assert_twin_light(cpu['irradiance'], cpu['vector'], cpu['rays'])
+    assert_twin_light(result.irradiance, result.vector, result.rays)
+
+
+@pytest.mark.blender
+def test_unpaired_back_face_still_blocks(tmp_path, vendor):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **unpaired_back_face_scene())
+    np.testing.assert_array_equal(cpu['irradiance'], [0])
+    np.testing.assert_array_equal(result.irradiance, [0])
+    np.testing.assert_array_equal(result.vector, [[0, 0, 0]])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+def test_twin_uses_facing_alpha_and_corner_weights_before_stopping(tmp_path, vendor, reverse):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **asymmetric_twin_scene(reverse))
+    assert_asymmetric_twin(cpu['irradiance'], cpu['sun_lit'])
+    assert_asymmetric_twin(result.irradiance, result.sun_lit)
 
 
 def alpha_texture(alpha, holes=False):

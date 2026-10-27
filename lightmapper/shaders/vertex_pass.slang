@@ -21,6 +21,8 @@ StructuredBuffer<int4> tri_info;
 StructuredBuffer<float3> tri_tint;
 StructuredBuffer<float3> tri_emission;
 StructuredBuffer<float3> tri_normal;
+StructuredBuffer<int> tri_twin;
+StructuredBuffer<int3> tri_twin_perm;
 StructuredBuffer<uint> tri_vertices;
 StructuredBuffer<float2> vertex_tex_uv;
 StructuredBuffer<float2> vertex_lm_uv;
@@ -159,6 +161,13 @@ int cast(float3 origin, float3 dir, bool shadow, inout float3 carried, out float
         float t = q.CommittedRayT();
         bary = q.CommittedTriangleBarycentrics();
         hit = start + t * dir;
+        int twin = tri_twin[tri];
+        if (twin >= 0 && dot(tri_normal[tri], dir) >= 0 && dot(tri_normal[twin], dir) < 0) {
+            float3 w = weights_of(bary);
+            int3 perm = tri_twin_perm[tri];
+            bary = float2(w[perm.y], w[perm.z]);
+            tri = twin;
+        }
         bool stops = casts(tri) || (!shadow && glows(tri) && dot(tri_normal[tri], dir) < 0);
         if (stops && !(cutout(tri) && tri_info[tri].x >= 0 && alpha_at(tri, bary) < 0.5)) return tri;
         if (shadow && !casts(tri)) carried *= tri_tint[tri];

@@ -29,12 +29,13 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
-               sun_facing=False):
+                sun_facing=False, albedo_fallback=0.5):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
     pages = pages or [np.zeros((16, 16, 3), np.float32)]
-    settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed)
+    settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
+                                   albedo_fallback=albedo_fallback)
     write_job(tmp_path, scene, [(p.shape[1], p.shape[0]) for p in pages], list(suns), ambient or {}, settings,
               'all', textures=textures)
     if seed is None:
@@ -53,6 +54,79 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                           stdin=subprocess.DEVNULL)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
     return np.load(tmp_path / ('sun_facing.npz' if sun_facing else 'probe.npz' if probes is not None else 'vp.npz'))
+
+
+def twin_scene(reverse=False, cutout=False):
+    corners = np.float32([[-100, -100, 1], [100, -100, 1], [0, 100, 1]])
+    receivers = [dict(quad=(corners, np.float32([[0.25, 0.5]] * 3), np.zeros((3, 2), np.float32),
+                                  np.float32([[0, 0, 1]] * 3))),
+                 dict(quad=(corners[[1, 0, 2]], np.float32([[0.75, 0.5]] * 3), np.zeros((3, 2), np.float32),
+                                  np.float32([[0, 0, -1]] * 3)))]
+    if cutout:
+        receivers = [dict(r, texture=0, cutout=True) for r in receivers]
+    return dict(receivers=receivers[::-1] if reverse else receivers,
+                pages=[np.float32([[[2, 2, 2], [7, 7, 7]]])],
+                textures=[np.full((1, 1, 4), 255, np.uint8)] if cutout else [],
+                query=((0, 0, 0), (0, 0, 2)), normals=((0, 0, 1), (0, 0, -1)),
+                rays=1, seed=0, albedo_fallback=1.0)
+
+
+def assert_twin_light(irradiance, vector, rays):
+    expected = np.pi * np.array([7, 2])
+    angle = 2 * np.pi * 0.618034
+    directions = np.sqrt(0.5) * np.array([[0, 1, 1], [-np.sin(angle), -np.cos(angle), -1]])
+    np.testing.assert_allclose(irradiance, expected, rtol=1e-6, atol=1e-6)
+    np.testing.assert_allclose(vector, expected[:, None] * directions, rtol=1e-6, atol=1e-6)
+    assert int(rays) == 2
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('cutout', [False, True])
+def test_twin_faces_light_both_sides_on_cpu(tmp_path, reverse, cutout):
+    out = run_driver(tmp_path, **twin_scene(reverse, cutout))
+    assert_twin_light(out['irradiance'], out['vector'], out['rays'])
+
+
+def unpaired_back_face_scene():
+    scene = twin_scene()
+    front, back = scene['receivers']
+    p, lm, tex, n = back['quad']
+    behind = dict(quad=(p + np.float32([0, 0, 1]), lm, tex, n))
+    return dict(scene, receivers=[front, behind], query=((0, 0, 0),), normals=((0, 0, 1),))
+
+
+@pytest.mark.blender
+def test_unpaired_back_face_still_blocks(tmp_path):
+    out = run_driver(tmp_path, **unpaired_back_face_scene())
+    np.testing.assert_array_equal(out['irradiance'], [0])
+    np.testing.assert_array_equal(out['vector'], [[0, 0, 0]])
+
+
+def asymmetric_twin_scene(reverse=False):
+    scene = twin_scene(cutout=True)
+    upper, lower = scene['receivers']
+    p, lm, _, n = upper['quad']
+    upper = dict(upper, quad=(p, lm, np.float32([[0.75, 0.5]] * 3), n))
+    p, _, _, n = lower['quad']
+    uv = np.float32([[1, 0.5], [0, 0.5], [0.5, 0.5]])
+    lower = dict(lower, quad=(p, uv, uv, n))
+    texture = np.uint8([[[255, 255, 255, 255], [255, 255, 255, 0]]])
+    return dict(scene, receivers=[lower, upper] if reverse else [upper, lower], textures=[texture],
+                query=((-50, -50, 0), (-50, -50, 2)), suns=[sun(UP), sun(-UP)])
+
+
+def assert_asymmetric_twin(irradiance, sun_lit):
+    # at x=-50 the lower twin's UV is .25 (opaque, page value 2); the upper twin is a hole
+    np.testing.assert_allclose(irradiance, [2 * np.pi, 3], rtol=1e-6, atol=1e-6)
+    np.testing.assert_array_equal(sun_lit, [[False, False], [False, True]])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+def test_twin_uses_facing_alpha_and_corner_weights_before_stopping(tmp_path, reverse):
+    out = run_driver(tmp_path, **asymmetric_twin_scene(reverse))
+    assert_asymmetric_twin(out['irradiance'], out['sun_lit'])
 
 
 @pytest.mark.blender

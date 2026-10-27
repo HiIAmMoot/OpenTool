@@ -15,6 +15,7 @@ import numpy as np
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
 from .vertex_gpu import VertexPassResult
+from .twins import reversed_twins
 from . import frozen
 
 
@@ -97,6 +98,8 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
 
     arrays = {f.name: np.ascontiguousarray(getattr(scene, f.name), _DTYPES[f.name])
               for f in fields(Scene) if getattr(scene, f.name) is not None}
+    corners = np.concatenate([arrays['positions'][arrays['tris']], arrays['occ_positions'][arrays['occ_tris']]])
+    arrays['tri_twin'], arrays['tri_twin_perm'] = reversed_twins(corners)
     # an unlightmapped emitter is transparent to diffuse rays whatever the weights leave of its emission
     arrays['occ_tri_emit_only'] = (~arrays['occ_tri_casts_shadow'] & arrays['occ_tri_emission'].any(axis=1))
     if sources == 'sun':

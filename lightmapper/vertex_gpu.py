@@ -205,6 +205,7 @@ def _scene_arrays(scene, textures, pages):
         return np.array([[o, im.shape[1], im.shape[0], 0] for o, im in zip(offsets, images)], np.int32).reshape(-1, 4)
     return dict(
         positions=positions, tris=tris, info=info, class_of=class_of,
+        twin=scene['tri_twin'], twin_perm=scene['tri_twin_perm'],
         tint=np.concatenate([scene['tri_tint'], scene['occ_tri_tint']]), emission=emission,
         normal=np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
         tex_uv=np.concatenate([scene['tex_uv'], scene['occ_uv']]),
@@ -283,6 +284,8 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
             tri_info=_upload(device, arrays['info'], np.int32), tri_tint=_upload(device, arrays['tint'], np.float32),
             tri_emission=_upload(device, arrays['emission'], np.float32),
             tri_normal=_upload(device, arrays['normal'], np.float32), tri_vertices=indices,
+            tri_twin=_upload(device, arrays['twin'], np.int32),
+            tri_twin_perm=_upload(device, arrays['twin_perm'], np.int32),
             vertex_tex_uv=_upload(device, arrays['tex_uv'], np.float32),
             vertex_lm_uv=_upload(device, arrays['lm_uv'], np.float32),
             texture_info=_upload(device, arrays['texture_info'], np.int32),

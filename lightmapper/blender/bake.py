@@ -571,6 +571,7 @@ class VertexPass:
         self.n_recv = len(scene['tris'])
         self.tris = np.concatenate([scene['tris'], scene['occ_tris'] + n_recv_vertices]).astype(np.int64)
         self.corners = positions[self.tris]
+        self.twin = scene['tri_twin']
         self.tex_uv = np.concatenate([scene['tex_uv'], scene['occ_uv']]).astype(np.float64)
         # occluders have no page, so their lightmap UVs are never read
         self.lm_uv = np.concatenate([scene['lm_uv'], np.zeros((len(scene['occ_positions']), 2))]).astype(np.float64)
@@ -648,6 +649,10 @@ class VertexPass:
             location, _, index, distance = self.bvh.ray_cast(start, heading, remaining)
             if index is None:
                 return -1, None
+            twin = int(self.twin[index])
+            if twin >= 0 and not self.faces(index, heading) and self.faces(twin, heading):
+                # the hit point stays put; interpolation recomputes weights in the facing twin's corner order
+                index = twin
             if self.casts[index] or (carried is None and self.glows[index] and self.faces(index, heading)):
                 if not (self.cutout[index] and self.texture_of[index] >= 0
                         and self.texture_rgba(np.array([index]), np.array([location]))[0, 3] < 0.5):

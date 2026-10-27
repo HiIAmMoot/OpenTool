@@ -45,8 +45,8 @@ def build(receivers, occluders=()):
         cols['nrm'].append(nrm)
         cols['lm'].append(lm)
         cols['tex'].append(tex)
-        cols['tris'] += [(base, base + 1, base + 2), (base, base + 2, base + 3)]
-        for _ in range(2):
+        cols['tris'] += [(base, base + k, base + k + 1) for k in range(1, len(p) - 1)]
+        for _ in range(len(p) - 2):
             cols['page'].append(r.get('page', 0))
             cols['cls'].append(r.get('cls', 0))
             cols['casts'].append(r.get('casts', True))
@@ -54,21 +54,21 @@ def build(receivers, occluders=()):
             cols['emit'].append(r.get('emission', (0, 0, 0)))
             cols['texture'].append(r.get('texture', -1))
             cols['cut'].append(r.get('cutout', False))
-        base += 4
+        base += len(p)
     o = {k: [] for k in ('p', 'uv', 'tris', 'texture', 'cut', 'casts', 'emit', 'tint')}
     base = 0
     for r in occluders:
         p, _, tex, _ = r['quad']
         o['p'].append(p)
         o['uv'].append(tex)
-        o['tris'] += [(base, base + 1, base + 2), (base, base + 2, base + 3)]
-        for _ in range(2):
+        o['tris'] += [(base, base + k, base + k + 1) for k in range(1, len(p) - 1)]
+        for _ in range(len(p) - 2):
             o['texture'].append(r.get('texture', -1))
             o['cut'].append(r.get('cutout', False))
             o['casts'].append(r.get('casts', True))
             o['emit'].append(r.get('emission', (0, 0, 0)))
             o['tint'].append(r.get('tint', (1, 1, 1)))
-        base += 4
+        base += len(p)
     n = len(cols['tris'])
     return Scene(
         positions=np.concatenate(cols['p']), normals=np.concatenate(cols['nrm']),

@@ -81,7 +81,11 @@ def test_write_job_files_load_back(tmp_path):
     with np.load(tmp_path / 'scene.npz') as data:
         expected_fields = [f.name for f in fields(Scene) if getattr(scene, f.name) is not None]
         assert sorted(data.files) == sorted(expected_fields + [
-            'occ_tri_emit_only', 'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])
+            'occ_tri_emit_only', 'tri_twin', 'tri_twin_perm',
+            'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])
+        np.testing.assert_array_equal(data['tri_twin'], [-1, -1])
+        np.testing.assert_array_equal(data['tri_twin_perm'], [[0, 1, 2], [0, 1, 2]])
+        assert data['tri_twin'].dtype == data['tri_twin_perm'].dtype == np.int32
         for f in fields(Scene):
             expected = getattr(scene, f.name)
             if expected is None:
