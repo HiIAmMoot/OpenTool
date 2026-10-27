@@ -7,6 +7,9 @@ from pathlib import Path
 
 # a windowed app has no console, so windows would open one for every console child
 NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32' else 0
+DENOISE_FLAG = '--denoise-worker'
+PROBE_FLAG = '--gpu-probe'
+VERTEX_FLAG = '--vertex-pass'
 
 
 def is_frozen() -> bool:
@@ -21,3 +24,9 @@ def bundle_dir() -> Path:
 
 def cli_executable() -> Path:
     return Path(sys.executable).with_name('OpenTool-cli.exe')
+
+
+def child_command(flag: str, *args: str) -> list[str]:
+    if is_frozen():
+        return [str(cli_executable()), flag, *args]
+    return [sys.executable, str(bundle_dir() / 'lightmap.py'), flag, *args]

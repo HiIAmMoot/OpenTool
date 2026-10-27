@@ -5,11 +5,10 @@ opening a device. Adapter LUIDs keep subsequent passes on the probed GPU.
 """
 
 import json
-import os
 import subprocess
-import sys
 from dataclasses import asdict, dataclass
-from pathlib import Path
+
+from . import frozen
 
 
 NVIDIA, AMD = 0x10DE, 0x1002
@@ -21,6 +20,11 @@ HIPRT = False
 # a healthy probe takes about 2 s; a driver that hangs while a device opens would otherwise hang the bake, so the
 # child is cut off well before a user would give up and the bake goes on without the GPU
 PROBE_TIMEOUT_S = 60.0
+PROBE_PREFIX = 'lightmapper-gpu-probe: '
+
+
+class ProbeError(RuntimeError):
+    pass
 
 
 class DeviceError(RuntimeError):
@@ -145,30 +149,37 @@ def list_adapters() -> tuple[list[Adapter], str | None]:
 
 
 def _probe_command() -> list[str]:
-    return [sys.executable, '-m', 'lightmapper.gpu']
+    return frozen.child_command(frozen.PROBE_FLAG)
+
+
+def run_probe() -> tuple[list[Adapter], str | None]:
+    try:
+        done = subprocess.run(_probe_command(), stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=PROBE_TIMEOUT_S, creationflags=frozen.NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise ProbeError(f'GPU probe timed out after {PROBE_TIMEOUT_S:g} s') from None
+    except OSError as error:
+        raise ProbeError(f'GPU probe could not start: {error}') from error
+    if done.returncode:
+        tail = ' | '.join(done.stderr.decode(errors='replace').strip().splitlines()[-3:])
+        raise ProbeError(f'GPU probe process died (exit {done.returncode}){": " + tail if tail else ""}')
+    lines = [line[len(PROBE_PREFIX):] for line in done.stdout.decode(errors='replace').splitlines()
+             if line.startswith(PROBE_PREFIX)]
+    if not lines:
+        raise ProbeError('GPU probe output unreadable (no answer line)')
+    try:
+        data = json.loads(lines[-1])
+        return [Adapter(**{**a, 'luid': tuple(a['luid'])}) for a in data['adapters']], data['reason']
+    except (IndexError, ValueError, KeyError, TypeError) as error:
+        raise ProbeError(f'GPU probe output unreadable ({error})') from error
 
 
 def probe_adapters() -> tuple[list[Adapter], str | None]:
     """list_adapters in a child process, so a driver that crashes or hangs while a device opens is a reason string."""
-    env = dict(os.environ)
-    env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
-                                                   env.get('PYTHONPATH', '')]))
     try:
-        done = subprocess.run(_probe_command(), env=env, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=PROBE_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
-        return [], f'GPU probe timed out after {PROBE_TIMEOUT_S:g} s'
-    except OSError as error:
-        return [], f'GPU probe could not start: {error}'
-    if done.returncode:
-        tail = ' | '.join(done.stderr.decode(errors='replace').strip().splitlines()[-3:])
-        return [], f'GPU probe process died (exit {done.returncode}){": " + tail if tail else ""}'
-    try:
-        # (drivers may print to stdout before the child's own line)
-        data = json.loads(done.stdout.decode(errors='replace').strip().splitlines()[-1])
-        return [Adapter(**{**a, 'luid': tuple(a['luid'])}) for a in data['adapters']], data['reason']
-    except (IndexError, ValueError, KeyError, TypeError) as error:
-        return [], f'GPU probe output unreadable ({error})'
+        return run_probe()
+    except ProbeError as error:
+        return [], str(error)
 
 
 def probe_choice(setting: str) -> DeviceChoice:
@@ -176,6 +187,7 @@ def probe_choice(setting: str) -> DeviceChoice:
     return choose(setting, []) if setting == 'cpu' else choose(setting, *probe_adapters())
 
 
-if __name__ == '__main__':
-    _adapters, _reason = list_adapters()
-    print(json.dumps({'adapters': [asdict(a) for a in _adapters], 'reason': _reason}))
+def probe_main() -> int:
+    adapters, reason = list_adapters()
+    print(PROBE_PREFIX + json.dumps({'adapters': [asdict(a) for a in adapters], 'reason': reason}))
+    return 0

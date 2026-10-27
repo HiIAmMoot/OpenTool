@@ -10,7 +10,6 @@ import logging
 import os
 import struct
 import subprocess
-import sys
 import tempfile
 from pathlib import Path
 from time import perf_counter
@@ -33,64 +32,7 @@ _BORDER = 16
 _REDISTRIBUTABLE_HINT = ('; a missing or old Microsoft Visual C++ redistributable '
                         '(vcruntime140/msvcp140 14.4x) is the usual cause')
 
-_WORKER = """
-import ctypes, os, sys
-if os.name == 'nt':
-    for n in ('vcruntime140', 'vcruntime140_1', 'msvcp140', 'msvcp140_1', 'msvcp140_2'):
-        path = os.path.join(os.environ['SystemRoot'], 'System32', n + '.dll')
-        if os.path.exists(path):
-            ctypes.WinDLL(path)
-import io, struct
-import numpy as np, pyoidn
-def receive():
-    size = struct.unpack('<Q', sys.stdin.buffer.read(8))[0]
-    return np.load(io.BytesIO(sys.stdin.buffer.read(size)))
-def send(value):
-    out = io.BytesIO(); np.save(out, value); data = out.getvalue()
-    sys.stdout.buffer.write(struct.pack('<Q', len(data)) + data); sys.stdout.buffer.flush()
-kind = sys.argv[1]
-try:
-    if kind == 'CPU':
-        device = None
-        filt = src = dst = None
-        buffer_size = 0
-    else:
-        types = {'CUDA': pyoidn.OIDN_DEVICE_TYPE_CUDA, 'HIP': pyoidn.OIDN_DEVICE_TYPE_HIP,
-                 'NOPE': 255}
-        device = pyoidn.Device(types[kind]); device.commit()
-        error = device.get_error()
-        if error: raise RuntimeError(str(error))
-        filt = pyoidn.Filter(device, 'RTLightmap')
-        filt.set_quality(pyoidn.OIDN_QUALITY_HIGH)
-        src = dst = None
-        buffer_size = 0
-    send(np.array([1], dtype=np.uint8))
-except Exception as error:
-    send(np.array([0], dtype=np.uint8))
-    print(error, file=sys.stderr, flush=True)
-    sys.exit(2)
-while True:
-    try: img = receive()
-    except Exception: break
-    if kind == 'CPU':
-        result = pyoidn.denoise(img, filter_type='RTLightmap')
-    else:
-        nbytes = img.nbytes
-        if nbytes != buffer_size:
-            if src is not None: src.release(); dst.release()
-            src = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
-            dst = pyoidn.Buffer(device, nbytes, pyoidn.OIDN_STORAGE_DEVICE)
-            buffer_size = nbytes
-        src.write(0, nbytes, img)
-        filt.set_image(pyoidn.OIDN_IMAGE_COLOR, src, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
-        filt.set_image(pyoidn.OIDN_IMAGE_OUTPUT, dst, pyoidn.OIDN_FORMAT_FLOAT3, img.shape[1], img.shape[0])
-        filt.commit(); filt.execute(); device.wait()
-        result = np.empty_like(img); dst.read(0, nbytes, result)
-    send(result)
-if filt is not None: filt.release()
-if src is not None: src.release(); dst.release()
-if device is not None: device.release()
-"""
+START_TIMEOUT_S = 300.0
 
 
 def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
@@ -152,6 +94,8 @@ class DenoiseWorker:
             worker = cls._open(device, timeout)
         except (RuntimeError, OSError) as error:
             if strict:
+                if isinstance(error, DenoiseTimeoutError):
+                    raise
                 raise RuntimeError(f'OIDN {device} failed: {error}') from error
             worker = cls._open('CPU', timeout)
             worker._warn_fallback(f'OIDN {device} failed ({error}); denoising on the CPU')
@@ -161,10 +105,12 @@ class DenoiseWorker:
 
     @classmethod
     def _open(cls, device, timeout):
+        start_timeout = START_TIMEOUT_S if timeout is None else timeout
         cwd = tempfile.TemporaryDirectory()
         with open(Path(cwd.name) / STDERR_FILE, 'wb') as stderr:
-            process = subprocess.Popen([sys.executable, '-c', _WORKER, device], stdin=subprocess.PIPE,
-                                       stdout=subprocess.PIPE, stderr=stderr, cwd=cwd.name)
+            process = subprocess.Popen(denoise_worker.worker_command(device), stdin=subprocess.PIPE,
+                                       stdout=subprocess.PIPE, stderr=stderr, cwd=cwd.name,
+                                       creationflags=frozen.NO_WINDOW)
         worker = cls(device, timeout, process)
         worker.cwd = cwd
 
@@ -189,7 +135,7 @@ class DenoiseWorker:
             with ThreadPoolExecutor(max_workers=1) as pool:
                 ready = pool.submit(read_ready)
                 try:
-                    ready.result(timeout=timeout)
+                    ready.result(timeout=start_timeout)
                 except FutureTimeout:
                     # Terminate the producer before executor shutdown waits for
                     # the blocked pipe reader to finish.
@@ -197,7 +143,7 @@ class DenoiseWorker:
                     process.wait()
                     cwd.cleanup()
                     raise DenoiseTimeoutError(
-                        f'OIDN {device} startup timed out after {timeout:g} s') from None
+                        f'OIDN {device} startup timed out after {start_timeout:g} s') from None
         except FutureTimeout:
             raise
         except DenoiseTimeoutError:
@@ -221,7 +167,7 @@ class DenoiseWorker:
         if self.process.poll() is None:
             try:
                 self.process.stdin.close()
-                self.process.wait(timeout=min(self.timeout, 1))
+                self.process.wait(timeout=1 if self.timeout is None else min(self.timeout, 1))
             except (subprocess.TimeoutExpired, OSError):
                 self.process.kill()
                 self.process.wait()

@@ -8,7 +8,7 @@ import types
 import numpy as np
 import pytest
 
-from lightmapper import denoise_worker, entry
+from lightmapper import denoise_worker, entry, gpu, vertex_gpu
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -79,3 +79,19 @@ def test_entry_does_not_load_numpy():
     code = 'import sys; import lightmapper.entry; print("numpy" in sys.modules)'
     out = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=REPO).stdout
     assert out.strip() == 'False'
+
+
+def test_frozen_worker_command_carries_the_kind(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    assert denoise_worker.worker_command('CUDA') == [str(tmp_path / 'OpenTool-cli.exe'), '--denoise-worker', 'CUDA']
+
+
+def test_entry_routes_the_worker_kind_probe_and_vertex_flags(monkeypatch):
+    seen = []
+    monkeypatch.setattr(denoise_worker, 'main', lambda kind=None: seen.append(kind) or 4)
+    monkeypatch.setattr(gpu, 'probe_main', lambda: 5, raising=False)
+    monkeypatch.setattr(vertex_gpu, 'child_main', lambda argv: len(argv), raising=False)
+    assert entry.cli_entry(['--denoise-worker', 'CUDA']) == 4 and seen == ['CUDA']
+    assert entry.cli_entry(['--gpu-probe']) == 5
+    assert entry.cli_entry(['--vertex-pass', 'a', 'b']) == 2

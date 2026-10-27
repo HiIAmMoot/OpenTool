@@ -55,3 +55,14 @@ def test_bundle_dir_is_the_repo_in_source_mode():
 def test_cli_executable_sits_beside_the_running_exe(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
     assert frozen.cli_executable() == tmp_path / 'OpenTool-cli.exe'
+
+
+def test_child_command_in_source_mode_runs_lightmap_py(monkeypatch):
+    monkeypatch.delattr(sys, 'frozen', raising=False)
+    assert frozen.child_command('--gpu-probe') == [sys.executable, str(frozen.bundle_dir() / 'lightmap.py'), '--gpu-probe']
+
+
+def test_child_command_when_frozen_is_the_console_exe(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    assert frozen.child_command('--vertex-pass', 'w', '{}') == [str(tmp_path / 'OpenTool-cli.exe'), '--vertex-pass', 'w', '{}']

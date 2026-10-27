@@ -2,6 +2,7 @@
 
 import io
 import struct
+import sys
 import subprocess
 import tempfile
 import time
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from lightmapper import pages
+from lightmapper import denoise_worker, frozen, pages
 from lightmapper.formats.vertices import encode_r5g6b5
 from lightmapper.pages import expose, finish_float, quantise, tone
 from lightmapper.raster import coverage, dilate
@@ -25,6 +26,56 @@ def full_page(n=48):
 
 def noisy_page(seed=1, size=32):
     return np.random.default_rng(seed).random((size, size, 3), dtype=np.float32)
+
+
+def fake_worker(monkeypatch, code):
+    monkeypatch.setattr(pages.denoise_worker, 'worker_command',
+                        lambda kind=None: [sys.executable, '-c', code, *([kind] if kind else [])])
+
+
+def test_worker_starts_without_a_window(monkeypatch):
+    seen = {}
+    real = pages.subprocess.Popen
+
+    def spy(args, **kwargs):
+        seen.update(kwargs, args=args)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(pages.subprocess, 'Popen', spy)
+    with pages.DenoiseWorker.start('CPU', 60, strict=True):
+        pass
+    assert seen['creationflags'] == frozen.NO_WINDOW and seen['args'] == denoise_worker.worker_command('CPU')
+
+
+def test_worker_without_a_timeout_denoises_and_closes():
+    page = np.full((40, 40, 3), .5, np.float32)
+    worker = pages.DenoiseWorker.start('CPU', None, strict=True)
+    try:
+        with worker:
+            assert worker.denoise(page).shape == page.shape
+            assert worker.process.poll() is None
+        assert worker.process.poll() is not None
+    finally:
+        if worker.process.poll() is None:
+            worker.process.kill()
+            worker.process.wait()
+        if worker.cwd is not None:
+            worker.cwd.cleanup()
+
+
+def test_worker_start_without_a_timeout_is_still_bounded(monkeypatch):
+    monkeypatch.setattr(pages, 'START_TIMEOUT_S', 0.5, raising=False)
+    monkeypatch.setattr(pages.denoise_worker, 'worker_command', lambda kind=None: [sys.executable, '-c', 'import time; time.sleep(60)'])
+    worker = None
+    try:
+        with pytest.raises(pages.DenoiseTimeoutError, match='startup timed out after 0.5 s'):
+            worker = pages.DenoiseWorker.start('CUDA', None, strict=True)
+    finally:
+        if worker is not None:
+            if worker.process.poll() is None:
+                worker.process.kill()
+                worker.process.wait()
+            worker.cwd.cleanup()
 
 
 def test_one_worker_serves_every_page(monkeypatch):
@@ -51,7 +102,7 @@ def test_worker_cpu_result_equals_the_one_off_denoise():
 
 
 def test_a_worker_writing_far_more_than_a_pipe_buffer_to_stderr_still_finishes_its_page(monkeypatch):
-    monkeypatch.setattr(pages, '_WORKER', """
+    fake_worker(monkeypatch, """
 import io, struct, sys
 import numpy as np
 sys.stderr.write('x' * 1_000_000 + '\\n'); sys.stderr.flush()
@@ -71,7 +122,7 @@ while True:
 
 
 def test_a_failing_worker_start_reports_the_stderr_tail_once(monkeypatch):
-    monkeypatch.setattr(pages, '_WORKER', """
+    fake_worker(monkeypatch, """
 import io, struct, sys
 import numpy as np
 out = io.BytesIO(); np.save(out, np.array([0], dtype=np.uint8)); data = out.getvalue()
@@ -129,7 +180,7 @@ def test_worker_startup_timeout_kills_and_reaps_child(monkeypatch):
         processes.append(process)
         return process
 
-    monkeypatch.setattr(pages, '_WORKER', 'import time; time.sleep(60)')
+    fake_worker(monkeypatch, 'import time; time.sleep(60)')
     monkeypatch.setattr(pages.subprocess, 'Popen', capture)
     started = time.monotonic()
     with pytest.raises(RuntimeError, match='startup timed out after 0.1 s'):

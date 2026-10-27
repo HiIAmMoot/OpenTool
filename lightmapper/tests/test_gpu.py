@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from lightmapper import gpu
+from lightmapper import frozen, gpu
 from lightmapper.gpu import AMD, NVIDIA, Adapter, DeviceError, choose, probe_choice
 from lightmapper.settings import Settings
 
@@ -125,7 +125,7 @@ def test_a_failing_probe_child_fails_a_named_vendor(monkeypatch, kind):
 
 def test_the_probe_child_hands_back_the_adapters(monkeypatch):
     payload = json.dumps({'adapters': [dataclasses.asdict(NV)], 'reason': 'one refused'})
-    _stand_in(monkeypatch, f'print("driver noise"); print({payload!r})')
+    _stand_in(monkeypatch, f'print("driver noise"); print({("lightmapper-gpu-probe: " + payload)!r})')
     adapters, reason = gpu.probe_adapters()
     assert adapters == [NV] and reason == 'one refused'
 
@@ -206,3 +206,37 @@ def test_probe_finds_the_nvidia_gpu():
 @pytest.mark.gpu_amd
 def test_probe_finds_the_amd_gpu():
     assert any(a.vendor_id == AMD and a.ray_query for a in gpu.list_adapters()[0])
+
+
+def test_probe_reads_its_tagged_line_when_a_driver_prints_after_it(monkeypatch):
+    line = 'lightmapper-gpu-probe: ' + json.dumps({'adapters': [{'name': 'X', 'vendor_id': 0x10DE, 'luid': [1, 2], 'backend': 'vulkan', 'ray_query': True}], 'reason': None})
+    code = f'print("driver hello"); print({line!r}); print("driver bye")'
+    monkeypatch.setattr(gpu, '_probe_command', lambda: [sys.executable, '-c', code])
+    assert gpu.run_probe() == ([gpu.Adapter('X', 0x10DE, (1, 2), 'vulkan', True)], None)
+
+
+def test_probe_ignores_stray_modules_in_the_working_folder(monkeypatch, tmp_path):
+    (tmp_path / 'json.py').write_text('raise SystemExit(9)')
+    (tmp_path / 'numpy.py').write_text('raise SystemExit(9)')
+    monkeypatch.chdir(tmp_path)
+    gpu.run_probe()
+
+
+def test_a_dead_probe_child_is_a_probe_error_and_a_reason(monkeypatch):
+    monkeypatch.setattr(gpu, '_probe_command', lambda: [sys.executable, '-c', 'raise SystemExit(3)'])
+    with pytest.raises(gpu.ProbeError, match=r'exit 3'):
+        gpu.run_probe()
+    assert gpu.probe_adapters()[0] == [] and 'exit 3' in gpu.probe_adapters()[1]
+
+
+def test_probe_starts_without_a_window(monkeypatch):
+    seen = {}
+    real = gpu.subprocess.run
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(gpu.subprocess, 'run', spy)
+    gpu.probe_adapters()
+    assert seen['creationflags'] == frozen.NO_WINDOW

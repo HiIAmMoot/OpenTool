@@ -8,15 +8,14 @@ The constants are copies (bake.py cannot be imported outside Blender); a test pa
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
-import os
 from pathlib import Path
 import subprocess
-import sys
 import zipfile
 
 import numpy as np
 
 from .sun_facing import sun_facing_queries
+from . import frozen
 
 
 RAY_LENGTH, RAY_EPSILON, PASS_LIMIT = 1e5, 1e-3, 8
@@ -394,7 +393,7 @@ def load_and_run(work, pages, adapter):
 
 
 def _child_command(work: Path, adapter) -> list[str]:
-    return [sys.executable, '-m', 'lightmapper.vertex_gpu', str(work), json.dumps(asdict(adapter))]
+    return frozen.child_command(frozen.VERTEX_FLAG, str(work), json.dumps(asdict(adapter)))
 
 
 def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -> VertexPassResult:
@@ -403,12 +402,9 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
     out = work / 'gpu_out.npz'
     # a crashed child must not leave an earlier run looking successful
     out.unlink(missing_ok=True)
-    env = dict(os.environ)
-    env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(Path(__file__).resolve().parent.parent),
-                                                   env.get('PYTHONPATH', '')]))
     try:
-        done = subprocess.run(_child_command(work, adapter), cwd=work, env=env, stdin=subprocess.DEVNULL,
-                              capture_output=True, timeout=timeout)
+        done = subprocess.run(_child_command(work, adapter), cwd=work, stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout, creationflags=frozen.NO_WINDOW)
     except subprocess.TimeoutExpired:
         raise GpuPassError(f'gather: timed out after {timeout} s') from None
     except OSError as error:
@@ -435,17 +431,14 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
         raise GpuPassError(f'{died}\n{error}') from error
 
 
-def _main():
+def child_main(argv: list[str]) -> int:
     from .gpu import Adapter
-    work = Path(sys.argv[1])
-    fields = json.loads(sys.argv[2])
+    work = Path(argv[0])
+    fields = json.loads(argv[1])
     fields['luid'] = tuple(fields['luid'])
     with np.load(work / 'diffuse.npz') as data:
         pages = [data[f'diffuse_{i}'] for i in range(len(data.files))]
     result = load_and_run(work, pages, Adapter(**fields))
     np.savez(work / 'gpu_out.npz', vector=result.vector, irradiance=result.irradiance,
              sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays))
-
-
-if __name__ == '__main__':
-    _main()
+    return 0

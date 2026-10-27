@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import pytest
 
-from lightmapper import gpu, vertex_gpu
+from lightmapper import frozen, gpu, vertex_gpu
 from lightmapper.blender_job import write_job
 from lightmapper.sun_facing import sun_facing_queries
 from lightmapper.vertex_gpu import (GOLDEN_FRACTION, GROUP_SIZE, SEED_SPIN, GpuPassError, edge_rays, gather_sums,
@@ -541,3 +541,30 @@ def test_consistently_short_gpu_arrays_are_refused(tmp_path, monkeypatch):
     monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code])
     with pytest.raises(GpuPassError, match='process died'):
         vertex_gpu.run_in_child(tmp_path, [], NV, 60)
+
+
+def test_gpu_child_starts_without_a_window(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    work = tmp_path.resolve()
+    seen = {}
+    real = vertex_gpu.subprocess.run
+
+    def spy(args, **kwargs):
+        seen.update(kwargs, args=args)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(vertex_gpu.subprocess, 'run', spy)
+    with pytest.raises(GpuPassError):
+        vertex_gpu.run_in_child(work, [], NV, 60)
+    assert seen['creationflags'] == frozen.NO_WINDOW and seen['args'][-2:] == [str(work), json.dumps(dataclasses.asdict(NV))]
+    assert seen['cwd'] == work and 'env' not in seen
+
+
+@pytest.mark.gpu_nvidia
+def test_gpu_child_runs_in_a_folder_with_spaces_and_accents(tmp_path):
+    work = tmp_path / 'a b é'
+    pages = write_bare_scene(work)
+    with np.load(work / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    result = vertex_gpu.run_in_child(work, pages, adapter_for('nvidia'), 120)
+    assert result.vector.shape == (len(scene['query_pos']), 3)
