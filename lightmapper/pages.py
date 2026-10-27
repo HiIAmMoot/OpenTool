@@ -110,7 +110,7 @@ def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
     try:
         result = np.load(io.BytesIO(done.stdout))
     except ValueError as error:
-        raise RuntimeError(f'OIDN denoise returned unreadable data: {error}{redistributable}') from None
+        raise RuntimeError(f'OIDN denoise returned unreadable data: {error}{_REDISTRIBUTABLE_HINT}') from None
     if result.shape != padded.shape or not np.isfinite(result).all():
         raise RuntimeError(f'OIDN denoise returned a bad result (shape {result.shape}, '
                            f'expected {padded.shape}, finite: {bool(np.isfinite(result).all())})')
@@ -162,12 +162,21 @@ class DenoiseWorker:
 
         try:
             with ThreadPoolExecutor(max_workers=1) as pool:
-                pool.submit(read_ready).result(timeout=timeout)
+                ready = pool.submit(read_ready)
+                try:
+                    ready.result(timeout=timeout)
+                except FutureTimeout:
+                    # Terminate the producer before executor shutdown waits for
+                    # the blocked pipe reader to finish.
+                    process.kill()
+                    process.wait()
+                    cwd.cleanup()
+                    raise DenoiseTimeoutError(
+                        f'OIDN {device} startup timed out after {timeout:g} s') from None
         except FutureTimeout:
-            process.kill()
-            process.wait()
-            cwd.cleanup()
-            raise DenoiseTimeoutError(f'OIDN {device} startup timed out after {timeout:g} s') from None
+            raise
+        except DenoiseTimeoutError:
+            raise
         except Exception as error:
             if process.poll() is None:
                 process.kill()

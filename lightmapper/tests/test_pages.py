@@ -60,25 +60,32 @@ def test_gpu_failure_falls_back_with_a_warning_unless_strict(caplog):
 
 
 def test_worker_startup_timeout_kills_and_reaps_child(monkeypatch):
+    import threading
+    import time
+
     processes = []
+    timeout = 0.1
+
+    class Input:
+        def close(self): pass
+        def write(self, data): pass
+        def flush(self): pass
 
     def capture(*args, **kwargs):
-        class Process:
-            class Output:
-                def read(self, size=-1):
-                    import time
-                    time.sleep(0.3)
-                    return b''
-            class Input:
-                def close(self): pass
-                def write(self, data): pass
-                def flush(self): pass
-            stdout, stderr, stdin = Output(), Output(), Input()
-            killed = False
+        class Output:
+            def __init__(self, killed): self.killed = killed
+            def read(self, size=-1):
+                self.killed.wait(0.8)
+                return b''
 
-            def kill(self): self.killed = True
+        class Process:
+            def __init__(self):
+                self.killed = threading.Event()
+                self.stdout, self.stderr, self.stdin = Output(self.killed), Output(self.killed), Input()
+
+            def kill(self): self.killed.set()
             def wait(self, timeout=None): return 1
-            def poll(self): return 1 if self.killed else None
+            def poll(self): return 1 if self.killed.is_set() else None
 
         process = Process()
         processes.append(process)
@@ -86,8 +93,11 @@ def test_worker_startup_timeout_kills_and_reaps_child(monkeypatch):
 
     monkeypatch.setattr(pages, '_WORKER', 'import time; time.sleep(60)')
     monkeypatch.setattr(pages.subprocess, 'Popen', capture)
+    started = time.monotonic()
     with pytest.raises(RuntimeError, match='startup timed out after 0.1 s'):
-        pages.DenoiseWorker.start('CUDA', 0.1, strict=True)
+        pages.DenoiseWorker.start('CUDA', timeout, strict=True)
+    elapsed = time.monotonic() - started
+    assert elapsed < timeout + 0.3, f'startup took {elapsed:.3f}s for a {timeout:.3f}s timeout'
     assert processes[0].poll() is not None
 
 
@@ -345,6 +355,12 @@ def npy(array):
 def test_denoise_rejects_wrong_shape(monkeypatch):
     fake_run(monkeypatch, stdout=lambda kw: npy(np.ones((4, 4, 3), np.float32)))
     with pytest.raises(RuntimeError, match='bad result'):
+        pages._denoise(np.ones((4, 4, 3), np.float32), 5)
+
+
+def test_denoise_unreadable_output_keeps_redistributable_hint(monkeypatch):
+    fake_run(monkeypatch, stdout=lambda kw: b'unreadable output')
+    with pytest.raises(RuntimeError, match=r'unreadable data.*Visual C\+\+ redistributable'):
         pages._denoise(np.ones((4, 4, 3), np.float32), 5)
 
 
