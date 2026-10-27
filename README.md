@@ -15,7 +15,7 @@ The rest of the editing kit's work (bitmaps, models, sounds, scripts, building m
 
 ### Lightmapper examples
 
-Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool's below, baked at a higher resolution than the default (lightmap pages of 1024 pixels).
+Each column is one view in game in HCEEK: tool's own lightmaps on top, OpenTool's below, baked at a higher resolution than the default (lightmap pages of 1024 pixels).
 
 ![Blood Gulch: tool's lightmaps above, OpenTool's below](docs/images/bloodgulch.webp)
 
@@ -29,7 +29,6 @@ Each column is one view in game in OpenCE: tool's own lightmaps on top, OpenTool
 - Done: App and CLI for lightmapper.
 - Next: better lightmaps in the stock format, with higher resolution, better bounced light, better shadows and faster bakes.
 - Next: the structure BSP builder, a replacement for `tool structure` with clearer portal errors and room for larger levels.
-- Later, OpenCE only: instanced geometry and per-texel directional lightmaps, behind a switch that keeps stock output the default.
 
 ## Download the app
 
