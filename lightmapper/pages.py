@@ -28,6 +28,8 @@ log = logging.getLogger(__name__)
 # the network misreads a page's border: a constant page comes back up to 13% off
 # in its outer texels, and 0.1% off once edge texels are repeated around it
 _BORDER = 16
+_REDISTRIBUTABLE_HINT = ('; a missing or old Microsoft Visual C++ redistributable '
+                        '(vcruntime140/msvcp140 14.4x) is the usual cause')
 
 _WORKER = """
 import ctypes, os, sys
@@ -51,7 +53,8 @@ try:
         filt = src = dst = None
         buffer_size = 0
     else:
-        types = {'CUDA': pyoidn.OIDN_DEVICE_TYPE_CUDA, 'HIP': pyoidn.OIDN_DEVICE_TYPE_HIP}
+        types = {'CUDA': pyoidn.OIDN_DEVICE_TYPE_CUDA, 'HIP': pyoidn.OIDN_DEVICE_TYPE_HIP,
+                 'NOPE': 255}
         device = pyoidn.Device(types[kind]); device.commit()
         error = device.get_error()
         if error: raise RuntimeError(str(error))
@@ -94,8 +97,6 @@ def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
     data = io.BytesIO()
     padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
     np.save(data, padded)
-    redistributable = ('; a missing or old Microsoft Visual C++ redistributable '
-                       '(vcruntime140/msvcp140 14.4x) is the usual cause')
     try:
         with tempfile.TemporaryDirectory() as cwd:
             done = subprocess.run(denoise_worker.worker_command(), input=data.getvalue(),
@@ -105,7 +106,7 @@ def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
         raise RuntimeError(f'OIDN denoise timed out after {timeout:g} s') from None
     if done.returncode:
         raise RuntimeError(f'OIDN denoise failed ({done.returncode}): '
-                           f'{done.stderr.decode(errors="replace")[-400:]}{redistributable}')
+                           f'{done.stderr.decode(errors="replace")[-400:]}{_REDISTRIBUTABLE_HINT}')
     try:
         result = np.load(io.BytesIO(done.stdout))
     except ValueError as error:
@@ -114,6 +115,10 @@ def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
         raise RuntimeError(f'OIDN denoise returned a bad result (shape {result.shape}, '
                            f'expected {padded.shape}, finite: {bool(np.isfinite(result).all())})')
     return result[_BORDER:-_BORDER, _BORDER:-_BORDER]
+
+
+class DenoiseTimeoutError(RuntimeError):
+    pass
 
 
 class DenoiseWorker:
@@ -127,11 +132,11 @@ class DenoiseWorker:
     def start(cls, device, timeout, strict):
         try:
             worker = cls._open(device, timeout)
-        except RuntimeError as error:
+        except (RuntimeError, OSError) as error:
             if strict:
                 raise RuntimeError(f'OIDN {device} failed: {error}') from error
             worker = cls._open('CPU', timeout)
-            worker.warnings.append(f'OIDN {device} failed ({error}); denoising on the CPU')
+            worker._warn_fallback(f'OIDN {device} failed ({error}); denoising on the CPU')
         worker.strict = strict
         return worker
 
@@ -142,58 +147,107 @@ class DenoiseWorker:
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd.name)
         worker = cls(device, timeout, process)
         worker.cwd = cwd
-        try:
+
+        def read_ready():
             head = process.stdout.read(8)
             if len(head) != 8:
-                raise RuntimeError(process.stderr.read().decode(errors='replace')[-400:])
+                raise RuntimeError(f'worker exited with code {process.poll()}')
             size = struct.unpack('<Q', head)[0]
-            ready = np.load(io.BytesIO(process.stdout.read(size)))
+            payload = process.stdout.read(size)
+            if len(payload) != size:
+                raise RuntimeError(f'worker returned a truncated ready frame ({len(payload)} of {size} bytes)')
+            ready = np.load(io.BytesIO(payload))
             if not ready[0]:
                 raise RuntimeError(process.stderr.read().decode(errors='replace')[-400:])
-        except Exception:
-            process.kill(); process.wait(); cwd.cleanup()
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(read_ready).result(timeout=timeout)
+        except FutureTimeout:
+            process.kill()
+            process.wait()
+            cwd.cleanup()
+            raise DenoiseTimeoutError(f'OIDN {device} startup timed out after {timeout:g} s') from None
+        except Exception as error:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            stderr = process.stderr.read().decode(errors='replace')[-400:]
+            cwd.cleanup()
+            if stderr:
+                raise RuntimeError(f'{error}: {stderr}') from error
             raise
         return worker
+
+    def _warn_fallback(self, warning):
+        self.warnings.append(warning)
+        log.warning('%s', warning)
+
+    def _stop(self):
+        if self.process.poll() is None:
+            try:
+                self.process.stdin.close()
+                self.process.wait(timeout=min(self.timeout, 1))
+            except (subprocess.TimeoutExpired, OSError):
+                self.process.kill()
+                self.process.wait()
+        stderr = getattr(self.process, 'stderr', None)
+        tail = stderr.read().decode(errors='replace')[-400:] if stderr is not None else ''
+        if self.cwd is not None:
+            self.cwd.cleanup()
+            self.cwd = None
+        return tail
+
+    def _page_failure(self, page, error, process_failure):
+        device = self.device
+        if isinstance(error, DenoiseTimeoutError):
+            self._stop()
+            raise error
+        stderr = self._stop()
+        if device != 'CPU' and not self.strict:
+            replacement = self._open('CPU', self.timeout)
+            self.process, self.cwd, self.device = replacement.process, replacement.cwd, 'CPU'
+            self._warn_fallback(f'OIDN {device} failed ({error}); denoising on the CPU')
+            return self.denoise(page)
+        detail = f'OIDN {device} denoise failed: {error}'
+        if stderr:
+            detail += f'; {stderr}'
+        if process_failure:
+            detail += _REDISTRIBUTABLE_HINT
+        raise RuntimeError(detail) from error
+
+    def _exchange(self, payload):
+        self.process.stdin.write(struct.pack('<Q', len(payload)) + payload)
+        self.process.stdin.flush()
+        head = self.process.stdout.read(8)
+        if len(head) != 8:
+            raise RuntimeError('worker exited')
+        size = struct.unpack('<Q', head)[0]
+        result = self.process.stdout.read(size)
+        if len(result) != size:
+            raise RuntimeError(f'worker returned a truncated page ({len(result)} of {size} bytes)')
+        return np.load(io.BytesIO(result))
 
     def denoise(self, page):
         padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
         data = io.BytesIO(); np.save(data, padded); payload = data.getvalue()
-        def exchange():
-            self.process.stdin.write(struct.pack('<Q', len(payload)) + payload); self.process.stdin.flush()
-            head = self.process.stdout.read(8)
-            if len(head) != 8: raise RuntimeError('worker exited')
-            size = struct.unpack('<Q', head)[0]
-            return np.load(io.BytesIO(self.process.stdout.read(size)))
         with ThreadPoolExecutor(max_workers=1) as pool:
-            future = pool.submit(exchange)
+            future = pool.submit(self._exchange, payload)
             try:
                 result = future.result(timeout=self.timeout)
             except FutureTimeout:
                 self.process.kill()
                 self.process.wait()
-                raise RuntimeError(f'OIDN denoise timed out after {self.timeout:g} s') from None
+                raise DenoiseTimeoutError(f'OIDN denoise timed out after {self.timeout:g} s') from None
             except Exception as error:
-                if self.device == 'CPU' or self.strict:
-                    raise RuntimeError(f'OIDN denoise failed: {error}') from error
-                old_device = self.device
-                self.close()
-                replacement = self._open('CPU', self.timeout)
-                self.process, self.cwd, self.device = replacement.process, replacement.cwd, 'CPU'
-                self.warnings.append(f'OIDN {old_device} failed ({error}); denoising on the CPU')
-                return self.denoise(page)
+                return self._page_failure(page, error, process_failure=True)
         if result.shape != padded.shape or not np.isfinite(result).all():
-            raise RuntimeError(f'OIDN denoise returned a bad result (shape {result.shape}, expected {padded.shape}, finite: {bool(np.isfinite(result).all())})')
+            error = RuntimeError(f'OIDN denoise returned a bad result (shape {result.shape}, expected {padded.shape}, finite: {bool(np.isfinite(result).all())})')
+            return self._page_failure(page, error, process_failure=False)
         return result[_BORDER:-_BORDER, _BORDER:-_BORDER]
 
     def close(self):
-        if self.process.poll() is None:
-            self.process.stdin.close()
-            try:
-                self.process.wait(timeout=self.timeout)
-            except subprocess.TimeoutExpired:
-                self.process.kill(); self.process.wait()
-        if self.cwd is not None:
-            self.cwd.cleanup(); self.cwd = None
+        self._stop()
 
     def __enter__(self): return self
     def __exit__(self, *args): self.close()

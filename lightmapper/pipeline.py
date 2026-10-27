@@ -310,11 +310,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         utilisation.append(float(mask.mean()))
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,
                                          strict=choice.required and choice.oidn != 'HIP') if s.denoise else None
-    if denoise_worker is None:
-        denoise_device = 'CPU' if not s.denoise else choice.oidn
-    else:
-        denoise_device = denoise_worker.device
-        warnings.extend(denoise_worker.warnings)
+    denoise_device = 'CPU' if denoise_worker is None else denoise_worker.device
     try:
         float_pages = finish_pages(pages, raw_pages, masks, class_maps, ambient, s, written=result.written,
                                    joined_groups={i for i, r in enumerate(radiosity) if r.flags & SIMPLE_PARAMETERIZATION},
@@ -322,6 +318,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     finally:
         if denoise_worker is not None:
             denoise_worker.close()
+            denoise_device = denoise_worker.device
+            warnings.extend(denoise_worker.warnings)
     pixels = [quantise(finished, s) for finished in float_pages]
     for finished, mask in zip(float_pages, masks):
         clipped.append(float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.)

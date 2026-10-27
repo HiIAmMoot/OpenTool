@@ -1,6 +1,7 @@
 """Pin the float finishing order: denoise before ambient, one quantise at the end."""
 
 import io
+import struct
 import subprocess
 from types import SimpleNamespace
 
@@ -46,14 +47,167 @@ def test_worker_cpu_result_equals_the_one_off_denoise():
         assert np.array_equal(worker.denoise(page), pages._denoise(page, 60))
 
 
-def test_gpu_failure_falls_back_with_a_warning_unless_strict():
+def test_gpu_failure_falls_back_with_a_warning_unless_strict(caplog):
     worker = pages.DenoiseWorker.start('NOPE', 60, strict=False)
     try:
         assert worker.device == 'CPU' and 'denoising on the CPU' in worker.warnings[0]
+        assert 'invalid device type' in worker.warnings[0]
+        assert worker.warnings[0] in caplog.text
     finally:
         worker.close()
     with pytest.raises(RuntimeError, match='NOPE'):
         pages.DenoiseWorker.start('NOPE', 60, strict=True)
+
+
+def test_worker_startup_timeout_kills_and_reaps_child(monkeypatch):
+    processes = []
+
+    def capture(*args, **kwargs):
+        class Process:
+            class Output:
+                def read(self, size=-1):
+                    import time
+                    time.sleep(0.3)
+                    return b''
+            class Input:
+                def close(self): pass
+                def write(self, data): pass
+                def flush(self): pass
+            stdout, stderr, stdin = Output(), Output(), Input()
+            killed = False
+
+            def kill(self): self.killed = True
+            def wait(self, timeout=None): return 1
+            def poll(self): return 1 if self.killed else None
+
+        process = Process()
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(pages, '_WORKER', 'import time; time.sleep(60)')
+    monkeypatch.setattr(pages.subprocess, 'Popen', capture)
+    with pytest.raises(RuntimeError, match='startup timed out after 0.1 s'):
+        pages.DenoiseWorker.start('CUDA', 0.1, strict=True)
+    assert processes[0].poll() is not None
+
+
+@pytest.mark.parametrize('bad_output', ['nan', 'shape'])
+def test_non_strict_gpu_bad_result_restarts_on_cpu_and_redoes_page(monkeypatch, caplog, bad_output):
+    class Process:
+        class Output:
+            def __init__(self, data): self.data = data
+            def read(self, size=-1):
+                result, self.data = self.data[:size], self.data[size:]
+                return result
+        class Input:
+            def close(self): pass
+            def write(self, data): pass
+            def flush(self): pass
+
+        def __init__(self, device):
+            array = np.full((2 + 2 * pages._BORDER, 2 + 2 * pages._BORDER, 3),
+                            np.nan if device == 'CUDA' else 1, np.float32)
+            payload = npy(array)
+            self.stdout = self.Output(struct.pack('<Q', len(payload)) + payload)
+            self.stdin = self.Input()
+            self.returncode = None
+
+        def poll(self): return self.returncode
+        def wait(self, timeout=None):
+            self.returncode = 0
+            return 0
+
+    opened = []
+
+    def open_worker(cls, device, timeout):
+        worker = cls(device, timeout, Process(device))
+        opened.append(worker)
+        worker.cwd = None
+        return worker
+
+    monkeypatch.setattr(pages.DenoiseWorker, '_open', classmethod(open_worker))
+    def exchange(self, payload):
+        if self.device == 'CPU':
+            return np.load(io.BytesIO(payload))
+        shape = (2 + 2 * pages._BORDER, 2 + 2 * pages._BORDER, 3)
+        return np.full(shape if bad_output == 'nan' else shape[1:],
+                       np.nan if bad_output == 'nan' else 1, np.float32)
+
+    monkeypatch.setattr(pages.DenoiseWorker, '_exchange', exchange, raising=False)
+    worker = pages.DenoiseWorker.start('CUDA', 10, strict=False)
+    try:
+        result = worker.denoise(np.ones((2, 2, 3), np.float32))
+        assert worker.device == 'CPU'
+        assert result.shape == (2, 2, 3) and np.isfinite(result).all()
+        assert len(opened) == 2
+        assert 'denoising on the CPU' in worker.warnings[0]
+        assert worker.warnings[0] in caplog.text
+    finally:
+        worker.close()
+
+
+def test_non_strict_gpu_timeout_does_not_fall_back(monkeypatch):
+    class Process:
+        class Input:
+            def close(self): pass
+            def write(self, data): pass
+            def flush(self): pass
+        class Output:
+            def read(self, size=-1): return b''
+        stdin = Input()
+        stdout = Output()
+        killed = False
+
+        def poll(self): return 1 if self.killed else None
+        def wait(self, timeout=None): self.killed = True; return 1
+        def kill(self): self.killed = True
+
+    opened = []
+
+    def open_worker(cls, device, timeout):
+        opened.append(device)
+        return cls(device, timeout, Process())
+
+    def timeout(self, payload):
+        import time
+        time.sleep(0.2)
+        return np.load(io.BytesIO(payload))
+
+    monkeypatch.setattr(pages.DenoiseWorker, '_open', classmethod(open_worker))
+    monkeypatch.setattr(pages.DenoiseWorker, '_exchange', timeout, raising=False)
+    worker = pages.DenoiseWorker.start('CUDA', 0.05, strict=False)
+    with pytest.raises(RuntimeError, match='timed out after 0.05 s'):
+        worker.denoise(np.ones((2, 2, 3), np.float32))
+    assert worker.device == 'CUDA' and opened == ['CUDA']
+
+
+def test_strict_page_failure_names_device_and_child_error(monkeypatch):
+    class Process:
+        class Output:
+            def read(self, size=-1): return b''
+        class Input:
+            def close(self): pass
+            def write(self, data): pass
+            def flush(self): pass
+        class Error:
+            def read(self): return b'filter exploded'
+        stdin, stdout, stderr = Input(), Output(), Error()
+
+        def poll(self): return 1
+        def wait(self, timeout=None): return 1
+
+    def open_worker(cls, device, timeout):
+        return cls(device, timeout, Process())
+
+    def fail(self, payload):
+        raise RuntimeError('worker exited')
+
+    monkeypatch.setattr(pages.DenoiseWorker, '_open', classmethod(open_worker))
+    monkeypatch.setattr(pages.DenoiseWorker, '_exchange', fail, raising=False)
+    worker = pages.DenoiseWorker.start('CUDA', 10, strict=True)
+    with pytest.raises(RuntimeError, match=r'OIDN CUDA.*filter exploded.*Visual C\+\+ redistributable'):
+        worker.denoise(np.ones((2, 2, 3), np.float32))
+    worker.close()
 
 
 @pytest.mark.gpu_nvidia

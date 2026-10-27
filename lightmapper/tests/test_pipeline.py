@@ -113,6 +113,73 @@ def test_pipeline_outputs(tiny):
     assert summary['devices']['denoise'] == 'CPU'
 
 
+def test_denoise_startup_fallback_is_logged_and_summarized(tiny, monkeypatch, caplog):
+    from lightmapper.pages import DenoiseWorker
+
+    tags, settings, work = tiny
+    real_start = DenoiseWorker.start.__func__
+    monkeypatch.setattr(DenoiseWorker, 'start', classmethod(
+        lambda cls, device, timeout, strict: real_start(cls, 'NOPE', timeout, strict=False)))
+    out = api().bake(tags, 'level', 'room', replace(settings, denoise=True), work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['devices']['denoise'] == 'CPU'
+    assert any('OIDN NOPE failed' in warning for warning in summary['warnings'])
+    assert 'OIDN NOPE failed' in caplog.text
+    assert out.work == work
+
+
+def test_denoise_mid_page_fallback_is_logged_and_summarized(tiny, monkeypatch, caplog):
+    tags, settings, work = tiny
+    module = api()
+    warning = 'OIDN CUDA failed (mid-page filter error); denoising on the CPU'
+
+    class Worker:
+        device = 'CUDA'
+        warnings = []
+
+        def denoise(self, page):
+            self.device = 'CPU'
+            self.warnings.append(warning)
+            module.logger.warning('%s', warning)
+            return page
+
+        def close(self): pass
+
+    worker = Worker()
+    monkeypatch.setattr(module.DenoiseWorker, 'start', classmethod(
+        lambda cls, device, timeout, strict: worker))
+    blender = module.run_blender
+
+    def lit(work, s):
+        result = blender(work, s)
+        result.pages = [np.full_like(page, 0.5) for page in result.pages]
+        return result
+
+    monkeypatch.setattr(module, 'run_blender', lit)
+    module.bake(tags, 'level', 'room', replace(settings, denoise=True), work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['devices']['denoise'] == 'CPU'
+    assert warning in summary['warnings']
+    assert warning in caplog.text
+
+
+def test_required_amd_starts_hyp_worker_non_strict(tiny, monkeypatch):
+    tags, settings, work = tiny
+    choice = gpu.choose('amd', None)
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: choice)
+    seen = []
+
+    class Worker:
+        device = 'CPU'
+        warnings = []
+        def close(self): pass
+
+    monkeypatch.setattr(api().DenoiseWorker, 'start', classmethod(
+        lambda cls, device, timeout, strict: seen.append((device, strict)) or Worker()))
+    api().bake(tags, 'level', 'room', replace(settings, denoise=True, device='amd'), work=work, dry_run=True)
+    assert seen == [('HIP', False)]
+
+
 @pytest.fixture
 def gpu_bake(tiny, fake, monkeypatch):
     tags, settings, work = tiny
