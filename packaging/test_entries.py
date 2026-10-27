@@ -1,4 +1,6 @@
 import ctypes
+import os
+import tempfile
 from pathlib import Path
 import runpy
 import sys
@@ -24,10 +26,21 @@ class EntryTests(unittest.TestCase):
                     self.assertEqual(calls, [None], 'app imported before inherited DLL directory was cleared')
                     return lambda: 0
                 fake_module.__getattr__ = get_entry
-                with patch.object(sys, 'frozen', True, create=True), \
-                     patch.object(ctypes, 'windll', windll, create=True), \
-                     patch.dict(sys.modules, {module: fake_module}):
-                    runpy.run_path(str(Path(__file__).with_name(script)), run_name='entry_test')
+                added = []
+                loaded = []
+                with tempfile.TemporaryDirectory() as bundle:
+                    (Path(bundle) / 'vcruntime140.dll').write_bytes(b'')
+                    with patch.object(sys, 'frozen', True, create=True), \
+                         patch.object(sys, '_MEIPASS', bundle, create=True), \
+                         patch.object(os, 'add_dll_directory',
+                                      lambda path: added.append((path, list(calls)))), \
+                         patch.object(ctypes, 'WinDLL', loaded.append, create=True), \
+                         patch.object(ctypes, 'windll', windll, create=True), \
+                         patch.dict(sys.modules, {module: fake_module}):
+                        runpy.run_path(str(Path(__file__).with_name(script)), run_name='entry_test')
+                    # the bundle stays this process's DLL directory, added after the reset
+                    self.assertEqual(added, [(bundle, [None])])
+                    self.assertEqual(loaded, [str(Path(bundle) / 'vcruntime140.dll')])
                 self.assertEqual(calls, [None])
 
 

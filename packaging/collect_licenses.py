@@ -9,7 +9,7 @@ import sys
 
 DISTRIBUTIONS = (
     'numpy', 'scipy', 'numba', 'llvmlite', 'pyoidn', 'cffi', 'pycparser',
-    'pillow', 'pyinstaller', 'setuptools', 'packaging',
+    'pillow', 'pyinstaller', 'packaging',
 )
 LICENSE_NAME = re.compile(r'^(LICEN[CS]E|COPYING|NOTICE)', re.IGNORECASE)
 OIDN_LICENSES = Path(__file__).resolve().parent / 'licenses' / 'oidn'

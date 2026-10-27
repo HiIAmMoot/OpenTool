@@ -1,5 +1,6 @@
 import importlib.util
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -22,6 +23,8 @@ class LicenseTests(unittest.TestCase):
                 self.assertIn(name, str(raised.exception))
             self.assertFalse(destination.exists())
 
+    @unittest.skipUnless(Path(sys.prefix).name == 'venv' and Path(sys.prefix).parent.name == 'build',
+                         'needs the build venv (build/venv) with the packaged distributions installed')
     def test_real_build_environment_licenses_are_copied(self):
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / 'licenses'
@@ -29,7 +32,7 @@ class LicenseTests(unittest.TestCase):
             for name in collector.DISTRIBUTIONS:
                 self.assertTrue(any((destination / name).rglob('*')), name)
             # These transitive imports are present in the frozen PYZ, not just the build venv.
-            for name in ('setuptools', 'packaging'):
+            for name in ('packaging',):
                 self.assertTrue(any((destination / name).rglob('*')), name)
             for name in ('python/LICENSE.txt', 'tcltk/tcl-license.terms',
                          'tcltk/tk-license.terms', 'oidn/LICENSE.txt'):

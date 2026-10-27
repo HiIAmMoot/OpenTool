@@ -1,6 +1,48 @@
+import sys
+from pathlib import Path
+
 import numpy as np
 
 from . import blender_find, pages, raster, resources, xatlas_c
+
+RUNTIME_MODULES = ('msvcp140.dll', 'vcruntime140_1.dll')
+
+
+def _loaded_module_path(name: str) -> str | None:
+    import ctypes
+    from ctypes import wintypes
+    kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleFileNameW.argtypes = [wintypes.HMODULE, wintypes.LPWSTR, wintypes.DWORD]
+    handle = kernel32.GetModuleHandleW(name)
+    if not handle:
+        return None
+    buffer = ctypes.create_unicode_buffer(1024)
+    kernel32.GetModuleFileNameW(handle, buffer, len(buffer))
+    return buffer.value
+
+
+def runtime_problems(bundle_dir: str, paths: dict[str, str | None]) -> list[str]:
+    # (the frozen app must run on its own 14.4x C++ runtime, not whatever System32 has)
+    root = Path(bundle_dir).resolve()
+    bad = []
+    for name, path in paths.items():
+        if path is None:
+            bad.append(f'{name} is not loaded')
+        elif root not in Path(path).resolve().parents:
+            bad.append(f'{name} loaded from {path}, outside {root}')
+    return bad
+
+
+def check_runtime() -> tuple[str, bool, str]:
+    if not getattr(sys, 'frozen', False):
+        return ('runtime', True, 'not frozen')
+    bundle = sys._MEIPASS
+    problems = runtime_problems(bundle, {name: _loaded_module_path(name) for name in RUNTIME_MODULES})
+    if problems:
+        return ('runtime', False, '; '.join(problems))
+    return ('runtime', True, 'C++ runtime loaded from the bundle')
 
 
 def run_checks() -> list[tuple[str, bool, str]]:
@@ -38,6 +80,11 @@ def run_checks() -> list[tuple[str, bool, str]]:
         results.append(('numba', True, 'raster.dilate ran on a 4x4 page'))
     except Exception as exc:
         results.append(('numba', False, str(exc)))
+
+    try:
+        results.append(check_runtime())
+    except Exception as exc:
+        results.append(('runtime', False, str(exc)))
 
     try:
         page = np.full((32, 32, 3), 0.5, dtype=np.float32)

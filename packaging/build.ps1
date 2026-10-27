@@ -12,7 +12,7 @@ $Bundle = Join-Path $Root 'build\dist\OpenTool'
 function Assert-Runtime {
     $Names = @('vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll',
         'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll',
-        'msvcp140_codecvt_ids.dll', 'concrt140.dll')
+        'msvcp140_codecvt_ids.dll', 'concrt140.dll', 'vcomp140.dll')
     if (-not (Test-Path $Bundle)) { throw "Bundle not found: $Bundle" }
     foreach ($File in Get-ChildItem $Bundle -Recurse -File -Filter '*.dll') {
         if ($Names -contains $File.Name) {
@@ -23,22 +23,54 @@ function Assert-Runtime {
                 ($Info.FileMajorPart -eq 14 -and $Info.FileMinorPart -lt 40)) {
                 throw "C++ runtime must be >= 14.40: $($File.FullName) ($($Info.FileVersion))"
             }
-        } elseif ($File.Name -match '^(vcruntime140|msvcp140|concrt140).*\.dll$') {
-            # Hashed wheel-private names do not replace the named runtime.
-            Write-Output "Private runtime (informational): $($File.FullName): $($File.VersionInfo.FileVersion)"
+        } elseif ($File.Name -match '^(vcruntime140|msvcp140|concrt140|vcomp140).*\.dll$') {
+            # Hashed wheel-private names and other C++ runtime pieces (vcruntime140_threads)
+            # are not loaded under the checked names; listed for information only.
+            Write-Output "Other C++ runtime file (informational): $($File.FullName): $($File.VersionInfo.FileVersion)"
         }
     }
 }
 
+# Windows' own DLLs must come from Windows. The frozen app starts Blender, and a bundled
+# copy that does not match the system's other DLLs breaks it (dbghelp.dll vs dbgeng.dll).
+# Only DLLs that are on this list on purpose may share a name with a System32 DLL.
+$SystemNameAllowed = @('concrt140.dll', 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll',
+    'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll',
+    'vcruntime140_1.dll', 'vcruntime140_threads.dll', 'vcomp140.dll')
+
+function Assert-NoSystemDlls {
+    foreach ($File in Get-ChildItem $Bundle -Recurse -File -Filter '*.dll') {
+        $Lower = $File.Name.ToLowerInvariant()
+        if ($SystemNameAllowed -contains $Lower) { continue }
+        if ($Lower -like 'api-ms-win-*' -or (Test-Path (Join-Path "$env:SystemRoot\System32" $File.Name))) {
+            throw "Bundled DLL shares a name with a Windows system DLL: $($File.FullName)"
+        }
+    }
+    Write-Output 'No bundled DLL shares a name with a Windows system DLL (except the C++ runtime)'
+}
+
 if ($CheckRuntimeOnly) {
     Assert-Runtime
+    Assert-NoSystemDlls
     exit 0
 }
 
 Push-Location $Root
 try {
     Write-Output '1. Check base Python'
-    & $Python -c "import sys, pathlib; print(sys.version); print('base:', sys.base_prefix); assert sys.version_info[:2] == (3, 11), 'Use Python 3.11'; assert not any(s in sys.version.lower() for s in ('conda', 'anaconda')) and not (pathlib.Path(sys.base_prefix) / 'conda-meta').exists(), 'Anaconda is not supported'; assert sys.maxsize > 2**32, 'Use 64-bit Python'"
+    # explicit exits, not assert: PYTHONOPTIMIZE would strip asserts
+    $Guard = @'
+import sys, pathlib
+print(sys.version)
+print('base:', sys.base_prefix)
+if sys.version_info[:2] != (3, 11):
+    raise SystemExit('Use Python 3.11')
+if any(s in sys.version.lower() for s in ('conda', 'anaconda')) or (pathlib.Path(sys.base_prefix) / 'conda-meta').exists():
+    raise SystemExit('Anaconda is not supported')
+if sys.maxsize <= 2**32:
+    raise SystemExit('Use 64-bit Python')
+'@
+    $Guard | & $Python -
     if ($LASTEXITCODE -ne 0) { throw 'Base Python check failed' }
 
     Write-Output '2. Recreate clean build venv'
@@ -57,8 +89,18 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'xatlas build failed' }
 
     Write-Output '4. Freeze both entry points'
-    & $VenvPython -m PyInstaller --noconfirm --clean --distpath build\dist --workpath build\pyi packaging\opentool.spec
-    if ($LASTEXITCODE -ne 0) { throw 'PyInstaller failed' }
+    # PyInstaller also collects DLLs it finds on PATH (a Java runtime's api-ms-win-*.dll,
+    # Oculus' dbghelp.dll), so it runs with a PATH of only what the build needs.
+    $SavedPath = $env:PATH
+    $env:PATH = (@("$env:SystemRoot\System32", "$env:SystemRoot\System32\Wbem",
+        'C:\Program Files\LLVM\bin', (Join-Path $Root 'build\venv\Scripts')) -join ';')
+    try {
+        & $VenvPython -m PyInstaller --noconfirm --clean --distpath build\dist --workpath build\pyi packaging\opentool.spec
+        $PyiExit = $LASTEXITCODE
+    } finally {
+        $env:PATH = $SavedPath
+    }
+    if ($PyiExit -ne 0) { throw 'PyInstaller failed' }
 
     Write-Output '5. Install and check app-local C++ runtime'
     if (-not $VCRedist) {
@@ -70,7 +112,13 @@ try {
     $Dlls = @(Get-ChildItem $VCRedist -File -Filter '*.dll' | Where-Object Name -ne 'vccorlib140.dll')
     if ($Dlls.Count -eq 0) { throw "No runtime DLLs in $VCRedist" }
     $Dlls | Copy-Item -Destination (Join-Path $Bundle '_internal') -Force
+    # vcomp140.dll (OpenMP, used by the wheels) is not in the CRT folder; without this
+    # PyInstaller takes whatever System32 has, which is not the version the CRT here is.
+    $OpenMP = Join-Path (Split-Path $VCRedist -Parent) 'Microsoft.VC143.OpenMP\vcomp140.dll'
+    if (-not (Test-Path $OpenMP)) { throw "vcomp140.dll not found: $OpenMP" }
+    Copy-Item $OpenMP -Destination (Join-Path $Bundle '_internal') -Force
     Assert-Runtime
+    Assert-NoSystemDlls
 
     Write-Output '6. Collect licenses'
     Copy-Item LICENSE, THIRD_PARTY_NOTICES.md -Destination $Bundle -Force
@@ -82,7 +130,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Frozen self-test failed' }
 
     Write-Output '8. Zip app folder'
-    $Describe = & git.exe describe --tags --always
+    $Describe = & git.exe describe --tags --always --dirty
     if ($LASTEXITCODE -ne 0) { throw 'git describe failed' }
     New-Item dist -ItemType Directory -Force | Out-Null
     $Zip = Join-Path $Root "dist\OpenTool-$Describe-windows-x64.zip"

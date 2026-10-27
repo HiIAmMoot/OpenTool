@@ -67,7 +67,7 @@ Numba and llvmlite use BSD licenses. llvmlite includes LLVM under Apache 2.0 wit
 
 cffi and pycparser use MIT and BSD licenses, respectively.
 
-Setuptools and packaging are included as dependencies of the bundled Python libraries. Setuptools uses the MIT license; packaging offers Apache 2.0 or BSD terms.
+The packaging library is included because Pillow imports it. It offers Apache 2.0 or BSD terms.
 
 Pillow is included under the HPND license.
 
@@ -79,9 +79,9 @@ The Microsoft Visual C++ runtime DLLs are redistributed as Distributable Code un
 
 xatlas is built from the vendored source and included under the MIT license. Its component notices are reproduced above.
 
-## Used, not included in a source checkout
+## Used by a source checkout
 
-The app bundles pyoidn, Open Image Denoise, NumPy, SciPy, Numba and Pillow; a source checkout uses separately installed copies instead.
+A source checkout uses the programs below as separate installs. The app download bundles everything here except Blender, which the user installs.
 
 - [Blender](https://www.blender.org) (GNU GPL) runs as a separate program. `lightmapper/blender/bake.py` imports Blender's Python API, `bpy` and `mathutils`, so it must be under a GPL-compatible license. It is, as part of OpenTool under GPLv3.
 - [Intel Open Image Denoise](https://www.openimagedenoise.org) (Apache 2.0), through the separate [pyoidn](https://github.com/Hyiker/pyoidn) binding (MIT license).

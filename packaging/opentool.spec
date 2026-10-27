@@ -15,7 +15,8 @@ binaries = [(str(root / 'lightmapper/vendor/xatlas/build/xatlas.dll'),
              'lightmapper/vendor/xatlas/build')]
 # OIDN loads devices at runtime beside its package; the three exe tools are not needed.
 binaries += [(str(path), 'pyoidn/oidn/bin') for path in sorted(oidn_bin.glob('*.dll'))]
-excludes = ['torch', 'pytest', 'IPython', 'matplotlib', 'numpy.tests']
+# setuptools and pkg_resources are not used at run time; they bring unlicensed vendored packages.
+excludes = ['torch', 'pytest', 'IPython', 'matplotlib', 'numpy.tests', 'setuptools', 'pkg_resources']
 scipy_root = Path(util.find_spec('scipy').origin).parent
 excludes += ['scipy.' + '.'.join(path.relative_to(scipy_root).parts)
              for path in sorted(scipy_root.rglob('tests')) if path.is_dir()]
@@ -34,7 +35,10 @@ pyz = PYZ(a.pure)
 # Dependency scanning found Oculus debug DLLs and a Java UCRT on PATH. Windows
 # provides these; bundling them can break Blender with mismatched system DLLs.
 system_dlls = {'dbghelp.dll', 'dbgcore.dll', 'ucrtbase.dll'}
-a.binaries = [entry for entry in a.binaries if Path(entry[0]).name.lower() not in system_dlls]
+# api-ms-win-* are Windows' own API-set stubs (a Java runtime on PATH supplied about 40).
+a.binaries = [entry for entry in a.binaries
+              if Path(entry[0]).name.lower() not in system_dlls
+              and not Path(entry[0]).name.lower().startswith('api-ms-win-')]
 
 # Each exe keeps all runtime hooks, but must not run the other application's entry.
 gui_scripts = [entry for entry in a.scripts if entry[0] != 'opentool_cli']
