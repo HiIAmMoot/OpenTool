@@ -26,6 +26,12 @@ def test_backup_setting_round_trips_and_defaults_true(tmp_path):
     assert load(tmp_path / 's.json').backups is False
 
 
+def test_old_settings_file_without_backups_loads_true(tmp_path):
+    (tmp_path / 's.json').write_text('{"preset": "High", "new_names": true}')
+    loaded = load(tmp_path / 's.json')
+    assert loaded.preset == 'High' and loaded.backups is True
+
+
 def test_default_path_is_under_appdata(monkeypatch, tmp_path):
     monkeypatch.setenv('APPDATA', str(tmp_path))
     assert settings_path() == tmp_path / 'OpenTool' / 'settings.json'

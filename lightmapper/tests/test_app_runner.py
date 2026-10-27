@@ -93,6 +93,24 @@ def test_runner_can_disable_all_backups(tiny):
     assert not list(tags.rglob('backups/*'))
 
 
+def _bake_twice_new_names(tiny, backups):
+    tags, settings, work = tiny
+    for i in range(2):
+        out = run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / str(i), backups=backups), lambda e: None)
+        assert out.status == 'done'
+    return sorted(p.name.split('_', 1)[1] for p in tags.rglob('backups/*'))
+
+
+def test_runner_new_names_without_backups_keeps_none(tiny):
+    assert _bake_twice_new_names(tiny, False) == []
+    assert not list(tiny[0].rglob('backups'))
+
+
+def test_runner_new_names_with_backups_covers_bsp_bitmap_and_lit_scenario(tiny):
+    assert _bake_twice_new_names(tiny, True) == [
+        'level_lit.scenario', 'room_lit.bitmap', 'room_lit.scenario_structure_bsp']
+
+
 def test_runner_stages_end_with_validate(tiny):
     _, events = run(tiny)
     assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'finish', 'write', 'validate']

@@ -61,7 +61,7 @@ Work on a copy so the original stays as it is:
 python lightmap.py copy --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch bloodgulch --out-bsp levels\test\bloodgulch\bloodgulch_ot --out-scenario levels\test\bloodgulch\bloodgulch_ot
 ```
 
-The arguments are the scenario and then the name of the BSP inside it. `--out-bsp` names both the copied BSP and its lightmap bitmap, and `--out-scenario` names the copied scenario.
+The arguments are the scenario and then the name of the BSP inside it. `--out-bsp` names both the copied BSP and its lightmap bitmap, and `--out-scenario` names the copied scenario. If a tag with that name already exists it is backed up first, unless you pass `--no-backups`.
 
 ### 2. Bake
 
@@ -69,7 +69,7 @@ The arguments are the scenario and then the name of the BSP inside it. `--out-bs
 python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch_ot bloodgulch_ot --work bake\bloodgulch -v
 ```
 
-The bake reads the scenario and BSP, then writes the lit BSP and bitmap after every stage finishes. Before replacing a tag, it saves a copy in a `backups` folder next to the tag. Backups are on by default; pass `--no-backups` to turn them off.
+The bake reads the scenario and BSP, then writes the lit BSP and bitmap after every stage finishes. Before replacing a tag, it saves a copy in a `backups` folder next to the tag. Backups are on by default; pass `--no-backups` to turn them off. Backups stay until you delete them: the tool never removes them.
 
 Add `-v` to see progress lines.
 
@@ -79,6 +79,7 @@ Other options:
 
 - `--settings file.json` changes settings; see below.
 - `--out-bsp` and `--out-scenario` write the result under new names and leave the input tags alone.
+- `--no-backups` keeps no copy of a tag that is replaced. Without it, the old tag goes in a `backups` folder next to it.
 - `--dry-run` runs the whole bake but writes no tags.
 - `--charts file.npz` points at a saved chart layout. It is reused only when the input BSP, the chart settings and the shaders' radiosity fields are unchanged. A normal bake rewrites its BSP, so the next bake of that level charts it again.
 - `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and write no tags. The default is `--sources all`.
