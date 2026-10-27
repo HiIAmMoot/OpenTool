@@ -31,6 +31,7 @@ from .settings import Settings
 from .terminator import prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
 from .textures import TextureSet, shader_texture
+from .twins import ambiguous_warning
 
 
 MAX_BSP_SURFACES = 131072
@@ -303,7 +304,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     job = json.loads((work / 'job.json').read_text())
     job_suns = job['suns']
     if job.get('ambiguous_twin_groups'):
-        warnings.append(f'{job["ambiguous_twin_groups"]} coincident triangle groups of more than two left unpaired')
+        warnings.append(ambiguous_warning(job['ambiguous_twin_groups']))
     boundaries = (prepare_boundaries(scene, job_suns, s.reach, result.edge_sun_lit)
                   if result.vertex_sun_lit is not None else None)
     for i, page in enumerate(pages):

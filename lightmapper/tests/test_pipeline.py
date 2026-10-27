@@ -454,19 +454,26 @@ def test_no_cycles_cpu_warning_when_cycles_is_not_offered_a_gpu(tiny, monkeypatc
     assert json.loads((work / 'summary.json').read_text())['warnings'] == []
 
 
-def test_unpaired_coincident_triangle_groups_are_a_summary_warning(tiny, monkeypatch):
+def test_unpaired_coincident_triangle_groups_are_a_summary_warning(tiny, caplog):
     tags, settings, work = tiny
-    real = blender_job.reversed_twins
-    monkeypatch.setattr(blender_job, 'reversed_twins', lambda corners: (*real(corners)[:2], 3))
+    bsp = read_tag(tags / 'room.scenario_structure_bsp')
+    surfaces = [child(bsp.root, 'surfaces') for _ in range(3)]
+    for surface in surfaces:
+        surface.body[:] = struct.pack('>3H', 0, 1, 2)
+    bsp.root.set_block('surfaces', surfaces)
+    bsp.root.block('lightmaps')[0].block('materials')[0].set('surface_count', 3)
+    put(tags, 'sbsp', 'room', bsp)
     api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
-    assert '3 coincident triangle groups of more than two left unpaired' in summary['warnings']
+    live = [record.getMessage() for record in caplog.records if record.name == 'lightmapper.twins']
+    assert live == ['1 position groups with more than two triangles left unpaired']
+    assert summary['warnings'] == live
 
 
 def test_no_twin_warning_when_every_group_pairs(tiny):
     tags, settings, work = tiny
     api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
-    assert not any('coincident' in w for w in json.loads((work / 'summary.json').read_text())['warnings'])
+    assert not any('left unpaired' in w for w in json.loads((work / 'summary.json').read_text())['warnings'])
 
 
 def test_pipeline_stitches_before_quantisation(tiny, monkeypatch):

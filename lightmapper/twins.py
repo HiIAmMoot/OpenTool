@@ -5,6 +5,10 @@ import logging
 import numpy as np
 
 
+def ambiguous_warning(count: int) -> str:
+    return f'{count} position groups with more than two triangles left unpaired'
+
+
 def reversed_twins(corners: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
     twin = np.full(len(corners), -1, np.int32)
     perm = np.tile(np.arange(3, dtype=np.int32), (len(corners), 1))
@@ -29,5 +33,5 @@ def reversed_twins(corners: np.ndarray) -> tuple[np.ndarray, np.ndarray, int]:
             perm[a] = order
             perm[b] = np.argsort(order)
     if ambiguous:
-        logging.getLogger(__name__).warning('%d position groups with more than two triangles left unpaired', ambiguous)
+        logging.getLogger(__name__).warning('%s', ambiguous_warning(ambiguous))
     return twin, perm, ambiguous
