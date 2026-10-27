@@ -9,6 +9,9 @@ tk = pytest.importorskip('tkinter')
 from test_pipeline import tiny
 from lightmapper.blender_find import Blender, BlenderNotFound
 from opentool.app import App
+from opentool import app as app_module
+from opentool import usersettings
+from opentool import form as form_module
 
 
 @pytest.fixture(scope='module')
@@ -42,7 +45,6 @@ def make_app(tmp_path, monkeypatch, request, tk_root):
             find_blender=find_blender,
             **kwargs,
         )
-        app.root = root
         return app
 
     def destroy_roots():
@@ -76,7 +78,9 @@ def test_first_screen_widgets(app):
         assert hasattr(app, name)
     assert str(app.bake_button['state']) == 'disabled' and str(app.open_button['state']) == 'disabled'
     assert app.new_names_var.get() is True and app.preset_var.get() == 'Normal'
-    assert not app.advanced_frame.winfo_ismapped()
+    assert app.advanced_frame.winfo_manager() == ''
+    app._toggle_advanced()
+    assert app.advanced_frame.winfo_manager() == 'grid'
 
 
 def test_single_bsp_is_selected_and_bake_enabled(app, tiny):
@@ -148,3 +152,172 @@ def test_callback_error_goes_to_the_log_not_a_dialog(app, tmp_path):
     app.tk_root.report_callback_exception(ZeroDivisionError, ZeroDivisionError('x'), None)
     assert 'ZeroDivisionError' in (tmp_path / 'opentool.log').read_text()
     assert 'Something went wrong' in app.stage_label['text']
+
+
+def test_change_rejecting_old_blender_keeps_the_working_one(app, monkeypatch, tmp_path, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+    previous = app.blender
+    picked = tmp_path / 'old-blender.exe'
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **_kwargs: str(picked))
+    monkeypatch.setattr(app_module.blender_find, 'blender_version', lambda _path: (4, 1))
+    app._choose_blender()
+    pump(app.root, lambda: app.blender_label['text'] != 'Checking Blender…')
+    assert app.blender is previous
+    assert app.blender_label['text'] == 'That Blender is 4.1. OpenTool needs Blender 5.2 or newer.'
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_change_rejecting_non_blender_keeps_the_working_one(app, monkeypatch, tmp_path, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+    previous = app.blender
+    picked = tmp_path / 'not-blender.exe'
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **_kwargs: str(picked))
+    monkeypatch.setattr(app_module.blender_find, 'blender_version', lambda _path: None)
+    app._choose_blender()
+    pump(app.root, lambda: app.blender_label['text'] != 'Checking Blender…')
+    assert app.blender is previous
+    assert app.blender_label['text'] == "That file doesn't look like Blender. Pick blender.exe from the Blender folder."
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_change_accepting_new_blender_takes_it(app, monkeypatch, tmp_path):
+    pump(app.root, lambda: app.blender is not None)
+    picked = tmp_path / 'new-blender.exe'
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **_kwargs: str(picked))
+    monkeypatch.setattr(app_module.blender_find, 'blender_version', lambda _path: (5, 3))
+    app._choose_blender()
+    pump(app.root, lambda: app.blender is not None and app.blender.version == (5, 3))
+    assert app.blender.path == picked
+    assert 'Blender 5.3' in app.blender_label['text']
+
+
+def test_empty_form_rows_are_hidden_and_tags_error_shows(app, tiny):
+    for widget in (app.tags_error, app.scenario_error, app.bsp_message, app.device_label):
+        assert widget.winfo_manager() == ''
+    tags, *_ = tiny
+    app.set_tags(str(tags / 'missing'))
+    assert app.tags_error.winfo_manager() == 'grid'
+
+
+def test_close_destroys_window_when_saving_fails(app, monkeypatch, tmp_path):
+    def fail_save(*_args, **_kwargs):
+        raise OSError('disk full')
+
+    monkeypatch.setattr(usersettings, 'save', fail_save)
+    window = app.window
+    app._close()
+    assert not window.winfo_exists()
+    assert 'disk full' in (tmp_path / 'opentool.log').read_text()
+
+
+def test_bad_remembered_scenario_is_logged_and_ignored(tmp_path, tiny, make_app, monkeypatch):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    invalid = tags / 'bad.scenario'
+    invalid.write_bytes(b'not a scenario tag')
+    usersettings.save(
+        usersettings.UserSettings(tags=str(tags), scenario='bad'),
+        tmp_path / 's.json',
+    )
+    def invalid_scenario(*_args):
+        raise TypeError(f'invalid scenario tag: {invalid}')
+
+    monkeypatch.setattr(form_module, 'list_bsps', invalid_scenario)
+    app = make_app()
+    assert app.tags_entry.get() == str(tags)
+    assert app.scenario_var.get() == ''
+    assert app.scenario_error['text'] == ''
+    pump(app.root, lambda: app.blender is not None)
+    assert 'bad.scenario' in (tmp_path / 'opentool.log').read_text()
+
+
+def test_stale_settings_start_with_empty_tags_and_scenario(tmp_path, make_app):
+    usersettings.save(
+        usersettings.UserSettings(
+            tags=str(tmp_path / 'removed-tags'),
+            scenario='levels\\gone\\gone',
+        ),
+        tmp_path / 's.json',
+    )
+    app = make_app()
+    assert app.tags_entry.get() == ''
+    assert app.scenario_var.get() == ''
+    assert app.tags_error['text'] == ''
+    assert app.scenario_error['text'] == ''
+
+
+def test_tags_entry_commits_on_return(app, tiny):
+    tags, *_ = tiny
+    app.tags_entry.insert(0, str(tags))
+    assert app.tags_entry.bind('<Return>')
+    app._commit_tags()
+    assert app._tags == tags
+
+
+def test_change_result_wins_over_late_discovery(make_app, monkeypatch, tmp_path):
+    release_discovery = threading.Event()
+    discovery_finished = threading.Event()
+
+    def delayed_discovery(remembered=None):
+        release_discovery.wait(5)
+        discovery_finished.set()
+        return Blender(Path('C:/b/discovered.exe'), (5, 2))
+
+    app = make_app(find_blender=delayed_discovery)
+    picked = tmp_path / 'picked.exe'
+    monkeypatch.setattr(app_module.filedialog, 'askopenfilename', lambda **_kwargs: str(picked))
+    monkeypatch.setattr(app_module.blender_find, 'blender_version', lambda _path: (5, 3))
+    app._choose_blender()
+    pump(app.root, lambda: app.blender is not None and app.blender.version == (5, 3))
+    release_discovery.set()
+    assert discovery_finished.wait(5)
+    pump(app.root, lambda: app.events.empty())
+    time.sleep(0.15)
+    app.root.update()
+    assert app.blender.path == picked
+
+
+def test_discovery_worker_does_not_capture_app(make_app, monkeypatch):
+    targets = []
+
+    class UnstartedThread:
+        def __init__(self, *, target, **_kwargs):
+            targets.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_module.threading, 'Thread', UnstartedThread)
+    app = make_app()
+    cells = [cell.cell_contents for cell in targets[0].__closure__ or ()]
+    assert all(value is not app for value in cells)
+
+
+def test_scenario_dialog_uses_levels_folder_then_tags(app, monkeypatch, tmp_path):
+    tags = tmp_path / 'tags'
+    (tags / 'globals').mkdir(parents=True)
+    (tags / 'levels').mkdir()
+    app.set_tags(str(tags))
+    seen = []
+    monkeypatch.setattr(
+        app_module.filedialog, 'askopenfilename',
+        lambda **kwargs: seen.append(kwargs['initialdir']) or '',
+    )
+    app._browse_scenario()
+    assert Path(seen[-1]) == tags / 'levels'
+    (tags / 'levels').rmdir()
+    app._browse_scenario()
+    assert Path(seen[-1]) == tags
+
+
+def test_open_output_button_follows_log_box(app):
+    assert app.open_button.master is app.frame
+    assert int(app.open_button.grid_info()['row']) > int(app.log_box.grid_info()['row'])

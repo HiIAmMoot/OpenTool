@@ -26,8 +26,8 @@ class App:
         self.run_bake = run_bake
         self.events: queue.Queue = queue.Queue()
         self.blender: blender_find.Blender | None = None
-        self._blender_pending = True
-        self._tags = Path()
+        self._user_chose_blender = False
+        self._tags: Path | None = None
         self._scenario = ''
         self._scenario_file: Path | None = None
         self._bsps: list[str] = []
@@ -58,7 +58,9 @@ class App:
         ttk.Button(tags_row, text='Browse…', command=self._browse_tags).grid(row=1, column=1, padx=(6, 0))
         self.tags_error = ttk.Label(self.frame, foreground='red')
         self.tags_error.grid(row=1, column=0, sticky='w')
-        self.tags_entry.bind('<FocusOut>', lambda _event: self.set_tags(self.tags_entry.get()))
+        self.tags_error.grid_remove()
+        self.tags_entry.bind('<FocusOut>', self._commit_tags)
+        self.tags_entry.bind('<Return>', self._commit_tags)
 
         scenario_row = ttk.Frame(self.frame)
         scenario_row.grid(row=2, column=0, sticky='ew', pady=(8, 0))
@@ -70,6 +72,7 @@ class App:
         ttk.Button(scenario_row, text='Browse…', command=self._browse_scenario).grid(row=1, column=1, padx=(6, 0))
         self.scenario_error = ttk.Label(self.frame, foreground='red')
         self.scenario_error.grid(row=3, column=0, sticky='w')
+        self.scenario_error.grid_remove()
 
         bsp_row = ttk.Frame(self.frame)
         bsp_row.grid(row=4, column=0, sticky='ew', pady=(8, 0))
@@ -80,6 +83,7 @@ class App:
         self.bsp_box.bind('<<ComboboxSelected>>', lambda _event: self._update_bake_state())
         self.bsp_message = ttk.Label(self.frame)
         self.bsp_message.grid(row=5, column=0, sticky='w')
+        self.bsp_message.grid_remove()
 
         quality = ttk.Frame(self.frame)
         quality.grid(row=6, column=0, sticky='ew', pady=(12, 0))
@@ -137,8 +141,6 @@ class App:
         controls.grid(row=12, column=0, sticky='ew', pady=(12, 0))
         self.bake_button = ttk.Button(controls, text='Bake', command=lambda: None, state='disabled')
         self.bake_button.pack(side='left')
-        self.open_button = ttk.Button(controls, text='Open output folder', command=self._open_output, state='disabled')
-        self.open_button.pack(side='right')
         self._output_folder: Path | None = None
 
         self.stage_label = ttk.Label(self.frame, text='Ready')
@@ -147,9 +149,12 @@ class App:
         self.progress.grid(row=14, column=0, sticky='ew')
         self.device_label = ttk.Label(self.frame)
         self.device_label.grid(row=15, column=0, sticky='w')
+        self.device_label.grid_remove()
         self.log_box = ScrolledText(self.frame, height=7, state='disabled', wrap='word', font='TkFixedFont')
         self.log_box.grid(row=16, column=0, sticky='nsew', pady=(4, 0))
         self.frame.rowconfigure(16, weight=1)
+        self.open_button = ttk.Button(self.frame, text='Open output folder', command=self._open_output, state='disabled')
+        self.open_button.grid(row=17, column=0, sticky='e', pady=(4, 0))
 
     def _restore(self):
         self.preset_var.set(self.settings.preset)
@@ -160,30 +165,50 @@ class App:
                 self.advanced_vars[name].set(value)
         if self.settings.advanced_open:
             self._toggle_advanced()
-        if self.settings.tags and form.tags_folder_problem(Path(self.settings.tags)) is None:
+        if not self.settings.tags:
+            return
+        try:
+            tags = Path(self.settings.tags)
+            if form.tags_folder_problem(tags) is not None:
+                return
             self.set_tags(self.settings.tags)
             scenario_file = self._scenario_file_for(self.settings.scenario)
             if scenario_file is not None and scenario_file.is_file():
-                self.set_scenario_file(scenario_file)
+                try:
+                    self.set_scenario_file(scenario_file)
+                    if self.scenario_error['text']:
+                        raise ValueError(self.scenario_error['text'])
+                except Exception as exc:
+                    self._clear_scenario()
+                    self._write_exception(exc)
                 if self.settings.bsp in self._bsps:
                     self.bsp_var.set(self.settings.bsp)
                     self._update_bake_state()
+        except Exception as exc:
+            self.set_tags('')
+            self._clear_scenario()
+            self._write_exception(exc)
 
     def _scenario_file_for(self, scenario):
-        if not scenario or not self._tags:
+        if not scenario or self._tags is None:
             return None
         return self._tags / (scenario.replace('\\', os.sep) + '.scenario')
 
     def set_tags(self, path: str):
-        changed = Path(path) != self._tags if path else bool(self._tags)
+        new_tags = Path(path) if path else None
+        changed = new_tags != self._tags
         self.tags_entry.delete(0, 'end')
         self.tags_entry.insert(0, path)
-        self._tags = Path(path) if path else Path()
-        problem = form.tags_folder_problem(self._tags) if path else None
-        self.tags_error.configure(text=problem or '')
+        self._tags = new_tags
+        problem = form.tags_folder_problem(new_tags) if new_tags is not None else None
+        self._set_optional_label(self.tags_error, problem or '')
         if problem or changed:
             self._clear_scenario()
         self._update_bake_state()
+
+    def _commit_tags(self, _event=None):
+        self.set_tags(self.tags_entry.get())
+        return 'break'
 
     def set_scenario_file(self, path: Path):
         self._scenario_file = Path(path)
@@ -191,8 +216,11 @@ class App:
         try:
             self._scenario = form.scenario_tag_path(self._tags, self._scenario_file)
             self._bsps = form.list_bsps(self._tags, self._scenario)
-            self.scenario_error.configure(text='')
-            self.bsp_message.configure(text='' if self._bsps else 'This scenario has no BSP, so there is nothing to light.')
+            self._set_optional_label(self.scenario_error, '')
+            self._set_optional_label(
+                self.bsp_message,
+                '' if self._bsps else 'This scenario has no BSP, so there is nothing to light.',
+            )
             self.bsp_box.configure(values=self._bsps)
             self.bsp_var.set(self._bsps[0] if len(self._bsps) == 1 else '')
         except (OSError, ValueError, KeyError) as exc:
@@ -200,8 +228,8 @@ class App:
             self._bsps = []
             self.bsp_box.configure(values=())
             self.bsp_var.set('')
-            self.bsp_message.configure(text='')
-            self.scenario_error.configure(text=str(exc))
+            self._set_optional_label(self.bsp_message, '')
+            self._set_optional_label(self.scenario_error, str(exc))
         self._update_bake_state()
 
     def _clear_scenario(self):
@@ -209,12 +237,22 @@ class App:
         self._scenario = ''
         self._bsps = []
         self.scenario_var.set('')
-        self.scenario_error.configure(text='')
+        self._set_optional_label(self.scenario_error, '')
         self.bsp_box.configure(values=())
         self.bsp_var.set('')
-        self.bsp_message.configure(text='')
+        self._set_optional_label(self.bsp_message, '')
+
+    @staticmethod
+    def _set_optional_label(label, text):
+        label.configure(text=text)
+        if text:
+            label.grid()
+        else:
+            label.grid_remove()
 
     def request(self) -> runner.BakeRequest:
+        if self._tags is None:
+            raise ValueError('Pick a tags folder.')
         problem = form.tags_folder_problem(self._tags)
         if problem:
             raise ValueError(problem)
@@ -251,7 +289,7 @@ class App:
         usersettings.save(self.settings, self.store_path)
 
     def _update_bake_state(self):
-        valid_tags = bool(self.tags_entry.get()) and form.tags_folder_problem(self._tags) is None
+        valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
         valid = valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
         self.bake_button.configure(state='normal' if valid else 'disabled')
 
@@ -306,24 +344,31 @@ class App:
             self.set_tags(path)
 
     def _browse_scenario(self):
-        initial = self._scenario_file.parent if self._scenario_file else (self._tags / 'levels' if self._tags else '')
+        if self._scenario_file is not None:
+            initial = self._scenario_file.parent
+        elif self._tags is not None and (self._tags / 'levels').is_dir():
+            initial = self._tags / 'levels'
+        else:
+            initial = self._tags if self._tags is not None else ''
         path = filedialog.askopenfilename(initialdir=str(initial), filetypes=[('Scenario', '*.scenario')])
         if path:
             try:
                 self.set_scenario_file(Path(path))
             except ValueError as exc:
-                self.scenario_error.configure(text=str(exc))
+                self._set_optional_label(self.scenario_error, str(exc))
 
     def _discover_blender(self):
         remembered = self.settings.blender or None
+        find_blender = self.find_blender
+        events = self.events
 
         def discover():
             try:
-                result = self.find_blender(remembered)
+                result = find_blender(remembered)
             except blender_find.BlenderNotFound as exc:
                 result = exc
             # Tk calls stay on the UI thread; workers only hand results to the poller.
-            self.events.put(('blender', result))
+            events.put(('blender', 'discovery', result))
 
         threading.Thread(target=discover, daemon=True).start()
 
@@ -331,15 +376,27 @@ class App:
         path = filedialog.askopenfilename(filetypes=[('Blender', 'blender.exe')])
         if not path:
             return
-        self._blender_pending = True
-        self.blender = None
+        self._user_chose_blender = True
         self._set_blender_status('Checking Blender…')
         self._update_bake_state()
+        events = self.events
+        version_finder = blender_find.blender_version
+        minimum_version = blender_find.MIN_VERSION
 
         def check():
-            version = blender_find.blender_version(Path(path))
-            result = blender_find.Blender(Path(path), version) if version and version >= blender_find.MIN_VERSION else blender_find.BlenderNotFound('Blender 5.2 or newer was not found. Install it from blender.org, or pick blender.exe yourself.')
-            self.events.put(('blender', result))
+            version = version_finder(Path(path))
+            if version is None:
+                result = blender_find.BlenderNotFound(
+                    "That file doesn't look like Blender. Pick blender.exe from the Blender folder."
+                )
+            elif version < minimum_version:
+                result = blender_find.BlenderNotFound(
+                    f'That Blender is {version[0]}.{version[1]}. OpenTool needs Blender 5.2 or newer.'
+                )
+            else:
+                result = blender_find.Blender(Path(path), version)
+            # Keep Tcl-owning objects out of worker closures; their finalizers must run on the UI thread.
+            events.put(('blender', 'change', result))
 
         threading.Thread(target=check, daemon=True).start()
 
@@ -353,16 +410,20 @@ class App:
             except queue.Empty:
                 break
             if event[0] == 'blender':
-                result = event[1]
-                self._blender_pending = False
+                source, result = event[1:]
+                if source == 'discovery' and self._user_chose_blender:
+                    continue
                 if isinstance(result, blender_find.BlenderNotFound):
-                    self.blender = None
+                    if source == 'discovery':
+                        self.blender = None
                     self._set_blender_status(str(result))
                 else:
                     self.blender = result
                     self.settings.blender = str(result.path)
                     self._set_blender_status(f'Blender {result.version[0]}.{result.version[1]} ({result.path})')
                 self._update_bake_state()
+            elif event[0] == 'device':
+                self._set_optional_label(self.device_label, str(event[1]))
             elif event[0] == 'log':
                 self._append_log(str(event[1]))
         try:
@@ -376,10 +437,13 @@ class App:
         self.log_box.see('end')
         self.log_box.configure(state='disabled')
 
-    def _report_callback_exception(self, exc, value, tb):
+    def _write_exception(self, exc, tb=None):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with self.log_path.open('a', encoding='utf-8') as log:
-            traceback.print_exception(exc, value, tb, file=log)
+            traceback.print_exception(type(exc), exc, tb or exc.__traceback__, file=log)
+
+    def _report_callback_exception(self, exc, value, tb):
+        self._write_exception(value, tb)
         self.stage_label.configure(text=f'Something went wrong in OpenTool. The details are in {self.log_path}.')
 
     def _open_output(self):
@@ -387,8 +451,13 @@ class App:
             os.startfile(self._output_folder)
 
     def _close(self):
-        self.remember()
-        self.window.destroy()
+        try:
+            try:
+                self.remember()
+            except Exception as exc:
+                self._write_exception(exc)
+        finally:
+            self.window.destroy()
 
 
 def main() -> int:
