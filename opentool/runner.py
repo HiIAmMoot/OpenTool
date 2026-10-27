@@ -43,10 +43,15 @@ def default_work(bsp: str) -> Path:
 
 
 class _EventHandler(logging.Handler):
-    def __init__(self, emit):
+    def __init__(self, emit, verbose):
         super().__init__(logging.INFO)
         self.emit_event = emit
+        self.verbose = verbose
         self.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
+
+    def filter(self, record):
+        return (record.levelno >= logging.WARNING or self.verbose
+                or record.getMessage().startswith('stage: '))
 
     def emit(self, record):
         try:
@@ -93,7 +98,6 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             if follower is not None:
                 follower.stop(); follower.join(); follower = None
             safe_emit(('stage', stage))
-            safe_emit(('log', f'INFO: stage: {stage}'))
             if stage == 'blender':
                 try:
                     total = len(json.loads((work / 'job.json').read_text())['pages'])
@@ -102,7 +106,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
 
                 def line(text):
                     nonlocal device
-                    safe_emit(('log', text))
+                    logging.getLogger('opentool.blender').info(text)
                     parsed = parse_line(text)
                     if parsed and parsed[0] == 'device':
                         device = parsed[1]; safe_emit(parsed)
@@ -126,8 +130,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             blender_log.unlink()
         except FileNotFoundError:
             pass
-        event_handler = _EventHandler(emit)
-        event_handler.setLevel(logging.INFO if request.verbose else logging.WARNING)
+        event_handler = _EventHandler(emit, request.verbose)
         file_handler = logging.FileHandler(work / 'opentool.log', mode='w', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))

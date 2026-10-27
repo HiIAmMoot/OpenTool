@@ -107,6 +107,8 @@ def test_verbose_controls_info_forwarding_but_file_keeps_info(tiny, monkeypatch)
     loud_events = []
     run_bake(BakeRequest(tags, 'level', 'room', settings, True, work / 'loud', verbose=True), loud_events.append)
     assert any(event[0] == 'log' and 'an info record' in event[1] for event in loud_events)
+    for events in (quiet_events, loud_events):
+        assert sum(event[0] == 'log' and 'stage: charts' in event[1] for event in events) == 1
 
 
 def test_runner_reports_validation_problems(tiny, monkeypatch):
@@ -216,8 +218,8 @@ def test_runner_reports_write_failure(tiny, monkeypatch):
     assert 'Traceback' in (out.work / 'opentool.log').read_text()
 
 
-def test_runner_follows_blender_log(tiny, monkeypatch):
-    # replace the tiny fixture's fake Blender with one that writes blender.log lines then returns
+@pytest.mark.parametrize('verbose', [False, True])
+def test_runner_follows_blender_log(tiny, monkeypatch, verbose):
     tags, settings, work = tiny
     real = pipeline.run_blender
 
@@ -225,9 +227,24 @@ def test_runner_follows_blender_log(tiny, monkeypatch):
         (path / 'blender.log').write_text('[bake] device OPTIX\n[bake] page 0 (0, 0)\n')
         return real(path, s)
 
+    class ImmediateFollower:
+        def __init__(self, _path, callback):
+            self.callback = callback
+        def start(self):
+            self.callback('[bake] device OPTIX')
+            self.callback('[bake] page 0 (0, 0)')
+        def stop(self):
+            pass
+        def join(self):
+            pass
+    monkeypatch.setattr(runner, 'BlenderLogFollower', ImmediateFollower)
     monkeypatch.setattr(pipeline, 'run_blender', write_log)
-    _, events = run(tiny)
+    events = []
+    outcome = run_bake(BakeRequest(tags, 'level', 'room', settings, True, work, verbose=verbose), events.append)
     assert ('device', 'OPTIX') in events and ('pages', 1, 1) in events
+    blender_lines = [event for event in events if event[0] == 'log' and '[bake]' in event[1]]
+    assert bool(blender_lines) is verbose
+    assert 'INFO: [bake] device OPTIX' in (outcome.work / 'opentool.log').read_text()
 
 
 def test_runner_removes_its_log_handlers(tiny):

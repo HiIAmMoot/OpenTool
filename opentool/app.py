@@ -99,9 +99,14 @@ class App:
         self.preset_hint.pack(side='left', padx=(12, 0))
 
         self.new_names_var = tk.BooleanVar(value=self.settings.new_names)
-        ttk.Checkbutton(self.frame, text='Write to new tag names', variable=self.new_names_var,
-                        command=self._update_bake_state).grid(row=7, column=0, sticky='w', pady=(8, 0))
-        ttk.Label(self.frame, text='Saves the lit level as <name>_lit and leaves your tags as they are.').grid(row=8, column=0, sticky='w')
+        self.new_names_check = ttk.Checkbutton(
+            self.frame, text='Write to new tag names', variable=self.new_names_var,
+            command=self._update_new_names_hint,
+        )
+        self.new_names_check.grid(row=7, column=0, sticky='w', pady=(8, 0))
+        self.new_names_hint = ttk.Label(self.frame)
+        self.new_names_hint.grid(row=8, column=0, sticky='w')
+        self._update_new_names_hint()
 
         self.advanced_button = ttk.Button(self.frame, text='Advanced ▸', command=self._toggle_advanced)
         self.advanced_button.grid(row=9, column=0, sticky='w', pady=(8, 0))
@@ -262,6 +267,12 @@ class App:
             raise ValueError('Pick a BSP.')
         if self.blender is None:
             raise ValueError(self.blender_label['text'])
+        if self.preset_var.get() == presets.CUSTOM:
+            for field in presets.ADVANCED:
+                if not self.advanced_vars[field].get().strip():
+                    message = f'{presets.LABELS[field]} is empty. Fill it in, or pick a preset.'
+                    self.advanced_error.configure(text=message)
+                    raise ValueError(message)
         try:
             advanced = presets.parse_advanced({
                 name: var.get()
@@ -293,6 +304,12 @@ class App:
         valid = valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
         self.bake_button.configure(state='normal' if valid else 'disabled')
 
+    def _update_new_names_hint(self):
+        text = ('Saves the lit level as <name>_lit and leaves your tags as they are.'
+                if self.new_names_var.get()
+                else "Replaces your level's tags. Backups are kept next to them.")
+        self.new_names_hint.configure(text=text)
+
     def _update_hint(self):
         self.preset_hint.configure(text=presets.PRESET_HINTS.get(self.preset_var.get(), ''))
 
@@ -321,11 +338,21 @@ class App:
             return
         selected = self.preset_var.get()
         if selected in presets.PRESET_NAMES:
-            try:
-                matches = all(str(presets.PRESETS[selected][field]) == self.advanced_vars[field].get()
-                              for field in presets.ADVANCED)
-            except KeyError:
-                matches = False
+            matches = True
+            for field in presets.ADVANCED:
+                text = self.advanced_vars[field].get().strip()
+                if not text:
+                    matches = False
+                    break
+                try:
+                    value = presets.parse_advanced({field: text})[field]
+                    expected = presets.PRESETS[selected][field]
+                except ValueError:
+                    value = text
+                    expected = str(presets.PRESETS[selected][field])
+                if value != expected:
+                    matches = False
+                    break
             if not matches:
                 self.preset_var.set(presets.CUSTOM)
                 self._update_hint()
@@ -368,7 +395,6 @@ class App:
         path = filedialog.askopenfilename(filetypes=[('Blender', 'blender.exe')])
         if not path:
             return
-        self._blender_change_pending = True
         self._set_blender_status('Checking Blender…')
         self._update_bake_state()
         events = self.events
@@ -412,7 +438,6 @@ class App:
                 else:
                     if source == 'change':
                         self._user_chose_blender = True
-                    self._blender_change_pending = False
                     self.blender = result
                     self.settings.blender = str(result.path)
                     self._set_blender_status(f'Blender {result.version[0]}.{result.version[1]} ({result.path})')

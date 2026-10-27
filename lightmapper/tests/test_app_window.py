@@ -81,9 +81,18 @@ def test_first_screen_widgets(app):
     assert app.verbose_var.get() is False
     assert app.tags_label['text'] == 'HCEK tags folder'
     assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
     assert app.advanced_frame.winfo_manager() == ''
     app._toggle_advanced()
     assert app.advanced_frame.winfo_manager() == 'grid'
+
+
+def test_new_names_hint_tracks_checkbox(app):
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
+    app.new_names_check.invoke()
+    assert app.new_names_hint['text'] == 'Saves the lit level as <name>_lit and leaves your tags as they are.'
+    app.new_names_check.invoke()
+    assert app.new_names_hint['text'] == "Replaces your level's tags. Backups are kept next to them."
 
 
 def test_single_bsp_is_selected_and_bake_enabled(app, tiny):
@@ -104,6 +113,8 @@ def test_request_carries_the_form(app, tiny):
     app._select_preset('Draft')
     req = app.request()
     assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', False, 64, None)
+    app.verbose_var.set(True)
+    assert app.request().verbose is True
 
 
 def test_draft_fills_all_advanced_fields(app):
@@ -121,6 +132,23 @@ def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
     restored = make_app(store_path=store)
     assert restored.preset_var.get() == 'Custom'
     assert restored.advanced_vars['texels_per_unit'].get() == '3'
+
+
+def test_equivalent_texel_value_keeps_named_preset(app):
+    app.advanced_vars['texels_per_unit'].set('2')
+    assert app.preset_var.get() == 'Normal'
+
+
+def test_blank_custom_field_shows_label_error(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.blender is not None)
+    app._select_preset('Custom')
+    app.advanced_vars['samples'].set('')
+    with pytest.raises(ValueError, match='Rays per texel is empty'):
+        app.request()
+    assert app.advanced_error['text'] == 'Rays per texel is empty. Fill it in, or pick a preset.'
 
 
 def test_bad_advanced_value_blocks_the_request(app, tiny):
@@ -142,9 +170,11 @@ def test_settings_are_remembered(tmp_path, tiny, make_app):
     a.set_scenario_file(tags / 'level.scenario')
     pump(a.root, lambda: a.bsp_box.get() == 'room' and a.blender is not None)
     a._select_preset('High')
+    a.verbose_var.set(True)
     a.remember()
     b = make_app(store_path=tmp_path / 's.json')
     assert b.preset_var.get() == 'High' and b.tags_entry.get() == str(tags)
+    assert b.verbose_var.get() is True
 
 
 def test_missing_blender_shows_the_message(make_app):
@@ -323,12 +353,13 @@ def test_rejected_pick_does_not_discard_discovery(make_app, monkeypatch, tmp_pat
     assert app.blender.version == (5, 2) and str(app.bake_button['state']) == 'normal'
 
 
-def test_garbage_scenario_clears_previous_bsp_and_disables_bake(app, tiny):
+def test_garbage_scenario_clears_previous_bsp_and_disables_bake(app, tiny, monkeypatch):
     tags, *_ = tiny
     (tags / 'globals').mkdir()
     app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
     pump(app.root, lambda: app.blender is not None)
-    garbage = tags / 'garbage.scenario'; garbage.write_bytes(b'\xff\x00not a scenario')
+    garbage = tags / 'garbage.scenario'; garbage.write_bytes(b'not read by patched list_bsps')
+    monkeypatch.setattr(form_module, 'list_bsps', lambda *_args: (_ for _ in ()).throw(TypeError('wrong tag group')))
     app.set_scenario_file(garbage)
     assert app._scenario == '' and tuple(app.bsp_box['values']) == () and app.bsp_var.get() == ''
     assert str(app.bake_button['state']) == 'disabled' and app.scenario_error['text']
