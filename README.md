@@ -44,9 +44,7 @@ With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and
 
 The presets use more rays on a GPU than 0.1.0 did, because a GPU can afford them. On the CPU, Draft, Normal and High use 0.1.0's smaller counts; the app says so under the preset. Custom values are used as typed on any device.
 
-On an RTX 4060 laptop GPU, Blood Gulch bakes in:
-
-<!-- T8 TIMINGS -->
+On an RTX 4060 laptop GPU, Blood Gulch bakes in about 19 seconds at Draft, 29 at Normal and 67 at High. Version 0.1.0 took 24, 70 and 220.
 
 `OpenTool-cli.exe` in the same folder takes the same commands as `python lightmap.py`. Its `check` command tests every part of the download and prints one line per part.
 

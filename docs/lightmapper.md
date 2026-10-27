@@ -147,9 +147,15 @@ Other failures stop the command with an error message and a traceback.
 
 On a laptop with an RTX 4060, Blood Gulch, Rat Race and Chiron TL-34 each bake in about 20 to 40 seconds with the default settings. On the same machine's AMD Radeon 680M they take about 40 to 60 seconds. Both bake the pages and the per-vertex light on the GPU. In 0.1.0 the same kind of bake took two to seven minutes, because the per-vertex pass ran on the CPU.
 
-The Windows app's presets, timed on Blood Gulch with the RTX 4060:
+The Windows app's presets, timed on Blood Gulch with the RTX 4060 and the device on Auto:
 
-<!-- T8 TIMINGS -->
+| Preset | 0.2.0 | 0.1.0 |
+|---|---|---|
+| Draft | 19 s | 24 s |
+| Normal | 29 s | 70 s |
+| High | 67 s | 220 s |
+
+Rat Race at the default settings takes 17 s on the NVIDIA GPU, 35 s on the AMD Radeon 680M (where the denoiser runs on the CPU) and 181 s on the CPU only. Rat Race at Normal on the CPU only takes 57 s, with the CPU counts of 256 rays per texel and 1024 per vertex.
 
 `summary.json` records how long each stage took on your machine, and which device ran each one.
 
