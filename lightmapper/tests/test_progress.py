@@ -41,7 +41,8 @@ def test_parse_line(line, event):
 
 
 def test_fraction_spans():
-    from lightmapper.progress import fraction
+    from lightmapper.progress import fraction, STAGE_LABELS
+    assert fraction('vertex') == 0.80 and STAGE_LABELS['vertex'] == 'Lighting the vertices'
     assert fraction('gather') == 0 and fraction('blender') == .2
     assert fraction('blender', 2, 4) == pytest.approx(.5) and fraction('blender', 0, 0) == .2
     assert fraction('finish') == .9 and fraction('validate') == .98 and fraction('done') == 1

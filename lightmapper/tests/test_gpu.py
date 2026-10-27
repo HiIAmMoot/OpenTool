@@ -7,10 +7,22 @@ import pytest
 
 from lightmapper import gpu
 from lightmapper.gpu import AMD, NVIDIA, Adapter, DeviceError, choose, probe_choice
+from lightmapper.settings import Settings
 
 
 NV = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', NVIDIA, (1,), 'vulkan', True)
 RADEON = Adapter('AMD Radeon(TM) 680M', AMD, (2,), 'vulkan', True)
+
+
+def test_auto_cycles_chain_ends_with_oneapi():
+    assert gpu.choose('auto', None).cycles == ('OPTIX', 'CUDA', 'HIP', 'ONEAPI')
+    assert gpu.choose('auto', [gpu.Adapter('Arc', 0x8086, (9,), 'vulkan', True)]).cycles == ('OPTIX', 'CUDA', 'HIP', 'ONEAPI')
+
+
+@pytest.mark.parametrize('value', ['ONEAPI', 'oneapi'])
+def test_oneapi_setting_is_auto(value):
+    assert gpu.normalise_device(value) == 'auto'
+    assert Settings(device=value).device == 'auto'
 
 
 def test_auto_prefers_nvidia_then_amd():
@@ -23,7 +35,7 @@ def test_auto_prefers_nvidia_then_amd():
 
 def test_auto_without_ray_queries_keeps_the_cycles_gpu_chain_with_a_warning():
     c = choose('auto', [dataclasses.replace(NV, ray_query=False)])
-    assert (c.adapter, c.cycles, c.oidn, c.required) == (None, ('OPTIX', 'CUDA', 'HIP'), 'CPU', False)
+    assert (c.adapter, c.cycles, c.oidn, c.required) == (None, ('OPTIX', 'CUDA', 'HIP', 'ONEAPI'), 'CPU', False)
     assert c.warnings == ('no GPU with ray queries (NVIDIA GeForce RTX 4060 Laptop GPU); vertex pass on the CPU',)
 
 
@@ -38,12 +50,12 @@ def test_cpu_and_other_vendor_choices():
     assert (c.vendor, c.adapter, c.cycles, c.oidn, c.required, c.warnings) == (None, None, (), 'CPU', False, ())
     arc = Adapter('Intel Arc', 0x8086, (3,), 'vulkan', True)
     c = choose('auto', [arc])
-    assert (c.vendor, c.adapter, c.cycles, c.oidn) == ('other', arc, ('OPTIX', 'CUDA', 'HIP'), 'CPU')
+    assert (c.vendor, c.adapter, c.cycles, c.oidn) == ('other', arc, ('OPTIX', 'CUDA', 'HIP', 'ONEAPI'), 'CPU')
     assert c.warnings
 
 
 @pytest.mark.parametrize('setting,vendor,cycles,oidn,required', [
-    ('auto', None, ('OPTIX', 'CUDA', 'HIP'), 'CPU', False),
+    ('auto', None, ('OPTIX', 'CUDA', 'HIP', 'ONEAPI'), 'CPU', False),
     ('NVIDIA', 'nvidia', ('OPTIX', 'CUDA'), 'CUDA', True),
     ('HIP', 'amd', ('HIP',), 'HIP', True),
     ('CPU', None, (), 'CPU', False)])

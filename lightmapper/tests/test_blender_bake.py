@@ -361,7 +361,7 @@ def test_lit_quad_and_orientation(tmp_path):
     page = result.pages[0]
     assert page.shape == (16, 16, 3)
     assert page[:8, :8].mean() > 0 and page[8:, :].max() == 0 and page[:, 8:].max() == 0
-    assert result.device in ('OPTIX', 'CUDA', 'HIP', 'CPU')
+    assert result.device in ('OPTIX', 'CUDA', 'HIP', 'ONEAPI', 'CPU')
 
 
 @pytest.mark.blender

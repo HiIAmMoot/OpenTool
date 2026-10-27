@@ -4,12 +4,13 @@ from pathlib import Path
 from typing import Callable
 
 
-STAGES = ('gather', 'charts', 'scene', 'blender', 'finish', 'write', 'validate')
+STAGES = ('gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write', 'validate')
 STAGE_LABELS: dict[str, str] = {
     'gather': 'Reading the level',
     'charts': 'Laying out lightmap pages',
     'scene': 'Building the Blender scene',
     'blender': 'Baking in Blender',
+    'vertex': 'Lighting the vertices',
     'finish': 'Denoising and finishing pages',
     'write': 'Writing tags',
     'validate': 'Checking the result',
@@ -19,6 +20,7 @@ _SPANS = {
     'charts': (0.05, 0.15),
     'scene': (0.15, 0.20),
     'blender': (0.20, 0.90),
+    'vertex': (0.80, 0.90),
     'finish': (0.90, 0.95),
     'write': (0.95, 0.98),
     'validate': (0.98, 1.00),
@@ -40,8 +42,6 @@ def parse_line(line: str) -> tuple | None:
 def fraction(stage: str, pages_done: int = 0, pages_total: int = 0) -> float:
     if stage == 'done':
         return 1.0
-    if stage == 'vertex':
-        return 0.90
     start, end = _SPANS[stage]
     if stage == 'blender':
         if pages_total <= 0:

@@ -29,7 +29,7 @@ class DeviceError(RuntimeError):
 
 def normalise_device(value: str) -> str:
     names = {'auto': 'auto', 'nvidia': 'nvidia', 'amd': 'amd', 'cpu': 'cpu',
-             'optix': 'nvidia', 'cuda': 'nvidia', 'hip': 'amd'}
+             'optix': 'nvidia', 'cuda': 'nvidia', 'hip': 'amd', 'oneapi': 'auto'}
     if isinstance(value, str) and value.lower() in names:
         return names[value.lower()]
     raise ValueError(f'device must be one of auto, nvidia, amd, cpu, not {value!r}')
@@ -77,7 +77,7 @@ def dedupe_adapters(found: list[Adapter]) -> list[Adapter]:
 def choose(setting: str, adapters: list[Adapter] | None, reason: str | None = None) -> DeviceChoice:
     setting = normalise_device(setting)
     chains = {'nvidia': (('OPTIX', 'CUDA'), 'CUDA'), 'amd': (('HIP',), 'HIP'),
-              'other': (('OPTIX', 'CUDA', 'HIP'), 'CPU'), None: (('OPTIX', 'CUDA', 'HIP'), 'CPU')}
+              'other': (('OPTIX', 'CUDA', 'HIP', 'ONEAPI'), 'CPU'), None: (('OPTIX', 'CUDA', 'HIP', 'ONEAPI'), 'CPU')}
     if setting == 'cpu':
         return DeviceChoice(setting, None, None, (), 'CPU', False, ())
     required = setting != 'auto'

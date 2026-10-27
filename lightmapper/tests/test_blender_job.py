@@ -200,7 +200,7 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     np.testing.assert_array_equal(result.vertex_vector, qp[:, [1, 2, 0]] * 2)
     np.testing.assert_allclose(result.vertex_irradiance, [2.0, 8.0, 0.25])
     assert result.vertex_vector.dtype == np.float32 and result.vertex_irradiance.dtype == np.float32
-    assert result.device == 'OPTIX+CUDA+HIP-FAKE'
+    assert result.device == 'OPTIX+CUDA+HIP+ONEAPI-FAKE'
     assert set(result.stages) == {'start', 'scene', 'pages', 'vertex'}
     assert all(v >= 0 for v in result.stages.values())
     assert hasattr(result, 'written'), 'written masks were not returned'
@@ -285,7 +285,7 @@ def test_unprobed_auto_is_todays_job(tmp_path):
     write_job(tmp_path, make_scene(), [(8, 8)], [], {}, Settings())
     job = json.loads((tmp_path / 'job.json').read_text())
     assert (job['device'], job['cycles_devices'], job['cycles_required'], job['hiprt']) == (
-        'auto', ['OPTIX', 'CUDA', 'HIP'], False, False)
+        'auto', ['OPTIX', 'CUDA', 'HIP', 'ONEAPI'], False, False)
 
 
 def test_job_uses_the_supplied_choice(tmp_path):
