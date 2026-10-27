@@ -29,6 +29,19 @@ def test_gpu_check_names_the_ray_query_gpus(monkeypatch):
     assert names == ['files', 'xatlas', 'numba', 'runtime', 'denoiser', 'gpu', 'blender']
 
 
+def test_gpu_check_fails_when_slangpy_cannot_import(monkeypatch):
+    monkeypatch.setattr(check.gpu, 'run_probe', lambda: ([], "slangpy: No module named 'slangpy.x'"))
+    assert dict_of(check.run_checks(('blender',)))['gpu'] == (False, "slangpy: No module named 'slangpy.x'")
+
+
+def test_gpu_check_names_the_adapters_when_none_has_ray_queries(monkeypatch):
+    from lightmapper.gpu import Adapter, NVIDIA
+    no_rays = Adapter('No ray queries', NVIDIA, (2,), 'vulkan', False)
+    monkeypatch.setattr(check.gpu, 'run_probe', lambda: ([no_rays], None))
+    assert dict_of(check.run_checks(('blender',)))['gpu'] == (
+        True, 'no GPU with ray queries (adapters without them: No ray queries (vulkan))')
+
+
 def test_gpu_check_fails_when_the_probe_child_dies(monkeypatch):
     def dies():
         raise check.gpu.ProbeError('GPU probe process died (exit 3)')

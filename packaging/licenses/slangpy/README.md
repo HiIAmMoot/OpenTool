@@ -52,7 +52,7 @@ the texts are concatenated in that order.
 | `asmjit.txt` | [AsmJit](https://github.com/asmjit/asmjit) `e1b20711cc40c29ec4918b54e328ace96470f6e5`, `LICENSE.md` | Zlib |
 | `bit.txt` | SlangPy 0.43.1 `src/sgl/stl/bit.h`, Martin Moene notice from `REUSE.toml` and `LICENSES/BSL-1.0.txt` | Boost Software License 1.0 |
 | `dxc-api.txt` | Slang 2026.12 `external/dxc/dxcapi.h`, assigned `LicenseRef-UOI-NCSA` by its `REUSE.toml`; full text from `LICENSES/LicenseRef-UOI-NCSA.txt` (API declarations, not the excluded DXC DLL) | University of Illinois/NCSA |
-| `glslang.txt` | [glslang](https://github.com/KhronosGroup/glslang) `d1f52c8993a501bd52d4fbd044bfeb9ecdceb9f4`, `LICENSE.txt`; `slang-glslang.dll` | BSD and MIT notices |
+| `glslang.txt` | [glslang](https://github.com/KhronosGroup/glslang) `d1f52c8993a501bd52d4fbd044bfeb9ecdceb9f4`, `LICENSE.txt`; `slang-glslang.dll` | BSD, MIT, Apache-2.0 and GPL-3.0 with the Bison exception notices |
 | `spirv-tools.txt` | [SPIRV-Tools](https://github.com/KhronosGroup/SPIRV-Tools) `12f9d942a7b19c039bbf2a18b84a36bb7b12664a`, `LICENSE` | Apache-2.0 |
 | `spirv-headers.txt` | [SPIRV-Headers](https://github.com/KhronosGroup/SPIRV-Headers) `c63848ecf2200425511319fd8bf2c17b751e501e`, `LICENSE` | MIT |
 | `vulkan-headers.txt` | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) v1.4.347 (slang-rhi) and `39f924b810e561fd86b2558b6711ca68d4363f68` (Slang), identical `LICENSE.md` and `LICENSES/{Apache-2.0,MIT}.txt` | Apache-2.0 or MIT |

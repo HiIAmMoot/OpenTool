@@ -28,12 +28,18 @@ def include_slangpy(name):
                 'winpixeventruntime.dll', 'slang-llvm.dll'})
 
 
-binaries += [entry for entry in collect_dynamic_libs('slangpy') if include_slangpy(entry[0])]
-datas += [entry for entry in collect_data_files('slangpy') if include_slangpy(entry[0])]
+def in_slangpy(entry):
+    # (the source path would also match a checkout or venv under a folder named tests or optix; the
+    # destination is relative to the bundle, so only SlangPy's own layout is tested)
+    return include_slangpy(entry[1] + '/' + Path(entry[0]).name)
+
+
+binaries += [entry for entry in collect_dynamic_libs('slangpy') if in_slangpy(entry)]
+datas += [entry for entry in collect_data_files('slangpy') if in_slangpy(entry)]
 slangpy_modules = collect_submodules('slangpy', filter=include_slangpy)
 # setuptools and pkg_resources are not used at run time; they bring unlicensed vendored packages.
+# slangpy.torchintegration stays out of this list: SlangPy imports it unconditionally, even without PyTorch.
 excludes = ['torch', 'pytest', 'IPython', 'matplotlib', 'numpy.tests', 'setuptools', 'pkg_resources']
-# SlangPy imports torchintegration unconditionally, even without PyTorch.
 excludes += ['slangpy.tests', 'slangpy.benchmarks']
 scipy_root = Path(util.find_spec('scipy').origin).parent
 excludes += ['scipy.' + '.'.join(path.relative_to(scipy_root).parts)
@@ -50,6 +56,8 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# Dependency scanning brings back DLLs the hooks above dropped (dxcompiler, D3D12Core), so the filter runs
+# again on the final lists; entry names there are already relative to the bundle.
 # Dependency scanning found Oculus debug DLLs and a Java UCRT on PATH. Windows
 # provides these; bundling them can break Blender with mismatched system DLLs.
 system_dlls = {'dbghelp.dll', 'dbgcore.dll', 'ucrtbase.dll'}

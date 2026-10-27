@@ -101,8 +101,15 @@ def run_checks(skip: tuple[str, ...] = ()) -> list[tuple[str, bool, str]]:
         order = {gpu.NVIDIA: 0, gpu.AMD: 1}
         adapters = sorted(adapters, key=lambda adapter: order.get(adapter.vendor_id, 2))
         names = ', '.join(f'{adapter.name} ({adapter.backend})' for adapter in adapters if adapter.ray_query)
-        detail = names or f'no GPU with ray queries ({reason or "no adapters seen"})'
-        results.append(('gpu', True, detail))
+        if reason and reason.startswith('slangpy:'):
+            # (no GPU is a healthy machine; SlangPy not importing is a broken bundle)
+            results.append(('gpu', False, reason))
+        elif names:
+            results.append(('gpu', True, names))
+        else:
+            seen = reason or ('adapters without them: ' + ', '.join(f'{a.name} ({a.backend})' for a in adapters)
+                              if adapters else 'no adapters seen')
+            results.append(('gpu', True, f'no GPU with ray queries ({seen})'))
     except gpu.ProbeError as exc:
         results.append(('gpu', False, str(exc)))
 

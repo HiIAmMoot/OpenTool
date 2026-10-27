@@ -84,7 +84,8 @@ sgl.dll is built with NVIDIA OptiX support compiled in, as distributed in the Sl
 Slang 2026.12 (compiler, GLSL module and standard modules) and slang-rhi use Apache-2.0 WITH LLVM-exception. The remaining bundled components include:
 
 - fmt, robin-map, Dear ImGui (including its stb notices), stb image codecs, the RenderDoc API header, OffsetAllocator, NVAPI, libdeflate, miniz, unordered_dense, fast_float and mimalloc (MIT or an offered MIT option).
-- nanobind, nanothread, tevclient, OpenEXR, Imath, LZ4, glslang and cmark (BSD and MIT notices).
+- nanobind, nanothread, tevclient, OpenEXR, Imath, LZ4 and cmark (BSD and MIT notices).
+- glslang (BSD, MIT, Apache-2.0 and GPL-3.0 with the Bison exception notices).
 - GLFW, zlib and AsmJit (Zlib license); libpng (libpng license); libjpeg-turbo (IJG, BSD and Zlib terms). This software is based in part on the work of the Independent JPEG Group.
 - TinyEXR and its embedded OpenEXR code (BSD-3-Clause), LMDB (OpenLDAP Public License 2.8), SPIRV-Tools (Apache-2.0), SPIRV-Headers (MIT), and Vulkan-Headers (Apache-2.0 or MIT).
 - Inconsolata and Montserrat fonts (SIL Open Font License 1.1), kept under that license.

@@ -76,7 +76,10 @@ class LicenseTests(unittest.TestCase):
             done = subprocess.run([str(BUILD_PYTHON), str(Path(__file__).resolve()),
                                    'LicenseTests.test_real_build_environment_licenses_are_copied'],
                                   capture_output=True, text=True)
-            self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+            output = done.stdout + done.stderr
+            self.assertEqual(done.returncode, 0, output)
+            self.assertIn('Ran 1 test', output)
+            self.assertNotIn('skipped', output)
             return
         with tempfile.TemporaryDirectory() as temporary:
             destination = Path(temporary) / 'licenses'
