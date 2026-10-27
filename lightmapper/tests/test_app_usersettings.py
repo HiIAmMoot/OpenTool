@@ -1,7 +1,37 @@
+import json
+
 import pytest
 
 from opentool.usersettings import UserSettings, load, save, settings_path
 import opentool.usersettings as usersettings
+
+
+def test_device_round_trips_and_defaults_to_auto(tmp_path):
+    assert UserSettings().device == 'auto'
+    us = UserSettings(device='amd')
+    save(us, tmp_path / 's.json')
+    assert load(tmp_path / 's.json') == us
+
+
+def test_v0_1_0_settings_file_loads_with_auto_device(tmp_path):
+    old = {'tags': 'T', 'scenario': 's', 'bsp': 'b', 'blender': 'B', 'preset': 'High', 'new_names': True,
+           'backups': False, 'advanced': {'samples': '512'}, 'advanced_open': True, 'verbose': True}
+    path = tmp_path / 's.json'; path.write_text(json.dumps(old))
+    assert load(path) == UserSettings(**old, device='auto')
+
+
+@pytest.mark.parametrize('value', ['OPTIX', 'gpu', 3, None])
+def test_unknown_device_falls_back_to_auto(tmp_path, value):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'device': value}))
+    assert load(path).device == 'auto'
+
+
+@pytest.mark.parametrize('device', ['auto', 'nvidia', 'amd', 'cpu'])
+def test_known_device_is_loaded(tmp_path, device):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'device': device}))
+    assert load(path).device == device
 
 
 def test_round_trip(tmp_path):

@@ -118,7 +118,7 @@ def test_request_carries_the_form(app, tiny):
     pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
     app._select_preset('Draft')
     req = app.request()
-    assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', False, 64, None)
+    assert (req.scenario, req.bsp, req.new_names, req.settings.samples, req.settings.timeout_s) == ('level', 'room', False, 256, None)
     assert req.backups is True
     app.backups_var.set(False)
     assert app.request().backups is False
@@ -128,7 +128,7 @@ def test_request_carries_the_form(app, tiny):
 
 def test_draft_fills_all_advanced_fields(app):
     app._select_preset('Draft')
-    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1.0', samples='64', vertex_rays='256', sky_grid='2', bounces='1', page_max='512')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1.0', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512')
 
 
 def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):

@@ -6,27 +6,74 @@ from lightmapper.settings import Settings
 from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PRESETS, PRESET_HINTS, build_settings, parse_advanced
 
 
-def test_normal_is_todays_defaults():
+def test_gpu_preset_values():
+    assert PRESETS == {
+        'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=1024, sky_grid=2, bounces=1, page_max=512),
+        'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=4096, sky_grid=4, bounces=1, page_max=512),
+        'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=1024)}
+
+
+def test_cpu_preset_values_are_0_1_0s():
+    from opentool.presets import CPU_PRESETS
+
+    assert CPU_PRESETS == {'Draft': dict(samples=64, vertex_rays=256), 'Normal': dict(samples=256, vertex_rays=1024),
+                           'High': dict(samples=512, vertex_rays=4096)}
+
+
+def test_normal_is_the_defaults_with_gpu_counts():
     s = build_settings('Normal', {}, 'b.exe')
-    assert replace(s, blender=Settings().blender, timeout_s=7200) == replace(Settings(), page_max=512, vertex_rays=1024)
+    assert replace(s, blender=Settings().blender, timeout_s=7200) == replace(
+        Settings(), page_max=512, samples=1024, vertex_rays=4096, cpu_samples=256, cpu_vertex_rays=1024)
+
+
+def test_named_preset_with_the_apps_filled_fields_keeps_its_cpu_counts():
+    s = build_settings('High', dict(PRESETS['High']), 'b')
+    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (2048, 16384, 512, 4096)
+
+
+def test_an_overridden_count_is_used_on_every_device():
+    s = build_settings('Normal', {'samples': 300}, 'b')
+    assert (s.samples, s.cpu_samples, s.vertex_rays, s.cpu_vertex_rays) == (300, None, 4096, 1024)
+
+
+def test_custom_keeps_its_values_on_every_device():
+    s = build_settings(CUSTOM, dict(PRESETS['Draft']), 'b')
+    assert (s.cpu_samples, s.cpu_vertex_rays) == (None, None)
+
+
+def test_device_reaches_the_settings():
+    assert build_settings('Normal', {}, 'b').device == 'auto'
+    assert build_settings('Normal', {}, 'b', device='cpu').device == 'cpu'
 
 
 def test_app_settings_have_no_timeout():
     assert build_settings('Normal', {}, 'b').timeout_s is None
 
 
-def test_draft_and_high_values():
-    d, h = build_settings('Draft', {}, 'b'), build_settings('High', {}, 'b')
-    assert {key: getattr(d, key) for key in ADVANCED} == dict(texels_per_unit=1.0, samples=64, vertex_rays=256, sky_grid=2, bounces=1, page_max=512)
-    assert {key: getattr(h, key) for key in ADVANCED} == dict(texels_per_unit=4.0, samples=512, vertex_rays=4096, sky_grid=4, bounces=1, page_max=1024)
+@pytest.mark.parametrize('preset, samples, vertex_rays, cpu_samples, cpu_vertex_rays', [
+    ('Draft', 256, 1024, 64, 256),
+    ('Normal', 1024, 4096, 256, 1024),
+    ('High', 2048, 16384, 512, 4096),
+])
+def test_named_preset_counts(preset, samples, vertex_rays, cpu_samples, cpu_vertex_rays):
+    s = build_settings(preset, {}, 'b')
+    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (samples, vertex_rays, cpu_samples, cpu_vertex_rays)
+
+
+def test_an_overridden_vertex_count_is_used_on_every_device():
+    s = build_settings('High', {'vertex_rays': 300}, 'b')
+    assert (s.samples, s.cpu_samples, s.vertex_rays, s.cpu_vertex_rays) == (2048, 512, 300, None)
 
 
 def test_exact_preset_interface_values():
-    assert PRESETS == {'Draft': dict(texels_per_unit=1.0, samples=64, vertex_rays=256, sky_grid=2, bounces=1, page_max=512), 'Normal': dict(texels_per_unit=2.0, samples=256, vertex_rays=1024, sky_grid=4, bounces=1, page_max=512), 'High': dict(texels_per_unit=4.0, samples=512, vertex_rays=4096, sky_grid=4, bounces=1, page_max=1024)}
+    from opentool.presets import DEVICES, GPU_NOTE
+
+    assert DEVICES == (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
+    assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
     assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
     assert PAGE_MAX_CHOICES == (256, 512, 1024, 2048, 4096)
     assert LABELS == dict(texels_per_unit='Texel density', samples='Rays per texel', vertex_rays='Rays per vertex', sky_grid='Suns per sky light', bounces='Bounces', page_max='Max resolution')
-    assert CUSTOM == 'Custom' and PRESET_HINTS['Custom'] == 'Your own values from Advanced.'
+    assert CUSTOM == 'Custom' and PRESET_HINTS['Custom'] == 'Your own values from Advanced, on any device.'
 
 
 def test_custom_requires_all_values():

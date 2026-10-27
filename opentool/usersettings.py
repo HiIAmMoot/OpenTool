@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .presets import ADVANCED, CUSTOM, PRESET_NAMES
+from .presets import ADVANCED, CUSTOM, DEVICES, PRESET_NAMES
 
 
 @dataclass
@@ -19,6 +19,7 @@ class UserSettings:
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
     verbose: bool = False
+    device: str = 'auto'
 
 
 def settings_path() -> Path:
@@ -50,6 +51,8 @@ def load(path: Path | None = None) -> UserSettings:
             values[item.name] = value
     if values.get('preset', defaults.preset) not in (*PRESET_NAMES, CUSTOM):
         values['preset'] = defaults.preset
+    if values.get('device', defaults.device) not in tuple(value for _, value in DEVICES):
+        values['device'] = defaults.device
     return UserSettings(**values)
 
 
