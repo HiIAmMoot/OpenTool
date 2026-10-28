@@ -81,6 +81,7 @@ def test_write_job_files_load_back(tmp_path):
     with np.load(tmp_path / 'scene.npz') as data:
         expected_fields = [f.name for f in fields(Scene) if getattr(scene, f.name) is not None]
         assert sorted(data.files) == sorted(expected_fields + [
+            'tri_ignore_normals', 'query_ignore_normals',
             'occ_tri_emit_only', 'tri_twin', 'tri_twin_perm',
             'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])
         np.testing.assert_array_equal(data['tri_twin'], [-1, -1])
@@ -117,6 +118,19 @@ def test_query_inverse_survives_job_exchange(tmp_path):
     write_job(tmp_path, scene, [(16, 8)], [], {}, Settings())
     with np.load(tmp_path / 'scene.npz') as data:
         np.testing.assert_array_equal(data['query_inverse'], [2, 0, 1])
+
+
+@pytest.mark.parametrize('flagged', [False, True])
+def test_ignore_normals_flags_survive_job_exchange(tmp_path, flagged):
+    scene = make_scene()
+    if flagged:
+        scene.tri_ignore_normals = np.array([True])
+        scene.query_ignore_normals = np.array([True, False, True])
+    write_job(tmp_path, scene, [(16, 8)], [], {}, Settings())
+    with np.load(tmp_path / 'scene.npz') as data:
+        np.testing.assert_array_equal(data['tri_ignore_normals'], [flagged])
+        np.testing.assert_array_equal(data['query_ignore_normals'], [flagged, False, flagged])
+        assert data['tri_ignore_normals'].dtype == data['query_ignore_normals'].dtype == np.bool_
 
 
 def test_job_carries_the_cpu_counts(tmp_path):

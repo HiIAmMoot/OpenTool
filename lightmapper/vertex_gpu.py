@@ -3,6 +3,9 @@ edge ray lists that blender/bake.py's VertexPass builds, as float64 numpy so the
 pass does, and the pass itself, whose ray casting and shading run as ray queries in shaders/vertex_pass.slang.
 
 The constants are copies (bake.py cannot be imported outside Blender); a test parses bake.py and holds them equal.
+
+Ignore-normals queries use a separate uniform-sphere gather batch, reduced with 4pi/N, and take reached suns
+at full strength from either side. Both batches share the scene buffers and the same bounded dispatches.
 """
 
 from contextlib import contextmanager
@@ -59,6 +62,15 @@ def hemisphere(count):
     return np.stack([r * np.cos(phi), r * np.sin(phi), np.sqrt(1 - u1)], axis=1), phi, r
 
 
+def sphere(count):
+    i = np.arange(count)
+    u1 = (i + 0.5) / count
+    phi = 2 * np.pi * np.array([radical_inverse(int(k)) for k in i])
+    z = 1 - 2 * u1
+    r = np.sqrt(1 - z * z)
+    return np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=1), phi, r
+
+
 def query_frames(normals, seed):
     """(usable, n, tangent, bitangent, spin) per query; the spin turns every query's hemisphere by its own angle."""
     nrm = np.asarray(normals).astype(np.float64)
@@ -84,15 +96,15 @@ def ambient_table(job, query_class, tri_class):
     return table
 
 
-def gather_sums(lum, phi, r, h, n, tangent, bitangent, spin):
-    """pi / rays x the sum of lum x direction and of lum, without building a direction per ray: the ray's azimuth is
+def gather_sums(lum, phi, r, h, n, tangent, bitangent, spin, solid_angle=np.pi):
+    """solid_angle / rays x the sum of lum x direction and of lum, without building a direction per ray: the ray's azimuth is
     phi + spin, so its sine and cosine split into the spin-free sums over r cos phi and r sin phi."""
     rays = lum.shape[1]
     a, b, c = lum @ (r * np.cos(phi)), lum @ (r * np.sin(phi)), lum @ h
     cos_s, sin_s = np.cos(spin), np.sin(spin)
-    vector = np.pi / rays * (((a * cos_s - b * sin_s)[:, None] * tangent)
+    vector = solid_angle / rays * (((a * cos_s - b * sin_s)[:, None] * tangent)
                              + ((a * sin_s + b * cos_s)[:, None] * bitangent) + c[:, None] * n)
-    return vector, np.pi / rays * lum.sum(axis=1)
+    return vector, solid_angle / rays * lum.sum(axis=1)
 
 
 def _unit(direction):
@@ -104,11 +116,13 @@ def sun_rays(scene, job, usable, n):
     """(query, sun, origin, direction, cosine) of every sun ray the CPU pass casts, ordered by sun then query."""
     pos = scene['query_pos'].astype(np.float64)
     visible = sun_facing_queries(scene, job['suns'])
+    ignore_normals = scene.get('query_ignore_normals', np.zeros(len(pos), bool))
     query, sun, cosine, direction = [], [], [], []
     for k, s in enumerate(job['suns']):
         d = _unit(s['direction'])
-        c = n @ d
-        rows = np.flatnonzero(usable & (c > 0) & np.isin(scene['query_class'], s['classes']) & visible[:, k])
+        c = np.where(ignore_normals, 1.0, n @ d)
+        rows = np.flatnonzero(usable & (c > 0) & np.isin(scene['query_class'], s['classes'])
+                              & (ignore_normals | visible[:, k]))
         query.append(rows)
         sun.append(np.full(len(rows), k, np.int64))
         cosine.append(c[rows])
@@ -267,11 +281,10 @@ def _ambient_of(table, cls):
     return table[np.clip(cls + 1, 0, None)] * (cls >= -1)[:, None]
 
 
-def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
+def _trace(device, arrays, table, job, batches, shadow_rays, reduce):
     """(carried rgb, escaped) per shadow ray from the kernels; each gather dispatch's luminances go to
-    reduce(chunk, lum) as they land, so no matrix of every ray's luminance is ever held."""
+    reduce(ids, lum, hemi, solid_angle) as they land, so no matrix of every ray's luminance is ever held."""
     rays = int(job['vertex_rays'])
-    ids, pos, n, tangent, bitangent, spin, cls = queries
     origins, dirs = shadow_rays
     carried, escaped = np.ones((len(origins), 3)), np.ones(len(origins), bool)
     if not len(arrays['tris']):
@@ -299,24 +312,28 @@ def _trace(device, arrays, table, job, hemi, queries, shadow_rays, reduce):
     with _stage('build'):
         shared['world'], keep = _build_world(device, vertices, indices, len(arrays['positions']), arrays['tris'].size)
         gather, shadow = _kernels(device)
-    with _stage('gather'):
-        hemisphere_buffers = dict(hemi_phi=_upload(device, hemi[0], np.float32),
-                                  hemi_r=_upload(device, hemi[1], np.float32),
-                                  hemi_h=_upload(device, hemi[2], np.float32), rays=rays)
     step = max(1, min(cap, MAX_LUMINANCES_PER_CHUNK) // rays)
-    for first in range(0, len(ids), step):
-        chunk = slice(first, first + step)
+    for hemi, queries, solid_angle in batches:
+        ids, pos, n, tangent, bitangent, spin, cls = queries
+        if not len(ids):
+            continue
         with _stage('gather'):
-            out = _upload(device, np.zeros(len(ids[chunk]) * rays), np.float32, writable=True)
-            _dispatch(gather, len(ids[chunk]) * rays, vars=dict(
-                shared, **hemisphere_buffers, query_pos=_upload(device, pos[chunk], np.float32),
-                query_n=_upload(device, n[chunk], np.float32),
-                query_tangent=_upload(device, tangent[chunk], np.float32),
-                query_bitangent=_upload(device, bitangent[chunk], np.float32),
-                query_spin=_upload(device, spin[chunk], np.float32), query_class=_upload(device, cls[chunk], np.int32),
-                gather_count=len(ids[chunk]) * rays, lum_out=out))
-            lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])].astype(np.float64)
-        reduce(chunk, lum)
+            hemisphere_buffers = dict(hemi_phi=_upload(device, hemi[0], np.float32),
+                                      hemi_r=_upload(device, hemi[1], np.float32),
+                                      hemi_h=_upload(device, hemi[2], np.float32), rays=rays)
+        for first in range(0, len(ids), step):
+            chunk = slice(first, first + step)
+            with _stage('gather'):
+                out = _upload(device, np.zeros(len(ids[chunk]) * rays), np.float32, writable=True)
+                _dispatch(gather, len(ids[chunk]) * rays, vars=dict(
+                    shared, **hemisphere_buffers, query_pos=_upload(device, pos[chunk], np.float32),
+                    query_n=_upload(device, n[chunk], np.float32),
+                    query_tangent=_upload(device, tangent[chunk], np.float32),
+                    query_bitangent=_upload(device, bitangent[chunk], np.float32),
+                    query_spin=_upload(device, spin[chunk], np.float32), query_class=_upload(device, cls[chunk], np.int32),
+                    gather_count=len(ids[chunk]) * rays, lum_out=out))
+                lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])].astype(np.float64)
+            reduce(ids[chunk], lum, hemi, solid_angle)
     for first in range(0, len(origins), cap):
         chunk = slice(first, first + cap)
         with _stage('shadow'):
@@ -336,7 +353,6 @@ def run_vertex_pass(scene, job, textures, pages, device):
     rays = int(job['vertex_rays'])
     queries = len(scene['query_pos'])
     suns = job['suns']
-    local, phi, r = hemisphere(rays)
     usable, n, tangent, bitangent, spin = query_frames(scene['query_normal'], job.get('seed', 0))
     qcls = scene['query_class'].astype(np.int64)
     arrays = _scene_arrays(scene, textures, pages)
@@ -350,13 +366,22 @@ def run_vertex_pass(scene, job, textures, pages, device):
     ids = np.flatnonzero(usable)
     vector, irradiance = np.zeros((queries, 3)), np.zeros(queries)
 
-    def reduce(chunk, lum):
-        rows = ids[chunk]
-        vector[rows], irradiance[rows] = gather_sums(lum, phi, r, local[:, 2], n[rows], tangent[rows],
-                                                     bitangent[rows], spin[rows])
+    def reduce(rows, lum, hemi, solid_angle):
+        phi, r, h = hemi
+        vector[rows], irradiance[rows] = gather_sums(lum, phi, r, h, n[rows], tangent[rows],
+                                                     bitangent[rows], spin[rows], solid_angle)
+    ignore_normals = scene.get('query_ignore_normals', np.zeros(queries, bool))
+    batches = []
+    for flagged, sample, solid_angle in ((False, hemisphere, np.pi), (True, sphere, 4 * np.pi)):
+        rows = ids[ignore_normals[ids] == flagged]
+        if not len(rows):
+            continue
+        local, phi, r = sample(rays)
+        batches.append(((phi, r, local[:, 2]),
+                        (rows, scene['query_pos'][rows], n[rows], tangent[rows], bitangent[rows], spin[rows], qcls[rows]),
+                        solid_angle))
     carried, escaped = _trace(
-        device, arrays, table, job, (phi, r, local[:, 2]),
-        (ids, scene['query_pos'][ids], n[ids], tangent[ids], bitangent[ids], spin[ids], qcls[ids]),
+        device, arrays, table, job, batches,
         (np.concatenate([sun_origin, edge_origin]), np.concatenate([sun_dir, edge_dir])), reduce)
     # (the pass works in pi x tool units, the sun's strength carries pi and a gathered hit has no 1/pi, so the
     # ambient that tool adds as lum x normal takes pi too)

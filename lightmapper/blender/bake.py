@@ -5,6 +5,9 @@ pipeline through job.json, scene.npz, textures.npz and out.npz. The page bakes a
 passes into one float image per page; rows come back in our convention (row 0 = v 0). The per-vertex pass
 runs here only on the CPU path or a vertex-only relaunch: Blender's BVH tree casts the rays and numpy
 shades the hits in batches.
+
+Ignore-normals queries gather uniformly over the whole sphere with weight 4pi/N and take reached suns
+at full strength from either side. Their ambient stays the same as an ordinary query's.
 """
 
 import json
@@ -735,6 +738,14 @@ class VertexPass:
         r = np.sqrt(u1)
         return np.stack([r * np.cos(phi), r * np.sin(phi), np.sqrt(1 - u1)], axis=1), phi, r
 
+    def sphere(self, count):
+        i = np.arange(count)
+        u1 = (i + 0.5) / count
+        phi = 2 * np.pi * np.array([radical_inverse(int(k)) for k in i])
+        z = 1 - 2 * u1
+        r = np.sqrt(1 - z * z)
+        return np.stack([r * np.cos(phi), r * np.sin(phi), z], axis=1), phi, r
+
     def run(self):
         scene, job = self.scene, self.job
         rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
@@ -742,6 +753,8 @@ class VertexPass:
         queries = len(scene['query_pos'])
         local, phi, r = self.hemisphere(rays)
         height = local[:, 2]
+        sphere_local, _, sphere_r = self.sphere(rays)
+        ignore_normals = scene.get('query_ignore_normals', np.zeros(queries, bool))
         pos = scene['query_pos'].astype(np.float64)
         nrm = scene['query_normal'].astype(np.float64)
         length = np.linalg.norm(nrm, axis=1)
@@ -765,9 +778,11 @@ class VertexPass:
             bitangent = np.cross(n, tangent)
             spin = 2 * np.pi * ((ids * GOLDEN_FRACTION + job.get('seed', 0) * SEED_SPIN) % 1.0)
             angle = phi[None, :] + spin[:, None]
-            dirs = (r[None, :, None] * np.cos(angle)[:, :, None] * tangent[:, None, :]
-                    + r[None, :, None] * np.sin(angle)[:, :, None] * bitangent[:, None, :]
-                    + height[None, :, None] * n[:, None, :])
+            radius = np.where(ignore_normals[ids, None], sphere_r, r)
+            h = np.where(ignore_normals[ids, None], sphere_local[:, 2], height)
+            dirs = (radius[:, :, None] * np.cos(angle)[:, :, None] * tangent[:, None, :]
+                    + radius[:, :, None] * np.sin(angle)[:, :, None] * bitangent[:, None, :]
+                    + h[:, :, None] * n[:, None, :])
             # (tool starts every ray along its own direction: a start along the normal is inside the solid of a
             # neighbouring face that overhangs it)
             tri = np.full((m, rays), -1, np.int64)
@@ -782,8 +797,9 @@ class VertexPass:
             lum = self.shade(tri.ravel(), loc.reshape(-1, 3), dirs.reshape(-1, 3),
                              np.repeat(qcls[ids], rays)).reshape(m, rays)
             lum[~usable[ids]] = 0
-            vector[ids] = np.pi / rays * (lum[:, :, None] * dirs).sum(1)
-            irradiance[ids] = np.pi / rays * lum.sum(1)
+            solid_angle = np.where(ignore_normals[ids], 4 * np.pi, np.pi)
+            vector[ids] = solid_angle[:, None] / rays * (lum[:, :, None] * dirs).sum(1)
+            irradiance[ids] = solid_angle / rays * lum.sum(1)
             # (the pass works in pi x tool units, the sun's strength carries pi and a gathered hit has no 1/pi, so
             # the ambient that tool adds as lum x normal takes pi too; without it the sun-to-ambient ratio is off)
             flat = np.pi * (self.ambient_of(qcls[ids]) @ LUMA) * usable[ids]
@@ -794,9 +810,9 @@ class VertexPass:
                 d /= np.linalg.norm(d)
                 colour = np.float64(sun['color'])
                 for a in range(m):
-                    cosine = float(n[a] @ d)
+                    cosine = 1.0 if ignore_normals[ids[a]] else float(n[a] @ d)
                     if (not usable[ids[a]] or cosine <= 0 or int(qcls[ids[a]]) not in sun['classes']
-                            or not sun_visible[ids[a], sun_index]):
+                            or not (ignore_normals[ids[a]] or sun_visible[ids[a], sun_index])):
                         continue
                     cast_count += 1
                     carried = np.ones(3)

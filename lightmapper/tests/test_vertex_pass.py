@@ -29,11 +29,13 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
-                sun_facing=False, albedo_fallback=0.5):
+                 sun_facing=False, albedo_fallback=0.5, ignore_normals=None):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
     pages = pages or [np.zeros((16, 16, 3), np.float32)]
+    if ignore_normals is not None:
+        scene = dataclasses.replace(scene, query_ignore_normals=np.asarray(ignore_normals, bool))
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
                                    albedo_fallback=albedo_fallback)
     write_job(tmp_path, scene, [(p.shape[1], p.shape[0]) for p in pages], list(suns), ambient or {}, settings,
@@ -153,6 +155,46 @@ def test_sun_only_vector_points_at_the_sun(tmp_path):
     assert e == pytest.approx(3.0, rel=1e-3)
     assert np.linalg.norm(v / e) > 0.98
     np.testing.assert_allclose(v / np.linalg.norm(v), [0, 0, 1], atol=1e-6)
+
+
+def ignore_normals_sun_scene(behind=False):
+    receivers = [full_quad(casts=False), dict(quad=floor(10, 14, 0, 4), casts=False)]
+    scene = build(receivers)
+    direction = (0, np.sqrt(3) / 2, -0.5 if behind else 0.5)
+    return dict(receivers=receivers, suns=[sun(direction, strength=3.0)], query=scene.positions,
+                normals=scene.normals, inverse=np.arange(8), ignore_normals=[True] * 4 + [False] * 4)
+
+
+@pytest.mark.blender
+def test_ignore_normals_query_takes_a_sun_from_behind_at_full_strength(tmp_path):
+    case = ignore_normals_sun_scene(behind=True)
+    out = run_driver(tmp_path, **case)
+    np.testing.assert_allclose(out['irradiance'][:4], 3.0, rtol=1e-6)
+    np.testing.assert_allclose(out['vector'][0], 3.0 * case['suns'][0].direction, rtol=1e-6)
+    np.testing.assert_array_equal(out['irradiance'][4:], 0)
+    assert out['sun_lit'][:4].all() and not out['sun_lit'][4:].any()
+
+
+@pytest.mark.blender
+def test_ignore_normals_query_counts_a_sun_at_60_degrees_fully(tmp_path):
+    case = ignore_normals_sun_scene()
+    out = run_driver(tmp_path, **case)
+    np.testing.assert_allclose(out['irradiance'][:4], 3.0, rtol=1e-6)
+    np.testing.assert_allclose(out['vector'][0], 3.0 * case['suns'][0].direction, rtol=1e-6)
+    np.testing.assert_allclose(out['irradiance'][4:], 1.5, rtol=1e-6)
+
+
+def ignore_normals_emitter_scene():
+    return dict(receivers=[dict(quad=floor(-200, 200, -200, 200), emission=(4, 4, 4))],
+                query=((0, 0, 2), (0, 0, 2)), ignore_normals=[True, False], rays=1024)
+
+
+@pytest.mark.blender
+def test_ignore_normals_gather_sees_an_emitter_behind_the_query(tmp_path):
+    out = run_driver(tmp_path, **ignore_normals_emitter_scene())
+    assert out['irradiance'][0] == pytest.approx(2 * np.pi * 4, rel=0.03)
+    assert out['vector'][0, 2] == pytest.approx(-np.pi * 4, rel=0.03)
+    assert out['irradiance'][1] == 0
 
 
 @pytest.mark.blender

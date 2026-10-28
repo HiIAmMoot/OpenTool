@@ -17,7 +17,7 @@ from lightmapper.vertex_gpu import (GOLDEN_FRACTION, GROUP_SIZE, SEED_SPIN, GpuP
 from conftest import LIGHTMAPPER_BLENDER
 from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
-                              roof, run_driver, twin_scene,
+                              roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
                               unpaired_back_face_scene, wall_facing_minus_x)
 
 
@@ -56,6 +56,27 @@ def test_gather_sums_equal_the_per_ray_sum():
     vector, irradiance = gather_sums(lum, phi, r, local[:, 2], n, t, b, spin)
     np.testing.assert_allclose(vector, np.pi / rays * (lum[:, :, None] * dirs).sum(1), rtol=0, atol=1e-12)
     np.testing.assert_allclose(irradiance, np.pi / rays * lum.sum(1), rtol=0, atol=1e-12)
+
+
+def test_sphere_is_the_cpu_pass_formula():
+    count = 1024
+    local, phi, r = vertex_gpu.sphere(count)
+    np.testing.assert_allclose(local[:, 2], 1 - 2 * (np.arange(count) + 0.5) / count, atol=1e-15)
+    np.testing.assert_allclose(np.linalg.norm(local, axis=1), 1, atol=1e-15)
+    assert abs(local[:, 2].mean()) <= 1 / count
+    source = vertex_gpu.SHADERS.parent / 'blender' / 'bake.py'
+    tree = ast.parse(source.read_text())
+    cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'VertexPass')
+    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == 'sphere')
+    namespace = {'np': np, 'radical_inverse': vertex_gpu.radical_inverse}
+    exec(compile(ast.Module([method], []), str(source), 'exec'), namespace)
+    theirs = namespace['sphere'](None, count)
+    for ours, cpu in zip((local, phi, r), theirs):
+        np.testing.assert_array_equal(ours, cpu)
+    _, n, t, b, spin = query_frames([[0, 0, 1]], seed=0)
+    vector, irradiance = gather_sums(np.ones((1, count)), phi, r, local[:, 2], n, t, b, spin, 4 * np.pi)
+    np.testing.assert_allclose(irradiance, [4 * np.pi], rtol=1e-12)
+    assert abs(vector[0, 2]) < 1e-12
 
 
 def test_ambient_table_is_indexed_by_class_plus_one():
@@ -205,6 +226,9 @@ COVER = dict(quad=floor(-50, 50, -50, 50, z=1.0))
 GREY = np.uint8([[[128, 128, 128, 255]] * 2] * 2)
 RANDOM_TEXELS = np.random.default_rng(3).integers(0, 256, (4, 4, 4)).astype(np.uint8)
 CASES = {   # name -> run_driver kwargs, the scenes of test_vertex_pass.py
+    'ignore_normals_sun_behind': ignore_normals_sun_scene(True),
+    'ignore_normals_sun_60': ignore_normals_sun_scene(),
+    'ignore_normals_emitter_behind': ignore_normals_emitter_scene(),
     'sun_only': dict(receivers=[full_quad()], suns=[sun(UP, strength=3.0)]),
     'emissive_wall': dict(receivers=[full_quad(), wall_facing_minus_x(emission=(4, 4, 4))], query=((1, 2, 0),),
                           pages=[RAMP]),
@@ -379,6 +403,7 @@ def test_dispatches_stay_under_the_ray_budget(monkeypatch, tmp_path, vendor, dev
     queries = 3 * 4096 // 64 + 1
     suns = [sun((0.01 * k, 0.02, 1.0)) for k in range(64)]
     arrays, job = scene_folder(tmp_path, queries, suns)
+    arrays['query_ignore_normals'] = np.arange(queries) % 2 == 0
     seen = []
     real = vertex_gpu._dispatch
 

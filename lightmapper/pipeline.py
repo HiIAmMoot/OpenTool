@@ -23,7 +23,7 @@ from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, read_geometry
 from .formats.scenery import gather_occluders
 from .formats.vertices import ENV, unpack_uncompressed
-from .gather import BASE_ONLY_GROUPS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
+from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
 from .radiosity import finalize, query_points
 from .raster import coverage
@@ -128,6 +128,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     texture_ids = [textures.index(shader.albedo) if shader.albedo else -1 for shader in shaders]
     envs, lm_uvs, tex_uvs, triangles = [], [], [], []
     tri_pages, tri_classes, shadows, emissions, tex_ids, cutouts, tints = [], [], [], [], [], [], []
+    ignore_normals = []
     base = 0
     for p, page in enumerate(pages):
         for material in page.materials:
@@ -143,6 +144,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             base += len(material.env)
             tri_pages.append(np.full(count, p, np.int16))
             tri_classes.append(classes[material.surface_ids])
+            ignore_normals.append(np.full(count, bool(radiosity[group].flags & IGNORE_NORMALS), np.bool_))
             shadows.append(np.full(count, shader.casts_shadow, np.bool_))
             emissions.append(np.tile(emission(radiosity[group]), (count, 1)))
             tex_ids.append(np.full(count, texture_ids[group], np.int32))
@@ -158,6 +160,10 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     tris = join(triangles, (0, 3), np.int32)
     tri_class = join(tri_classes, (0,), np.int16)
     pos, normal, query_class, inverse = query_points(env, tris, tri_class)
+    tri_ignore_normals = join(ignore_normals, (0,), np.bool_)
+    query_ignore_normals = np.zeros(len(pos), np.bool_)
+    # (a welded query takes the flag from any owner, not only the first triangle)
+    query_ignore_normals[inverse[tris[tri_ignore_normals]].ravel()] = True
     occluders = gather_occluders(scenario, tags, bsp_index)
     occ_shaders = [shader_texture(tags, group, path, (u, v))
                    for group, path, u, v in occluders.shaders]
@@ -203,7 +209,8 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             np.zeros(emit_count, np.bool_)]),
         occ_tri_emission=join([occ_emission[occluders.tri_shader], *emit_emission], (0, 3), np.float32),
         occ_tri_tint=join([np.ones((scenery_count, 3)), *emit_tints], (0, 3), np.float32),
-        query_pos=pos, query_normal=normal, query_class=query_class, query_inverse=inverse)
+        query_pos=pos, query_normal=normal, query_class=query_class, query_inverse=inverse,
+        tri_ignore_normals=tri_ignore_normals, query_ignore_normals=query_ignore_normals)
     return scene, inverse, textures
 
 

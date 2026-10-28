@@ -736,6 +736,31 @@ def test_clockwise_triangle_reaches_blender_counter_clockwise(tiny, monkeypatch)
         assert (z < 0) == (source == 0)
 
 
+@pytest.mark.parametrize('flagged_first', [False, True])
+def test_scene_flags_ignore_normals_triangles_and_their_queries(tiny, flagged_first):
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import ShaderRadiosity
+
+    tags, _, _ = tiny
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    other = replace(group, env=group.env.copy())
+    other.env['position'][3] = group.env['position'][0]
+    geometry.groups.append(other)
+    materials = [OutMaterial(0, group.env[:3], np.zeros(3, LM), np.uint16([[0, 1, 2]]), np.int32([0])),
+                 OutMaterial(1, other.env[3:], np.zeros(3, LM), np.uint16([[0, 1, 2]]), np.int32([1]))]
+    flags = [flagged_first, not flagged_first]
+    radiosity = [ShaderRadiosity(2 if flag else 0, 0, 0., np.zeros(3), np.ones(3)) for flag in flags]
+    scene, inverse, _ = api()._scene(tags, read_tag(tags / 'level.scenario'), 0, geometry,
+        [OutPage(8, 8, materials)], radiosity, np.zeros(2, np.int16))
+    np.testing.assert_array_equal(scene.tri_ignore_normals, flags)
+    assert inverse[0] == inverse[3]
+    assert len(scene.query_pos) == 5
+    assert scene.query_ignore_normals[inverse[0]]
+    np.testing.assert_array_equal(scene.query_ignore_normals[inverse[[1, 2, 4, 5]]],
+                                  [flagged_first] * 2 + [not flagged_first] * 2)
+
+
 def test_scene_at_stock_surface_cap(tiny):
     from lightmapper.formats.bsp import BspGeometry, OutMaterial, OutPage, SourceGroup
     from lightmapper.gather import ShaderRadiosity
@@ -755,7 +780,8 @@ def test_scene_at_stock_surface_cap(tiny):
         materials.append(OutMaterial(len(groups) - 1, env, np.zeros(len(env), LM), tris, ids))
     final = read_tag(tags / 'room.scenario_structure_bsp').root.block('lightmaps')[-1]
     geometry = BspGeometry(groups, final, np.zeros(total, np.int16), np.array([-1], np.int16))
-    radiosity = [ShaderRadiosity(0, 0, 2., np.array([.25, .5, 1.]), np.ones(3))] * len(groups)
+    radiosity = [ShaderRadiosity(2 if k % 2 == 0 else 0, 0, 2., np.array([.25, .5, 1.]), np.ones(3))
+                 for k in range(len(groups))]
     classes = np.arange(total, dtype=np.int32) % 3 - 1
     scene, inverse, textures = api()._scene(tags, read_tag(tags / 'level.scenario'), 0,
         geometry, [OutPage(1024, 1024, materials)], radiosity, classes)
@@ -766,6 +792,9 @@ def test_scene_at_stock_surface_cap(tiny):
     assert scene.query_class[:9].tolist() == [0, 0, 0, -1, -1, -1, 1, 1, 1]
     np.testing.assert_array_equal(inverse, np.arange(393216))
     np.testing.assert_array_equal(scene.query_inverse, inverse)
+    expected_flags = (np.arange(total) // 20000) % 2 == 0
+    np.testing.assert_array_equal(scene.tri_ignore_normals, expected_flags)
+    np.testing.assert_array_equal(scene.query_ignore_normals, np.repeat(expected_flags, 3))
     np.testing.assert_array_equal(scene.tri_emission, np.tile([.5, 1., 2.], (total, 1)))
     assert scene.tri_casts_shadow.all()
     assert not scene.tri_cutout.any()
