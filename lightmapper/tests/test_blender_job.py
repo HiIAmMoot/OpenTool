@@ -83,6 +83,7 @@ def test_write_job_files_load_back(tmp_path):
         assert sorted(data.files) == sorted(expected_fields + [
             'tri_ignore_normals', 'query_ignore_normals',
             'occ_tri_emit_only', 'tri_twin', 'tri_twin_perm',
+            'texel_pos', 'texel_normal', 'texel_class', 'texel_page', 'texel_xy',
             'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])
         np.testing.assert_array_equal(data['tri_twin'], [-1, -1])
         np.testing.assert_array_equal(data['tri_twin_perm'], [[0, 1, 2], [0, 1, 2]])
@@ -104,7 +105,7 @@ def test_write_job_files_load_back(tmp_path):
     assert sorted(job) == sorted([
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
-        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ambiguous_twin_groups',
+        'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ignore_normals_mode', 'ambiguous_twin_groups',
         'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']

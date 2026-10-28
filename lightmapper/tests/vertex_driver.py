@@ -31,12 +31,14 @@ def main():
     if os.path.exists(probe_path):
         with open(probe_path) as handle:
             probes = json.load(handle)
-        out = {'uv': [], 'radiance': [], 'tri': []}
+        out = {'uv': [], 'radiance': [], 'tri': [], 'radiance_rgb': []}
         for origin, direction, cls in probes:
             tri, loc = tracer.cast(np.float64(origin), np.float64(direction))
             out['tri'].append(tri)
             out['uv'].append(tracer.hit_lm_uv(tri, loc) if tri >= 0 else (np.nan, np.nan))
             out['radiance'].append(tracer.radiance(tri, loc, np.float64(direction), cls) if tri >= 0 else np.nan)
+            out['radiance_rgb'].append(tracer.shade_rgb(np.array([tri]), np.array([loc]),
+                                       np.float64([direction]), np.array([cls]))[0] if tri >= 0 else [np.nan] * 3)
         np.savez(os.path.join(root, 'probe.npz'), **{k: np.array(v) for k, v in out.items()})
         return
     if os.path.exists(os.path.join(root, 'sun_facing')):
@@ -45,7 +47,8 @@ def main():
     vector, irradiance, rays = tracer.run()
     np.savez(os.path.join(root, 'vp.npz'), vector=vector, irradiance=irradiance, rays=rays,
              edge_sun_lit=tracer.edge_sun_lit, sun_lit=tracer.sun_lit,
-             vertex_sun_throughput=tracer.sun_throughput)
+             vertex_sun_throughput=tracer.sun_throughput,
+             texel_rgb=getattr(tracer, 'texel_rgb', np.empty((0, 3))))
 
 
 main()

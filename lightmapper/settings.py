@@ -55,6 +55,7 @@ class Settings(ChartSettings):
     sky_grid: int = 4
     # tool never lets object shaders emit; off leaves only the BSP's own emitters, for an in-game A/B
     scenery_emission: bool = True
+    ignore_normals_mode: str = 'tool'
     # how far a plane-away face's sun reaches in from its lit boundary: tool's final-quality floor for the mesh cells
     # its radiosity refines to near a shadow edge (non-emissive, detail level 0)
     reach: float = 0.225
@@ -71,6 +72,8 @@ class Settings(ChartSettings):
     def __post_init__(self):
         super().__post_init__()
         self.device = gpu.normalise_device(self.device)
+        if self.ignore_normals_mode not in ('tool', 'enhanced'):
+            raise ValueError(f"ignore_normals_mode must be one of ('tool', 'enhanced'), not {self.ignore_normals_mode!r}")
         for name in ('cpu_samples', 'cpu_vertex_rays'):
             value = getattr(self, name)
             if value is not None and value < 1:

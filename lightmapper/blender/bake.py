@@ -155,7 +155,7 @@ def reset_mask(image):
 
 
 def make_material(name, texture, cutout, emission, job, page_image, tint=(), emit_only=False, mask_image=None,
-                  both_sides=False):
+                  both_sides=False, zero_albedo=False, glow_image=None):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     nodes, links = material.node_tree.nodes, material.node_tree.links
@@ -179,6 +179,10 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
         links.new(sampled.outputs['Color'], scale.inputs[0])
         links.new(scale.outputs['Vector'], diffuse.inputs['Color'])
         alpha_socket = sampled.outputs['Alpha']
+    if zero_albedo:
+        for link in list(diffuse.inputs['Color'].links):
+            links.remove(link)
+        diffuse.inputs['Color'].default_value = (0, 0, 0, 1)
     shader = diffuse.outputs['BSDF']
     if both_sides:
         back = nodes.new('ShaderNodeBsdfTranslucent')
@@ -207,6 +211,25 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
         links.new(shader, add.inputs[0])
         links.new(glow.outputs['Emission'], add.inputs[1])
         shader = add.outputs['Shader']
+    if glow_image is not None:
+        uv = nodes.new('ShaderNodeUVMap')
+        uv.uv_map = UV_LIGHTMAP
+        image = nodes.new('ShaderNodeTexImage')
+        image.image = glow_image
+        image.extension = 'EXTEND'
+        links.new(uv.outputs['UV'], image.inputs['Vector'])
+        multiply = nodes.new('ShaderNodeVectorMath')
+        multiply.operation = 'MULTIPLY'
+        links.new(image.outputs['Color'], multiply.inputs[0])
+        colour = diffuse.inputs['Color']
+        if colour.is_linked:
+            links.new(colour.links[0].from_socket, multiply.inputs[1])
+        else:
+            multiply.inputs[1].default_value = colour.default_value[:3]
+        glow = nodes.new('ShaderNodeEmission')
+        links.new(multiply.outputs['Vector'], glow.inputs['Color'])
+        # no backface gate: enhanced receivers send their gathered light to both sides
+        shader = glow.outputs['Emission']
     # the hole cuts the emission too: a transparent texel must not glow
     if cutout and alpha_socket is not None:
         mix = nodes.new('ShaderNodeMixShader')
@@ -338,7 +361,7 @@ def receiver_sun_bits(scene, suns):
     return facing
 
 
-def build_objects(scene_data, job, textures, page_images, mask_images=()):
+def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=()):
     """Receivers per page, class, shadow and sun visibility; occluders per material and shadow."""
     positions, tris = scene_data['positions'], scene_data['tris']
     receivers = []
@@ -373,7 +396,10 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
         distinct = sorted(set(tri_props))
         materials = [make_material(f'recv_{page}_{cls}_{n}', textures[tex] if tex >= 0 else None, cut, emit,
                                    job, page_images[page], tint,
-                                   mask_image=mask_images[page] if mask_images else None, both_sides=bool(key[3]))
+                                   mask_image=mask_images[page] if mask_images else None,
+                                   both_sides=bool(key[3]) and job.get('ignore_normals_mode') != 'enhanced',
+                                   zero_albedo=bool(key[3]) and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
+                                   glow_image=glow_images[page] if glow_images and bool(key[3]) else None)
                      for n, (tex, cut, emit, tint) in enumerate(distinct)]
         obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
@@ -463,15 +489,16 @@ def read_page(image, h, w):
     return buffer.reshape(h, w, 4)[:, :, :3].copy()
 
 
-def receiver_diffuse_scale(scene, page, width, height):
+def receiver_diffuse_scale(scene, page, width, height, enhanced=False, coverage=False):
     rows = np.flatnonzero(scene['tri_page'] == page)
     flags = scene.get('tri_ignore_normals', np.zeros(len(scene['tris']), bool))[rows]
-    if not flags.any():
+    if not flags.any() and not coverage:
         return None
     width, height = 3 * width, 3 * height
-    scale = np.ones((height, width), np.float32)
-    if flags.all():
-        scale.fill(1 / BACK_SIDE_SHARE)
+    scale = np.full((height, width), -1 if coverage else 1, np.float32)
+    flagged_value = 1 if coverage else (0 if enhanced else 1 / BACK_SIDE_SHARE)
+    if flags.all() and not coverage:
+        scale.fill(flagged_value)
         return scale
     occupied = np.zeros((height, width), bool)
     uv = scene['lm_uv'].astype(np.float64) * [width, height]
@@ -491,7 +518,7 @@ def receiver_diffuse_scale(scene, page, width, height):
             ca = (a[0] - c[0]) * (y - c[1]) - (a[1] - c[1]) * (x - c[0])
             claimed = occupied[first:end, x0:x1 + 1]
             inside = (((ab >= 0) & (bc >= 0) & (ca >= 0)) | ((ab <= 0) & (bc <= 0) & (ca <= 0))) & ~claimed
-            scale[first:end, x0:x1 + 1][inside] = 1 / BACK_SIDE_SHARE if flagged else 1
+            scale[first:end, x0:x1 + 1][inside] = flagged_value if flagged else (0 if coverage else 1)
             claimed[inside] = True
     # lightmap UVs are flipped on the bake mesh; read_page returns Blender's bottom row first
     return scale[::-1].copy()
@@ -624,7 +651,8 @@ def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
                                                sentinel, h, w, job, diffuse_scale)
     image.pixels.foreach_set(sentinel)
     bpy.ops.object.bake(type='EMIT', margin=0, use_clear=False, target='IMAGE_TEXTURES')
-    emit, emit_written = downsample_written(read_page(image, 3 * h, 3 * w))
+    # (the glow run's emitters are the flagged receivers, whose own texels the gather has already filled)
+    emit, emit_written = downsample_written(read_page(image, 3 * h, 3 * w), diffuse_scale if job.get('glow') else None)
     warn_if_masks_differ(written, emit_written, page)
     # Blender's row 0 is the bottom; the diffuse part alone comes back too, for the vertex pass to add emission once
     return (corrected + emit)[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
@@ -758,10 +786,10 @@ class VertexPass:
             remaining -= distance + RAY_EPSILON
         return -1, None
 
-    def shade(self, tri, loc, direction, cls):
+    def shade_rgb(self, tri, loc, direction, cls, with_ambient=True):
         """Radiance arriving along each ray: tri (n,) with -1 for a miss, loc (n,3), direction (n,3), cls (n,) of the query."""
         n = len(tri)
-        radiance = np.zeros(n)
+        radiance = np.zeros((n, 3))
         # a ray that misses sees the sky, which tool never gathers: the flat ambient term in run() stands for it
         hit = np.flatnonzero(tri >= 0)
         if not len(hit):
@@ -774,10 +802,10 @@ class VertexPass:
         albedo[self.glows[t] & ~self.casts[t]] = 0
         recv = t < self.n_recv
         facing = (direction[hit] * self.normals[t]).sum(1) < 0
-        lit = np.zeros(len(hit))
+        lit = np.zeros((len(hit), 3))
         occluder = ~recv
-        lit[occluder] = (albedo[occluder] * self.ambient_of(cls[hit][occluder])
-                         + self.emission[t][occluder] * facing[occluder, None]) @ LUMA
+        lit[occluder] = (albedo[occluder] * (self.ambient_of(cls[hit][occluder]) if with_ambient else 0)
+                          + self.emission[t][occluder] * facing[occluder, None])
         front = recv & facing
         if front.any():
             ft = t[front]
@@ -786,10 +814,13 @@ class VertexPass:
             for k in np.unique(self.page_of[ft]):
                 rows = self.page_of[ft] == k
                 page_value[rows] = sample_bilinear(self.pages[k], lm[rows, 0], lm[rows, 1], False)
-            colour = albedo[front] * (page_value + self.ambient_of(self.class_of[ft])) + self.emission[ft]
-            lit[front] = colour @ LUMA
+            colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) if with_ambient else 0)) + self.emission[ft]
+            lit[front] = colour
         radiance[hit] = lit
         return radiance
+
+    def shade(self, tri, loc, direction, cls):
+        return self.shade_rgb(tri, loc, direction, cls) @ LUMA
 
     def radiance(self, tri, loc, direction, cls):
         return float(self.shade(np.array([tri]), np.array([loc]), np.array([direction]), np.array([cls]))[0])
@@ -812,6 +843,7 @@ class VertexPass:
 
     def run(self):
         scene, job = self.scene, self.job
+        texel_rays = self.gather_texels()
         rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
         self.rays_used = rays
         queries = len(scene['query_pos'])
@@ -828,7 +860,7 @@ class VertexPass:
         qcls = scene['query_class'].astype(np.int64)
         vector = np.zeros((queries, 3))
         irradiance = np.zeros(queries)
-        cast_count = 0
+        cast_count = texel_rays
         sun_visible = sun_facing_queries(scene, job['suns'])
         # which queries each sun reaches, for the faces whose plane turns away from it (they take it from their corners)
         self.sun_lit = np.zeros((queries, len(job['suns'])), np.bool_)
@@ -906,6 +938,64 @@ class VertexPass:
                         (edge_pos[i].astype(np.float64) + RAY_EPSILON * d).tolist(), d.tolist(), np.ones(3))[0] < 0
         return vector.astype(np.float32), irradiance.astype(np.float32), cast_count
 
+    def gather_texels(self):
+        scene, job = self.scene, self.job
+        count = len(scene.get('texel_pos', ()))
+        self.texel_rgb = np.zeros((count, 3), np.float32)
+        if not count:
+            return 0
+        rays = max(1, round(job.get('cpu_samples', job['samples']) / 9))
+        local, phi, r = self.sphere(rays)
+        casts = 0
+        pos = scene['texel_pos'].astype(np.float64)
+        normals = scene['texel_normal'].astype(np.float64)
+        length = np.linalg.norm(normals, axis=1)
+        usable = np.isfinite(length) & (length > 1e-12)
+        normals /= np.where(usable, length, 1)[:, None]
+        for first in range(0, count, QUERY_CHUNK):
+            ids = np.arange(first, min(first + QUERY_CHUNK, count))
+            n = normals[ids]
+            axis = np.where((np.abs(n[:, 0]) < .9)[:, None], [[1., 0, 0]], [[0, 1., 0]])
+            tangent = np.cross(n, axis)
+            tangent /= np.where(usable[ids], np.linalg.norm(tangent, axis=1), 1)[:, None]
+            bitangent = np.cross(n, tangent)
+            spin = 2 * np.pi * ((ids * GOLDEN_FRACTION + job.get('seed', 0) * SEED_SPIN) % 1)
+            angle = phi[None, :] + spin[:, None]
+            dirs = (r[None, :, None] * np.cos(angle)[:, :, None] * tangent[:, None, :]
+                    + r[None, :, None] * np.sin(angle)[:, :, None] * bitangent[:, None, :]
+                    + local[None, :, 2, None] * n[:, None, :])
+            tri = np.full((len(ids), rays), -1, np.int64)
+            loc = np.zeros((len(ids), rays, 3))
+            for a in np.flatnonzero(usable[ids]):
+                for b in range(rays):
+                    index, point = self.cast((pos[ids[a]] + RAY_EPSILON * dirs[a, b]).tolist(), dirs[a, b].tolist())
+                    if index >= 0:
+                        tri[a, b], loc[a, b] = index, point
+            casts += int(usable[ids].sum()) * rays
+            rgb = self.shade_rgb(tri.ravel(), loc.reshape(-1, 3), dirs.reshape(-1, 3),
+                                 np.repeat(scene['texel_class'][ids], rays), with_ambient=False)
+            self.texel_rgb[ids] = 4 / rays * rgb.reshape(len(ids), rays, 3).sum(axis=1)
+            for sun in job['suns']:
+                d = np.float64(sun['direction'])
+                d /= np.linalg.norm(d)
+                for a in ids[usable[ids] & np.isin(scene['texel_class'][ids], sun['classes'])]:
+                    carried = np.ones(3)
+                    casts += 1
+                    if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
+                        self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
+        # the gathered value replaces only flagged samples; the baked page is already zero there
+        self.pages = [p.copy() for p in self.pages]
+        for page, value in enumerate(self.pages):
+            h, w = value.shape[:2]
+            owned = receiver_diffuse_scale(scene, page, w, h, coverage=True)[::-1] >= 0
+            owned = owned.reshape(h, 3, w, 3).sum(axis=(1, 3))
+            rows = scene['texel_page'] == page
+            xy = scene['texel_xy'][rows] // 3
+            total = np.zeros_like(value)
+            np.add.at(total, (xy[:, 1], xy[:, 0]), self.texel_rgb[rows])
+            value += total / np.maximum(owned, 1)[:, :, None]
+        return casts
+
 
 def main():
     job_path = sys.argv[sys.argv.index('--') + 1]
@@ -933,7 +1023,19 @@ def main():
         log(f'device {device}')
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
                                                         job['texel_samples'] > 0)
-        receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images)
+        glow_images = []
+        if job.get('glow'):
+            scene_data['tri_emission'] = np.zeros_like(scene_data['tri_emission'])
+            scene_data['occ_tri_emission'] = np.zeros_like(scene_data['occ_tri_emission'])
+            with np.load(os.path.join(root, job['glow_pages'])) as data:
+                for i, (w, h) in enumerate(job['pages']):
+                    image = bpy.data.images.new(f'glow_{i}', w, h, alpha=False, float_buffer=True, is_data=True)
+                    image.colorspace_settings.name = 'Non-Color'
+                    rgba = np.ones((h, w, 4), np.float32)
+                    rgba[..., :3] = data[f'page_{i}'][::-1]
+                    image.pixels.foreach_set(rgba.ravel())
+                    glow_images.append(image)
+        receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)
         add_suns(job, receivers, occluders)
         out['seconds_scene'] = np.float64(time.perf_counter() - scene_started)
         diffuse_pages = []
@@ -941,7 +1043,8 @@ def main():
             began = time.perf_counter()
             out[f'page_{i}'], diffuse, out[f'written_{i}'] = bake_page(i, receivers, page_images[i], h, w, job,
                                                                    mask_images[i] if mask_images else None,
-                                                                   receiver_diffuse_scale(scene_data, i, w, h))
+                                                                   receiver_diffuse_scale(
+                                                                        scene_data, i, w, h, enhanced=job.get('ignore_normals_mode') == 'enhanced'))
             diffuse_pages.append(diffuse)
             out[f'diffuse_{i}'] = diffuse
             out['seconds_pages'] = np.float64(out['seconds_pages'] + time.perf_counter() - began)
@@ -955,6 +1058,7 @@ def main():
         out['vertex_vector'], out['vertex_irradiance'], rays = vertex_pass.run()
         out['vertex_sun_lit'] = vertex_pass.sun_lit
         out['vertex_sun_throughput'] = vertex_pass.sun_throughput
+        out['texel_rgb'] = vertex_pass.texel_rgb
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
         out['vertex_rays_cast'] = np.int64(rays)
         out['vertex_rays_used'] = np.int64(vertex_pass.rays_used)

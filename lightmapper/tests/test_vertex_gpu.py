@@ -18,7 +18,7 @@ from conftest import LIGHTMAPPER_BLENDER
 from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
                               roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
-                              unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene)
+                              unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene, texel_scene)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -164,6 +164,15 @@ def cpu_and_gpu(tmp_path, vendor, **kwargs):
     with np.load(tmp_path / 'pages.npz') as data:
         pages = [data[f'page_{i}'] for i in range(len(data.files))]
     return cpu, load_and_run(tmp_path, pages, adapter_for(vendor))
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex'])
+def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene(kind))
+    np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(result.irradiance, cpu['irradiance'], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-5, atol=1e-6)
 
 
 @pytest.mark.blender

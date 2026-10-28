@@ -74,3 +74,4 @@ Every successful bake writes `summary.json` into its work folder. Besides the se
 | `rays` | The counts the bake used: `samples` per texel, `texel_samples` for chart edges and `vertex_rays` per vertex query. They are the CPU counts for a stage that ran on the CPU. |
 | `vertex_rays_cast` | How many rays the vertex pass cast in all. |
 | `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex`, then `vertex_pass`, `denoise`, `finish`, `write` and `total`. |
+| `ignore_normals_mode` | `"tool"` | `"tool"` or `"enhanced"`. Enhanced goes beyond tool: flagged receivers gather sun and bounce light per sub-texel without cosine falloff, from either side. Maps with flagged receivers need a second Blender run to bounce their gathered light onto neighbours. |

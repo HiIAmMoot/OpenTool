@@ -20,7 +20,7 @@ from time import perf_counter
 import numpy as np
 
 from . import gpu, vertex_gpu
-from .blender_job import Scene, run_blender, run_blender_vertex_only, with_vertex_pass, write_job
+from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, read_geometry
@@ -29,7 +29,7 @@ from .formats.vertices import ENV, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
 from .radiosity import finalize, query_points
-from .raster import coverage
+from .raster import coverage, texel_contribution
 from .settings import Settings
 from .terminator import flat_sun_term, prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
@@ -313,6 +313,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     raw_pages, masks, class_maps, utilisation, clipped = [], [], [], [], []
     job = json.loads((work / 'job.json').read_text())
     job_suns = job['suns']
+    enhanced = s.ignore_normals_mode == 'enhanced' and scene.tri_ignore_normals is not None and scene.tri_ignore_normals.any()
+    texel_scene = None
+    if enhanced:
+        with np.load(work / 'scene.npz') as data:
+            texel_scene = {key: data[key] for key in data.files}
     if job.get('ambiguous_twin_groups'):
         warnings.append(ambiguous_warning(job['ambiguous_twin_groups']))
     boundaries = (prepare_boundaries(scene, job_suns, s.reach, result.edge_sun_lit)
@@ -324,13 +329,19 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         if result.vertex_sun_lit is not None:
             raw = raw + sun_term(scene, job_suns, result.vertex_sun_lit, i, page.width, page.height,
                                  s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries)
-        if scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
+        if enhanced:
+            raw = raw + texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
+        elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
         raw_pages.append(raw)
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
+    if enhanced:
+        glow = run_blender_glow(work, s, raw_pages)
+        # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
+        raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
     # (OIDN's HIP device cannot open on the Radeon 680M, so AMD denoises on the CPU with a warning even when `amd` is
     # named; owner decision 2026-10-26)
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,

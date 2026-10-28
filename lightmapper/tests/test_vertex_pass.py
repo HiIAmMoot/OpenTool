@@ -29,15 +29,24 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
-                 sun_facing=False, albedo_fallback=0.5, ignore_normals=None):
+                 sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
     pages = pages or [np.zeros((16, 16, 3), np.float32)]
     if ignore_normals is not None:
         scene = dataclasses.replace(scene, query_ignore_normals=np.asarray(ignore_normals, bool))
+    if texel is not None:
+        scene = dataclasses.replace(scene, texel_pos=np.float32(texel),
+                                    texel_normal=np.float32([[0, 0, 1]] * len(texel)),
+                                    texel_class=np.zeros(len(texel), np.int16),
+                                    texel_page=np.zeros(len(texel), np.int16),
+                                    texel_xy=(np.indices((3, 3))[::-1].reshape(2, -1).T.astype(np.int32)
+                                              if len(texel) == 9 else np.zeros((len(texel), 2), np.int32)))
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
                                    albedo_fallback=albedo_fallback)
+    if texel is not None:
+        settings = dataclasses.replace(settings, ignore_normals_mode='enhanced', samples=9 * rays)
     write_job(tmp_path, scene, [(p.shape[1], p.shape[0]) for p in pages], list(suns), ambient or {}, settings,
               'all', textures=textures)
     if seed is None:
@@ -56,6 +65,64 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                           stdin=subprocess.DEVNULL)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
     return np.load(tmp_path / ('sun_facing.npz' if sun_facing else 'probe.npz' if probes is not None else 'vp.npz'))
+
+
+def texel_scene(kind):
+    if kind == 'grazing':
+        # a thin band just above the horizon: a symmetric wall would give the cosine hemisphere the same answer by luck
+        panel = dict(quad=quad([(1, -1000, 0), (1, -1000, .2),
+                               (1, 1000, .2), (1, 1000, 0)], (-1, 0, 0)),
+                     emission=(1, 2, 3))
+        return dict(receivers=[panel], query=((0, 0, 0),), texel=((0, 0, 0),), rays=4096)
+    if kind == 'behind':
+        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000, z=-1), emission=(1, 2, 3))],
+                    query=((0, 0, 0),), texel=((0, 0, 0),), rays=1024)
+    if kind == 'pane':
+        return dict(receivers=[full_quad()],
+                    occluders=[dict(quad=floor(-100, 100, -100, 100, z=-1),
+                                    casts=False, tint=(.5, .25, 1))],
+                    suns=[sun((0, 0, -1))], query=((2, 2, 0),), texel=((2, 2, 0),))
+    if kind == 'vertex':
+        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000, z=1, up=False),
+                                    ignore_normals=True)],
+                    suns=[sun((0, 0, 1))], query=((0, 0, 0),), texel=((0, 0, 1),) * 9,
+                    pages=[np.zeros((1, 1, 3), np.float32)], rays=1024, albedo_fallback=1)
+    raise ValueError(kind)
+
+
+@pytest.mark.blender
+def test_texel_gather_counts_a_grazing_emitter_without_cosine(tmp_path):
+    out = run_driver(tmp_path, **texel_scene('grazing'))
+    # the band covers atan(.2) / (2 pi) of the sphere; the cosine-weighted hemisphere would count under a third of that
+    np.testing.assert_allclose(out['texel_rgb'], 4 * np.arctan(.2) / (2 * np.pi) * np.float32([[1, 2, 3]]), rtol=.05)
+
+
+@pytest.mark.blender
+def test_texel_gather_takes_light_from_behind(tmp_path):
+    out = run_driver(tmp_path, **texel_scene('behind'))
+    np.testing.assert_allclose(out['texel_rgb'], [[2, 4, 6]], rtol=.05)
+
+
+@pytest.mark.blender
+def test_texel_gather_takes_the_sun_from_behind_through_a_pane(tmp_path):
+    out = run_driver(tmp_path, **texel_scene('pane'))
+    np.testing.assert_allclose(out['texel_rgb'], np.float32([[.5, .25, 1]]) * 3 / np.pi, rtol=1e-6)
+
+
+@pytest.mark.blender
+def test_vertex_queries_see_the_gathered_flagged_texels(tmp_path):
+    out = run_driver(tmp_path, **texel_scene('vertex'))
+    np.testing.assert_allclose(out['texel_rgb'], [[3 / np.pi] * 3] * 9, rtol=1e-6)
+    assert out['irradiance'][0] == pytest.approx(3, rel=.05)
+
+
+@pytest.mark.blender
+def test_shade_rgb_luminance_is_todays_shade(tmp_path):
+    out = run_driver(tmp_path, [full_quad(emission=(5, 6, 7))],
+                     pages=[np.tile(np.float32([2, 3, 4]), (16, 16, 1))],
+                     ambient={0: (.1, .2, .3)}, probes=[((2, 2, 1), (0, 0, -1), 0)])
+    np.testing.assert_allclose(out['radiance_rgb'], [[6.05, 7.6, 9.15]], rtol=1e-6)
+    np.testing.assert_allclose(out['radiance'], [7.38238], rtol=1e-6)
 
 
 def twin_scene(reverse=False, cutout=False):

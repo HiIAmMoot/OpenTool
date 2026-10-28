@@ -1201,3 +1201,52 @@ def test_scenery_radiosity_is_cached_by_shader_not_uv_scale(tiny, monkeypatch):
     scene = scene_of(tags)
     np.testing.assert_allclose(scene.occ_tri_emission, [[4, 2, 1]] * 2)
     assert calls.count(('soso', 'prop_shader')) == 1
+
+
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypatch, mode):
+    from lightmapper.formats.bsp import OutMaterial, OutPage
+    tags, settings, work = tiny
+    pipeline = api()
+    original_scene = pipeline._scene
+
+    def chart(groups, shaders, s):
+        lm = np.zeros(6, LM)
+        lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
+        return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
+                    np.array([[0, 1, 2], [3, 4, 5]], np.uint16), np.arange(2))])]
+
+    def scene(*args, **kwargs):
+        value = original_scene(*args, **kwargs)
+        value[0].tri_ignore_normals = np.array([True, False])
+        return value
+
+    def blender(work, s):
+        with np.load(work / 'scene.npz') as arrays:
+            count = len(arrays['texel_pos'])
+        assert (count > 0) == (mode == 'enhanced')
+        raw = np.repeat(np.float32([[0, 1/3], [1/3, 1]])[:, :, None], 3, axis=2)
+        return BakeResult([raw.copy()], np.zeros((6, 3), np.float32), np.ones(6), 'test',
+                          [np.ones((2, 2), bool)], diffuse_pages=[raw],
+                          texel_rgb=np.full((count, 3), .3, np.float32))
+
+    def glow(work, s, pages):
+        assert mode == 'enhanced', 'tool mode must never start a glow run'
+        want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1]])
+        np.testing.assert_allclose(pages[0][..., 0], want, rtol=1e-6)
+        unflagged = np.array([[0, 1/3], [1/3, 1]], np.float32)
+        return [np.repeat((.6 * unflagged)[:, :, None], 3, axis=2)]
+
+    monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
+    monkeypatch.setattr(pipeline, '_scene', scene)
+    monkeypatch.setattr(pipeline, 'run_blender', blender)
+    monkeypatch.setattr(pipeline, 'run_blender_glow', glow)
+    out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False),
+                        work=work, dry_run=True)
+    want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])
+            if mode == 'enhanced' else np.array([[0, 1/3], [1/3, 1]]))
+    np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
+
+
+def test_tool_mode_makes_no_texel_queries_and_no_glow_run(tiny, monkeypatch):
+    test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypatch, 'tool')

@@ -10,6 +10,41 @@ import numpy as np
 from numba import njit
 
 
+def texel_queries(scene, page, width, height):
+    rows = np.flatnonzero(scene.tri_page == page)
+    flags = scene.tri_ignore_normals
+    empty = dict(texel_pos=np.empty((0, 3), np.float32), texel_normal=np.empty((0, 3), np.float32),
+                 texel_class=np.empty(0, np.int16), texel_page=np.empty(0, np.int16),
+                 texel_xy=np.empty((0, 2), np.int32))
+    if flags is None or not flags[rows].any():
+        return empty
+    owner, weights = triangle_weights(scene.lm_uv, scene.tris[rows], 3 * width, 3 * height)
+    y, x = np.nonzero((owner >= 0) & flags[rows[np.maximum(owner, 0)]])
+    tri = rows[owner[y, x]]
+    corners, bary = scene.tris[tri], weights[y, x]
+    return dict(texel_pos=np.einsum('ij,ijk->ik', bary, scene.positions[corners]).astype(np.float32),
+                texel_normal=np.einsum('ij,ijk->ik', bary, scene.normals[corners]).astype(np.float32),
+                texel_class=scene.tri_class[tri], texel_page=np.full(len(x), page, np.int16),
+                texel_xy=np.column_stack([x, y]).astype(np.int32))
+
+
+def texel_contribution(scene, page, width, height, rgb=None):
+    """The gathered contribution and flagged share, using all owned samples rather than nine at chart edges."""
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    owned = (owner >= 0).reshape(height, 3, width, 3).sum(axis=(1, 3))
+    chosen = scene['texel_page'] == page
+    xy = scene['texel_xy'][chosen] // 3
+    count = np.zeros((height, width), np.float32)
+    np.add.at(count, (xy[:, 1], xy[:, 0]), 1)
+    share = count / np.maximum(owned, 1)
+    total = np.zeros((height, width, 3), np.float32)
+    if rgb is not None:
+        np.add.at(total, (xy[:, 1], xy[:, 0]), rgb[chosen])
+        total /= np.maximum(owned, 1)[:, :, None]
+    return total, share
+
+
 def coverage(uv, tris, tri_class, width, height):
     texels = np.asarray(uv, dtype=np.float64) * np.array([width, height])
     return _coverage(texels, np.asarray(tris), np.asarray(tri_class), width, height)

@@ -767,3 +767,16 @@ def test_a_masked_out_receiver_still_shadows_its_page_neighbour(tmp_path):
     shadowed = bake_texels(tmp_path / 'shadowed', 256, [ground, roof], [sun()])
     # only the camera-ray gate lets the roof stay in the way of the ground's masked-in rays
     assert shadowed[covered].max() < 0.05 * lit[covered].mean()
+
+
+@pytest.mark.blender
+def test_flagged_glow_lights_a_neighbour(tmp_path):
+    from lightmapper.blender_job import run_blender_glow
+    scene = build([dict(quad=floor(-100, 100, -100, 100, z=1), ignore_normals=True),
+                   dict(quad=floor(-2, 2, -2, 2), page=1)])
+    s = Settings(samples=256, vertex_rays=1, albedo_fallback=.25, device='cpu', ignore_normals_mode='enhanced')
+    write_job(tmp_path, scene, [(8, 8), (8, 8)], [], {}, s)
+    pages = [np.full((8, 8, 3), 4, np.float32), np.zeros((8, 8, 3), np.float32)]
+    glow = run_blender_glow(tmp_path, s, pages)
+    np.testing.assert_allclose(glow[1][2:-2, 2:-2], 1, rtol=.1)
+    np.testing.assert_array_equal(glow[0], 0)

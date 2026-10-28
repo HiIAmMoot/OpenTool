@@ -43,6 +43,7 @@ class VertexPassResult:
     edge_sun_lit: np.ndarray
     rays: int
     sun_throughput: np.ndarray | None = None
+    texel_rgb: np.ndarray | None = None
 
 
 def radical_inverse(i):
@@ -267,14 +268,15 @@ def _build_world(device, vertices, indices, vertex_count, index_count):
     return top, (bottom, scratch, scratch_top, instances)
 
 
-def _kernels(device):
+def _kernels(device, rgb=False):
     import slangpy as spy
     defines = {'GROUP_SIZE': str(GROUP_SIZE), 'RAY_LENGTH': repr(float(RAY_LENGTH)),
                'RAY_EPSILON': repr(float(RAY_EPSILON)), 'PASS_LIMIT': str(PASS_LIMIT),
                'LUMA': 'float3(' + ', '.join(repr(float(x)) for x in LUMA) + ')'}
     session = device.create_slang_session(spy.SlangCompilerOptions({'include_paths': [str(SHADERS)],
                                                                       'defines': defines}))
-    return [device.create_compute_kernel(session.load_program('vertex_pass', [name])) for name in ('gather', 'shadow')]
+    return [device.create_compute_kernel(session.load_program('vertex_pass', [name]))
+            for name in ('gather_rgb' if rgb else 'gather', 'shadow')]
 
 
 def _ambient_of(table, cls):
@@ -282,7 +284,7 @@ def _ambient_of(table, cls):
     return table[np.clip(cls + 1, 0, None)] * (cls >= -1)[:, None]
 
 
-def _trace(device, arrays, table, job, batches, shadow_rays, reduce):
+def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
     """(carried rgb, escaped) per shadow ray from the kernels; each gather dispatch's luminances go to
     reduce(ids, lum, hemi, solid_angle) as they land, so no matrix of every ray's luminance is ever held."""
     rays = int(job['vertex_rays'])
@@ -308,12 +310,13 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce):
             texture_texels=_upload(device, arrays['texture_texels'], np.float32),
             page_info=_upload(device, arrays['page_info'], np.int32),
             page_texels=_upload(device, arrays['page_texels'], np.float32),
-            ambient=_upload(device, table, np.float32), ambient_rows=len(table),
+            ambient=_upload(device, table, np.float32), ambient_rows=len(table), with_ambient=not rgb,
             albedo_scale=float(job['albedo_scale']), albedo_fallback=float(job['albedo_fallback']))
     with _stage('build'):
         shared['world'], keep = _build_world(device, vertices, indices, len(arrays['positions']), arrays['tris'].size)
-        gather, shadow = _kernels(device)
-    step = max(1, min(cap, MAX_LUMINANCES_PER_CHUNK) // rays)
+        gather, shadow = _kernels(device, rgb=True) if rgb else _kernels(device)
+    channels = 3 if rgb else 1
+    step = max(1, min(cap, MAX_LUMINANCES_PER_CHUNK // channels) // rays)
     for hemi, queries, solid_angle in batches:
         ids, pos, n, tangent, bitangent, spin, cls = queries
         if not len(ids):
@@ -325,15 +328,16 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce):
         for first in range(0, len(ids), step):
             chunk = slice(first, first + step)
             with _stage('gather'):
-                out = _upload(device, np.zeros(len(ids[chunk]) * rays), np.float32, writable=True)
+                shape = (len(ids[chunk]) * rays, 3) if rgb else (len(ids[chunk]) * rays,)
+                out = _upload(device, np.zeros(shape), np.float32, writable=True)
                 _dispatch(gather, len(ids[chunk]) * rays, vars=dict(
                     shared, **hemisphere_buffers, query_pos=_upload(device, pos[chunk], np.float32),
                     query_n=_upload(device, n[chunk], np.float32),
                     query_tangent=_upload(device, tangent[chunk], np.float32),
                     query_bitangent=_upload(device, bitangent[chunk], np.float32),
                     query_spin=_upload(device, spin[chunk], np.float32), query_class=_upload(device, cls[chunk], np.int32),
-                    gather_count=len(ids[chunk]) * rays, lum_out=out))
-                lum = _read(device, out, np.float32).reshape(-1, rays)[:len(ids[chunk])].astype(np.float64)
+                    gather_count=len(ids[chunk]) * rays, **({'rgb_out': out} if rgb else {'lum_out': out})))
+                lum = _read(device, out, np.float32).reshape((-1, rays, 3) if rgb else (-1, rays))[:len(ids[chunk])].astype(np.float64)
             reduce(ids[chunk], lum, hemi, solid_angle)
     for first in range(0, len(origins), cap):
         chunk = slice(first, first + cap)
@@ -351,6 +355,7 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce):
 def run_vertex_pass(scene, job, textures, pages, device):
     """The CPU pass's vector, irradiance, sun and edge reach and ray count: the rays are traced and shaded on the GPU
     and every float64 sum over them is added here."""
+    texel_rgb, texel_rays, pages = _gather_texels(scene, job, textures, pages, device)
     rays = int(job['vertex_rays'])
     queries = len(scene['query_pos'])
     suns = job['suns']
@@ -400,9 +405,39 @@ def run_vertex_pass(scene, job, textures, pages, device):
         sun_throughput[sun_query[rows], k] = carried[rows]
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
-    total = len(ids) * rays + len(sun_query) + len(edge)
+    total = texel_rays + len(ids) * rays + len(sun_query) + len(edge)
     return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
-                          sun_throughput)
+                          sun_throughput, texel_rgb)
+
+
+def _gather_texels(scene, job, textures, pages, device):
+    count = len(scene.get('texel_pos', ()))
+    rgb = np.zeros((count, 3), np.float32)
+    if not count:
+        return rgb, 0, pages
+    from .raster import texel_contribution
+    rays = max(1, round(job['samples'] / 9))
+    usable, n, t, b, spin = query_frames(scene['texel_normal'], job.get('seed', 0))
+    ids = np.flatnonzero(usable)
+    local, phi, r = sphere(rays)
+    batches = [((phi, r, local[:, 2]), (ids, scene['texel_pos'][ids], n[ids], t[ids], b[ids], spin[ids],
+                                      scene['texel_class'][ids]), 4.)]
+    arrays = _scene_arrays(scene, textures, pages)
+    # black class ambients keep the page gather free of the ambient finish_pages adds later
+    table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
+    probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
+                 query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
+    probe.pop('query_inverse', None)
+    query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
+    def reduce(rows, value, hemi, solid_angle):
+        rgb[rows] = 4 / rays * value.sum(axis=1)
+    carried, escaped = _trace(device, arrays, table, dict(job, vertex_rays=rays), batches,
+                              (origin, direction), reduce, rgb=True)
+    for k, sun in enumerate(job['suns']):
+        rows = np.flatnonzero((sun_index == k) & escaped)
+        rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
+    updated = [p + texel_contribution(scene, i, p.shape[1], p.shape[0], rgb)[0] for i, p in enumerate(pages)]
+    return rgb, len(ids) * rays + len(query), updated
 
 
 def load_and_run(work, pages, adapter):
@@ -446,7 +481,8 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
         with np.load(out, allow_pickle=False) as data:
             result = VertexPassResult(np.array(data['vector'], np.float32), np.array(data['irradiance'], np.float32),
                                       np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
-                                      int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32))
+                                      int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32),
+                                      np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
         job = json.loads((work / 'job.json').read_text())
         with np.load(work / job['scene'], allow_pickle=False) as data:
             q = len(data['query_pos'])
@@ -471,5 +507,5 @@ def child_main(argv: list[str]) -> int:
     result = load_and_run(work, pages, Adapter(**fields))
     np.savez(work / 'gpu_out.npz', vector=result.vector, irradiance=result.irradiance,
              sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays),
-             vertex_sun_throughput=result.sun_throughput)
+             vertex_sun_throughput=result.sun_throughput, texel_rgb=result.texel_rgb)
     return 0

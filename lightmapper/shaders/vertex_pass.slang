@@ -37,6 +37,7 @@ StructuredBuffer<float3> ambient;
 uniform float albedo_scale;
 uniform float albedo_fallback;
 uniform int ambient_rows;
+uniform bool with_ambient;
 
 /* ---------- gather inputs and outputs */
 
@@ -52,6 +53,7 @@ StructuredBuffer<float> hemi_h;
 uniform int rays;
 uniform uint gather_count;
 RWStructuredBuffer<float> lum_out;
+RWStructuredBuffer<float3> rgb_out;
 
 /* ---------- shadow inputs and outputs */
 
@@ -123,7 +125,7 @@ float3 ambient_of(int cls)
 }
 
 /* the luminance of the light arriving along dir at a hit (the CPU pass's shade) */
-float shade(int tri, float2 bary, float3 dir, int cls)
+float3 shade_rgb(int tri, float2 bary, float3 dir, int cls)
 {
     float3 w = weights_of(bary);
     int texture = tri_info[tri].x;
@@ -134,12 +136,17 @@ float shade(int tri, float2 bary, float3 dir, int cls)
         albedo = float3(0.0);
     bool facing = dot(tri_normal[tri], dir) < 0;
     if (!receiver(tri))
-        return dot(albedo * ambient_of(cls) + tri_emission[tri] * (facing ? 1.0 : 0.0), LUMA);
+        return albedo * (with_ambient ? ambient_of(cls) : float3(0.0)) + tri_emission[tri] * (facing ? 1.0 : 0.0);
     if (!facing)
-        return 0.0;
+        return float3(0.0);
     int page = tri_info[tri].z;
     float3 lit = page >= 0 ? page_at(page, interpolate(vertex_lm_uv, tri, w)) : float3(0.0);
-    return dot(albedo * (lit + ambient_of(tri_info[tri].w)) + tri_emission[tri], LUMA);
+    return albedo * (lit + (with_ambient ? ambient_of(tri_info[tri].w) : float3(0.0))) + tri_emission[tri];
+}
+
+float shade(int tri, float2 bary, float3 dir, int cls)
+{
+    return dot(shade_rgb(tri, bary, dir, cls), LUMA);
 }
 
 /* ---------- the pass-through loop */
@@ -194,6 +201,22 @@ void gather(uint3 id : SV_DispatchThreadID)
     float2 bary;
     int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, carried, hit, bary);
     lum_out[i] = tri < 0 ? 0.0 : shade(tri, bary, dir, query_class[query]);
+}
+
+[shader("compute")]
+[numthreads(GROUP_SIZE, 1, 1)]
+void gather_rgb(uint3 id : SV_DispatchThreadID)
+{
+    uint i = id.x;
+    if (i >= gather_count) return;
+    int query = (int)(i / (uint)rays), k = (int)(i % (uint)rays);
+    float angle = hemi_phi[k] + query_spin[query];
+    float3 dir = hemi_r[k] * cos(angle) * query_tangent[query] + hemi_r[k] * sin(angle) * query_bitangent[query]
+                 + hemi_h[k] * query_n[query];
+    float3 carried = float3(1.0), hit;
+    float2 bary;
+    int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, carried, hit, bary);
+    rgb_out[i] = tri < 0 ? float3(0.0) : shade_rgb(tri, bary, dir, query_class[query]);
 }
 
 [shader("compute")]

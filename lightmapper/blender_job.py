@@ -56,6 +56,11 @@ class Scene:
     query_inverse: np.ndarray | None = None
     tri_ignore_normals: np.ndarray | None = None
     query_ignore_normals: np.ndarray | None = None
+    texel_pos: np.ndarray | None = None
+    texel_normal: np.ndarray | None = None
+    texel_class: np.ndarray | None = None
+    texel_page: np.ndarray | None = None
+    texel_xy: np.ndarray | None = None
 
 
 _DTYPES = {
@@ -68,6 +73,8 @@ _DTYPES = {
     'query_pos': np.float32, 'query_normal': np.float32, 'query_class': np.int16,
     'query_inverse': np.int32,
     'tri_ignore_normals': np.bool_, 'query_ignore_normals': np.bool_,
+    'texel_pos': np.float32, 'texel_normal': np.float32, 'texel_class': np.int16,
+    'texel_page': np.int16, 'texel_xy': np.int32,
 }
 
 
@@ -91,6 +98,7 @@ class BakeResult:
     samples_used: int | None = None
     texel_samples_used: int | None = None
     vertex_sun_throughput: np.ndarray | None = None
+    texel_rgb: np.ndarray | None = None
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
@@ -110,6 +118,15 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
     for name, count in (('tri_ignore_normals', len(scene.tris)), ('query_ignore_normals', len(scene.query_pos))):
         if name not in arrays:
             arrays[name] = np.zeros(count, np.bool_)
+    from .raster import texel_queries
+    queries = [texel_queries(scene, i, w, h) for i, (w, h) in enumerate(pages)] if s.ignore_normals_mode == 'enhanced' else []
+    for name, shape in (('texel_pos', (0, 3)), ('texel_normal', (0, 3)), ('texel_class', (0,)),
+                        ('texel_page', (0,)), ('texel_xy', (0, 2))):
+        if s.ignore_normals_mode == 'tool':
+            arrays[name] = np.empty(shape, _DTYPES[name])
+        elif name not in arrays:
+            arrays[name] = (np.concatenate([q[name] for q in queries]) if queries
+                            else np.empty(shape, _DTYPES[name]))
     corners = np.concatenate([arrays['positions'][arrays['tris']], arrays['occ_positions'][arrays['occ_tris']]])
     arrays['tri_twin'], arrays['tri_twin_perm'], ambiguous_twins = reversed_twins(corners)
     # an unlightmapped emitter is transparent to diffuse rays whatever the weights leave of its emission
@@ -168,6 +185,7 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'cycles_required': choice.required,
         'hiprt': HIPRT,
         'vertex_pass': vertex_pass,
+        'ignore_normals_mode': s.ignore_normals_mode,
         'ambiguous_twin_groups': ambiguous_twins,
     }
     path = work / 'job.json'
@@ -227,7 +245,8 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                           int(data['samples_used']) if 'samples_used' in data.files else None,
                            int(data['texel_samples_used']) if 'texel_samples_used' in data.files else None,
                            np.array(data['vertex_sun_throughput'], np.float32)
-                           if 'vertex_sun_throughput' in data.files else None)
+                            if 'vertex_sun_throughput' in data.files else None,
+                            np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
 
 
 def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:
@@ -242,10 +261,23 @@ def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) ->
                                 np.array(data['vertex_irradiance'], np.float32),
                                 np.array(data['vertex_sun_lit'], bool),
                                 np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']),
-                                np.array(data['vertex_sun_throughput'], np.float32))
+                                np.array(data['vertex_sun_throughput'], np.float32),
+                                np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
 
 
 def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
     return replace(result, vertex_vector=vp.vector, vertex_irradiance=vp.irradiance,
                    vertex_sun_lit=vp.sun_lit, edge_sun_lit=vp.edge_sun_lit, vertex_rays_cast=vp.rays,
-                   vertex_sun_throughput=vp.sun_throughput)
+                   vertex_sun_throughput=vp.sun_throughput, texel_rgb=vp.texel_rgb)
+
+
+def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> list[np.ndarray]:
+    work = Path(work)
+    np.savez(work / 'glow_pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
+    job = json.loads((work / 'job.json').read_text())
+    job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={},
+               bounces=0, vertex_pass='skip')
+    (work / 'job_glow.json').write_text(json.dumps(job, indent=2))
+    _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow.log')
+    with np.load(out) as data:
+        return [np.array(data[f'page_{i}'], np.float32) for i in range(len(job['pages']))]
