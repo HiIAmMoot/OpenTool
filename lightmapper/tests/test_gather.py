@@ -248,17 +248,12 @@ def test_truncated_base_shader_reports_too_short_before_fourcc(tmp_path, size):
         api()._read_base_radiosity(file, 'swat')
 
 
-def test_ignore_normals_flag_warns_naming_the_shader(tmp_path, caplog):
-    radiosity_shader('senv', tmp_path, 'shader_environment', flags=2)
+@pytest.mark.parametrize('flags', [2, 5])
+def test_ignore_normals_flag_is_read_without_a_warning(tmp_path, caplog, flags):
+    radiosity_shader('senv', tmp_path, 'shader_environment', flags=flags)
     with caplog.at_level('WARNING'):
-        api().read_radiosity(tmp_path, 'senv', 'shader')
-    assert any('shader' in r.getMessage() and 'ignore normals' in r.getMessage() for r in caplog.records)
-
-
-def test_no_warning_without_the_ignore_normals_flag(tmp_path, caplog):
-    radiosity_shader('senv', tmp_path, 'shader_environment', flags=5)
-    with caplog.at_level('WARNING'):
-        api().read_radiosity(tmp_path, 'senv', 'shader')
+        result = api().read_radiosity(tmp_path, 'senv', 'shader')
+    assert result.flags == flags
     assert not caplog.records
 
 

@@ -149,7 +149,8 @@ def reset_mask(image):
     image.pixels.foreach_set(np.ones(4, np.float32))
 
 
-def make_material(name, texture, cutout, emission, job, page_image, tint=(), emit_only=False, mask_image=None):
+def make_material(name, texture, cutout, emission, job, page_image, tint=(), emit_only=False, mask_image=None,
+                  both_sides=False):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     nodes, links = material.node_tree.nodes, material.node_tree.links
@@ -174,6 +175,17 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
         links.new(scale.outputs['Vector'], diffuse.inputs['Color'])
         alpha_socket = sampled.outputs['Alpha']
     shader = diffuse.outputs['BSDF']
+    if both_sides:
+        back = nodes.new('ShaderNodeBsdfTranslucent')
+        colour = diffuse.inputs['Color']
+        if colour.is_linked:
+            links.new(colour.links[0].from_socket, back.inputs['Color'])
+        else:
+            back.inputs['Color'].default_value = colour.default_value
+        add = nodes.new('ShaderNodeAddShader')
+        links.new(shader, add.inputs[0])
+        links.new(back.outputs['BSDF'], add.inputs[1])
+        shader = add.outputs['Shader']
     if emit_only:
         # unlightmapped emitters have no diffuse bounce: their back face must pass gather rays
         shader = nodes.new('ShaderNodeBsdfTransparent').outputs['BSDF']
@@ -316,6 +328,8 @@ def receiver_sun_bits(scene, suns):
     facing = sun_facing_planes(scene, suns)
     for n, sun in enumerate(suns):
         facing[:, n] &= np.isin(scene['tri_class'], sun['classes'])
+    # flagged receivers take their full-strength sun from the vertex pass, never twice
+    facing[scene.get('tri_ignore_normals', np.zeros(len(facing), bool))] = False
     return facing
 
 
@@ -327,6 +341,7 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
     tinted = ~scene_data['tri_casts_shadow'] & (scene_data['tri_tint'] < 1).any(axis=1)
     keys = np.column_stack([scene_data['tri_page'], scene_data['tri_class'],
                             scene_data['tri_casts_shadow'] | tinted,
+                            scene_data.get('tri_ignore_normals', np.zeros(len(tris), bool)),
                             receiver_sun_bits(scene_data, job['suns'])])
     distinct_keys, labels = np.unique(keys, axis=0, return_inverse=True)
     order = np.argsort(labels, kind='stable')
@@ -353,14 +368,14 @@ def build_objects(scene_data, job, textures, page_images, mask_images=()):
         distinct = sorted(set(tri_props))
         materials = [make_material(f'recv_{page}_{cls}_{n}', textures[tex] if tex >= 0 else None, cut, emit,
                                    job, page_images[page], tint,
-                                   mask_image=mask_images[page] if mask_images else None)
+                                   mask_image=mask_images[page] if mask_images else None, both_sides=bool(key[3]))
                      for n, (tex, cut, emit, tint) in enumerate(distinct)]
         obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
                            UV_LIGHTMAP: flip_v(scene_data['lm_uv'][used])},
                           local, materials, [distinct.index(p) for p in tri_props], casts,
                           scene_data['normals'][used])
-        obj['sun_facing'] = key[3:].tolist()
+        obj['sun_facing'] = key[4:].tolist()
         receivers.append((obj, page, cls))
 
     occluders = []
@@ -768,6 +783,7 @@ class VertexPass:
         sun_visible = sun_facing_queries(scene, job['suns'])
         # which queries each sun reaches, for the faces whose plane turns away from it (they take it from their corners)
         self.sun_lit = np.zeros((queries, len(job['suns'])), np.bool_)
+        self.sun_throughput = np.zeros((queries, len(job['suns']), 3), np.float32)
         for first in range(0, queries, QUERY_CHUNK):
             ids = np.arange(first, min(first + QUERY_CHUNK, queries))
             m = len(ids)
@@ -821,6 +837,7 @@ class VertexPass:
                         vector[ids[a]] += strength * cosine * d
                         irradiance[ids[a]] += strength * cosine
                         self.sun_lit[ids[a], sun_index] = True
+                        self.sun_throughput[ids[a], sun_index] = carried
         edge_pos = scene.get('edge_pos', np.empty((0, 3), np.float32))
         self.edge_sun_lit = np.zeros((len(edge_pos), len(job['suns'])), np.bool_)
         for first in range(0, len(edge_pos), QUERY_CHUNK):
@@ -887,6 +904,7 @@ def main():
         vertex_pass = VertexPass(scene_data, job, raw_textures, diffuse_pages)
         out['vertex_vector'], out['vertex_irradiance'], rays = vertex_pass.run()
         out['vertex_sun_lit'] = vertex_pass.sun_lit
+        out['vertex_sun_throughput'] = vertex_pass.sun_throughput
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
         out['vertex_rays_cast'] = np.int64(rays)
         out['vertex_rays_used'] = np.int64(vertex_pass.rays_used)

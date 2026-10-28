@@ -42,6 +42,7 @@ class VertexPassResult:
     sun_lit: np.ndarray
     edge_sun_lit: np.ndarray
     rays: int
+    sun_throughput: np.ndarray | None = None
 
 
 def radical_inverse(i):
@@ -389,16 +390,19 @@ def run_vertex_pass(scene, job, textures, pages, device):
     vector += flat[:, None] * n
     irradiance += flat
     sun_lit = np.zeros((queries, len(suns)), bool)
+    sun_throughput = np.zeros((queries, len(suns), 3), np.float32)
     for k, sun in enumerate(suns):
         rows = np.flatnonzero((sun_index == k) & escaped[:len(sun_query)])
         strength = ((np.float64(sun['color']) * carried[rows]) @ LUMA) * float(sun['strength'])
         vector[sun_query[rows]] += (strength * sun_cos[rows])[:, None] * sun_dir[rows]
         irradiance[sun_query[rows]] += strength * sun_cos[rows]
         sun_lit[sun_query[rows], k] = True
+        sun_throughput[sun_query[rows], k] = carried[rows]
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
     total = len(ids) * rays + len(sun_query) + len(edge)
-    return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total)
+    return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
+                          sun_throughput)
 
 
 def load_and_run(work, pages, adapter):
@@ -442,14 +446,15 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
         with np.load(out, allow_pickle=False) as data:
             result = VertexPassResult(np.array(data['vector'], np.float32), np.array(data['irradiance'], np.float32),
                                       np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
-                                      int(data['rays']))
+                                      int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32))
         job = json.loads((work / 'job.json').read_text())
         with np.load(work / job['scene'], allow_pickle=False) as data:
             q = len(data['query_pos'])
             edges = len(data['edge_pos']) if 'edge_pos' in data else 0
         suns = len(job['suns'])
         if (result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
-                or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)):
+                or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)
+                or result.sun_throughput.shape != (q, suns, 3)):
             raise ValueError('short vertex arrays')
         return result
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as error:
@@ -465,5 +470,6 @@ def child_main(argv: list[str]) -> int:
         pages = [data[f'diffuse_{i}'] for i in range(len(data.files))]
     result = load_and_run(work, pages, Adapter(**fields))
     np.savez(work / 'gpu_out.npz', vector=result.vector, irradiance=result.irradiance,
-             sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays))
+             sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays),
+             vertex_sun_throughput=result.sun_throughput)
     return 0

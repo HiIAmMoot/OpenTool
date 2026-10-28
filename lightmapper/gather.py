@@ -137,9 +137,6 @@ def read_radiosity(tags_root: Path, group: str, path: str) -> ShaderRadiosity:
                                     root.get('radiosity.power'),
                                     *root.get('radiosity.color_of_emitted_light'),
                                     *root.get('radiosity.tint_color')))
-    if result.flags & IGNORE_NORMALS:
-        logger.warning('shader %s has "ignore normals" set, which is not supported: its receivers '
-                       'keep their cosine', path)
     return result
 
 

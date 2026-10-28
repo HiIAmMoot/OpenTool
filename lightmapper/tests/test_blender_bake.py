@@ -37,7 +37,7 @@ def wall_x(x, y0, y1, z0, z1):
 
 def build(receivers, occluders=()):
     """Receivers and occluders are dicts of a quad plus page, cls, casts, emission, texture, cutout."""
-    cols = {k: [] for k in ('p', 'lm', 'tex', 'nrm', 'tris', 'page', 'cls', 'casts', 'emit', 'texture', 'cut', 'tint')}
+    cols = {k: [] for k in ('p', 'lm', 'tex', 'nrm', 'tris', 'page', 'cls', 'casts', 'emit', 'texture', 'cut', 'tint', 'ignore')}
     base = 0
     for r in receivers:
         p, lm, tex, nrm = r['quad']
@@ -54,6 +54,7 @@ def build(receivers, occluders=()):
             cols['emit'].append(r.get('emission', (0, 0, 0)))
             cols['texture'].append(r.get('texture', -1))
             cols['cut'].append(r.get('cutout', False))
+            cols['ignore'].append(r.get('ignore_normals', False))
         base += len(p)
     o = {k: [] for k in ('p', 'uv', 'tris', 'texture', 'cut', 'casts', 'emit', 'tint')}
     base = 0
@@ -84,6 +85,7 @@ def build(receivers, occluders=()):
         occ_tri_emission=np.float32(o['emit']).reshape(-1, 3), occ_tri_tint=np.float32(o['tint']).reshape(-1, 3),
         query_pos=np.float32([[0, 0, 0]]), query_normal=np.float32([[0, 0, 1]]),
         query_class=np.int16([0]),
+        tri_ignore_normals=np.bool_(cols['ignore']) if any(cols['ignore']) else None,
     )
 
 
@@ -108,6 +110,26 @@ def test_blender_reports_its_stage_seconds(tmp_path):
 
 def full_quad(**extra):
     return dict(quad=floor(0, 4, 0, 4), **extra)
+
+
+@pytest.mark.blender
+def test_ignore_normals_receiver_takes_light_from_behind(tmp_path):
+    receivers = [dict(quad=floor(0, 4, 0, 4), ignore_normals=True),
+                 dict(quad=floor(10, 14, 0, 4, up=False), page=1)]
+    panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(4, 4, 4), casts=False)]
+    result = bake(tmp_path, receivers, [], pages=((16, 16), (16, 16)), occluders=panels)
+    ratio = result.diffuse_pages[0][2:-2, 2:-2].mean() / result.diffuse_pages[1][2:-2, 2:-2].mean()
+    print(f'BACK_SIDE_MEASUREMENT ratio={ratio}')
+    assert ratio == pytest.approx(0.5, rel=0.1)
+
+
+@pytest.mark.blender
+def test_ignore_normals_receiver_gets_no_cycles_sun(tmp_path):
+    result = bake(tmp_path, [full_quad(ignore_normals=True),
+                            dict(quad=floor(10, 14, 0, 4), page=1)], [sun()],
+                  pages=((16, 16), (16, 16)))
+    assert result.pages[0][2:-2, 2:-2].max() < 1e-6
+    np.testing.assert_allclose(result.pages[1][2:-2, 2:-2], 3 / np.pi, rtol=0.05)
 
 
 TWIN_DEVICES = [

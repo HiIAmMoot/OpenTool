@@ -18,7 +18,7 @@ from conftest import LIGHTMAPPER_BLENDER
 from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
                               roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
-                              unpaired_back_face_scene, wall_facing_minus_x)
+                              unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -226,6 +226,7 @@ COVER = dict(quad=floor(-50, 50, -50, 50, z=1.0))
 GREY = np.uint8([[[128, 128, 128, 255]] * 2] * 2)
 RANDOM_TEXELS = np.random.default_rng(3).integers(0, 256, (4, 4, 4)).astype(np.uint8)
 CASES = {   # name -> run_driver kwargs, the scenes of test_vertex_pass.py
+    'sun_throughput': sun_throughput_scene(),
     'ignore_normals_sun_behind': ignore_normals_sun_scene(True),
     'ignore_normals_sun_60': ignore_normals_sun_scene(),
     'ignore_normals_emitter_behind': ignore_normals_emitter_scene(),
@@ -268,6 +269,10 @@ def test_gpu_matches_cpu_on_the_vertex_pass_scenes(tmp_path, vendor, case):
     np.testing.assert_allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
     np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-4, atol=1e-5)
     assert np.array_equal(result.sun_lit, cpu['sun_lit']) and np.array_equal(result.edge_sun_lit, cpu['edge_sun_lit'])
+    np.testing.assert_allclose(result.sun_throughput, cpu['vertex_sun_throughput'], rtol=1e-6, atol=1e-6)
+    if case == 'sun_throughput':
+        np.testing.assert_allclose(result.sun_throughput[:, 0],
+                                   [[0.5, 0.25, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1]], rtol=1e-6)
 
 
 @pytest.mark.blender
@@ -525,11 +530,14 @@ def test_child_exchange_at_the_stock_query_limit(tmp_path, monkeypatch):
             f'q={q}; '
             'np.savez("gpu_out.npz", vector=np.full((q,3),.25,np.float32), '
             'irradiance=np.ones(q,np.float32), sun_lit=np.ones((q,2),bool), '
+            'vertex_sun_throughput=np.full((q,2,3),.125,np.float32), '
             'edge_sun_lit=np.zeros((0,2),bool), rays=np.int64(q*4096))')
     monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code], raising=False)
     result = vertex_gpu.run_in_child(tmp_path, [RAMP], NV, 60)
     assert result.vector.shape == (393216, 3) and result.rays == 1610612736
     np.testing.assert_array_equal(result.vector, .25)
+    assert result.sun_throughput.shape == (393216, 2, 3)
+    np.testing.assert_array_equal(result.sun_throughput, .125)
     with np.load(tmp_path / 'diffuse.npz') as data:
         np.testing.assert_array_equal(data['diffuse_0'], RAMP)
 
@@ -550,6 +558,7 @@ def test_bake_with_the_gpu_pass_matches_the_cpu_pass(tmp_path, vendor):
     assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
     assert result.rays == first.vertex_rays_cast
     np.testing.assert_array_equal(result.sun_lit, first.vertex_sun_lit)
+    np.testing.assert_allclose(result.sun_throughput, first.vertex_sun_throughput, rtol=1e-6, atol=1e-6)
     direct = load_and_run(tmp_path, first.diffuse_pages, adapter_for(vendor))
     np.testing.assert_array_equal(result.edge_sun_lit, direct.edge_sun_lit)
 
@@ -562,6 +571,7 @@ def test_consistently_short_gpu_arrays_are_refused(tmp_path, monkeypatch):
     # complete keys and internally consistent shapes, but the job has one query, not zero
     code = ('import numpy as np; np.savez("gpu_out.npz", vector=np.zeros((0,3),np.float32), '
             'irradiance=np.zeros(0,np.float32), sun_lit=np.zeros((0,1),bool), '
+            'vertex_sun_throughput=np.zeros((0,1,3),np.float32), '
             f'edge_sun_lit=np.zeros(({edges},1),bool), rays=np.int64(0))')
     monkeypatch.setattr(vertex_gpu, '_child_command', lambda work, adapter: [sys.executable, '-c', code])
     with pytest.raises(GpuPassError, match='process died'):

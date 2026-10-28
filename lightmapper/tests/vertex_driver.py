@@ -44,7 +44,8 @@ def main():
         return
     vector, irradiance, rays = tracer.run()
     np.savez(os.path.join(root, 'vp.npz'), vector=vector, irradiance=irradiance, rays=rays,
-             edge_sun_lit=tracer.edge_sun_lit, sun_lit=tracer.sun_lit)
+             edge_sun_lit=tracer.edge_sun_lit, sun_lit=tracer.sun_lit,
+             vertex_sun_throughput=tracer.sun_throughput)
 
 
 main()

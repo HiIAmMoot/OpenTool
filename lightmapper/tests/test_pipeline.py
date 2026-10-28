@@ -1093,6 +1093,44 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
     assert all(page.max() == pytest.approx(0.5) for page in out.float_pages)
 
 
+def test_pipeline_adds_the_flat_sun_term_and_the_back_side_share(tiny, monkeypatch):
+    from lightmapper.formats.bsp import OutMaterial, OutPage
+    from test_blender_bake import sun
+    tags, settings, work = tiny
+    pipeline = api()
+    original_scene = pipeline._scene
+    original_write = pipeline.write_job
+
+    def chart(groups, shaders, s):
+        lm = np.zeros(6, LM)
+        lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
+        return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
+                    np.array([[0, 1, 2], [3, 4, 5]], np.uint16), np.arange(2))])]
+
+    def scene(*args, **kwargs):
+        value = original_scene(*args, **kwargs)
+        value[0].tri_ignore_normals = np.array([True, False])
+        return value
+
+    def write(work, scene, pages, suns, *args, **kwargs):
+        return original_write(work, scene, pages, [sun(strength=np.pi, classes=(-1,))], *args, **kwargs)
+
+    def blender(work, s):
+        return BakeResult([np.full((2, 2, 3), 0.2, np.float32)], np.zeros((6, 3), np.float32),
+                          np.ones(6), 'test', [np.ones((2, 2), bool)],
+                          vertex_sun_lit=np.zeros((6, 1), bool), diffuse_pages=[np.full((2, 2, 3), 0.4, np.float32)],
+                          vertex_sun_throughput=np.full((6, 1, 3), 0.3, np.float32))
+
+    monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
+    monkeypatch.setattr(pipeline, '_scene', scene)
+    monkeypatch.setattr(pipeline, 'write_job', write)
+    monkeypatch.setattr(pipeline, 'run_blender', blender)
+    out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
+    # inclusive diagonal centres belong to triangle zero: six of nine sub-texels at either seam
+    want = np.array([[0.9, 0.2 + 0.7 * 2 / 3], [0.2 + 0.7 * 2 / 3, 0.2]])
+    np.testing.assert_allclose(out.float_pages[0], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
+
+
 def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny, monkeypatch):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     from lightmapper.formats.bitmap_decode import decode_bitmap

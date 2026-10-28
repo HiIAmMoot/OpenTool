@@ -4,6 +4,9 @@ The bake lights a receiver only where its plane faces the sun. tool instead ligh
 faces the sun and whose shadow ray is clear, then interpolates the corners over the triangle, so a face that turns
 away at a ridge still shades off smoothly from its lit corners. This adds that term to the faces the bake leaves
 dark, in the same units as the baked page, and touches no other texel.
+
+Ignore-normals receivers instead take RGB shadow throughput from every reached corner at full strength,
+without the plane, cosine or boundary-distance tests. Their Cycles objects have no linked suns.
 """
 
 from dataclasses import dataclass
@@ -34,6 +37,8 @@ def prepare_boundaries(scene, suns, reach, edge_sun_lit=None):
     facing = _planes(scene, scene.tris) @ centre.T > 0
     lights = np.stack([np.isin(scene.tri_class, sun['classes']) for sun in suns], axis=1)
     away = ~facing & lights
+    if scene.tri_ignore_normals is not None:
+        away &= ~scene.tri_ignore_normals[:, None]
     if edge_sun_lit is None:
         return SunBoundaries(away, _lit_edges(scene, scene.tris, facing & lights), None)
     return SunBoundaries(away, None, _segment_tables(scene, suns, reach, scene.tris, edge_sun_lit, facing))
@@ -105,6 +110,48 @@ def _planes(scene, tris):
     return plane * np.where((plane * smooth.sum(axis=1)).sum(axis=1) < 0, -1, 1)[:, None]
 
 
+def flagged_fraction(scene, page, width, height):
+    fraction = np.zeros((height, width), np.float32)
+    if scene.tri_ignore_normals is None or not scene.tri_ignore_normals.any():
+        return fraction
+    rows = np.flatnonzero(scene.tri_page == page)
+    if not len(rows) or not scene.tri_ignore_normals[rows].any():
+        return fraction
+    owner, _ = triangle_weights(scene.lm_uv, scene.tris[rows], 3 * width, 3 * height)
+    covered = owner >= 0
+    flagged = covered & scene.tri_ignore_normals[rows][np.maximum(owner, 0)]
+    count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
+    return (flagged.reshape(height, 3, width, 3).sum(axis=(1, 3)) / np.maximum(count, 1)).astype(np.float32)
+
+
+def flat_sun_term(scene, suns, throughput, page, width, height):
+    term = np.zeros((height, width, 3), np.float32)
+    if not suns or scene.tri_ignore_normals is None:
+        return term
+    rows = np.flatnonzero(scene.tri_page == page)
+    if not len(rows) or not scene.tri_ignore_normals[rows].any():
+        return term
+    tris = scene.tris[rows]
+    owner, weights = triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
+    covered = owner >= 0
+    wanted = covered & scene.tri_ignore_normals[rows][np.maximum(owner, 0)]
+    count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
+    tri, weight = owner[wanted], weights[wanted]
+    queries = scene.query_inverse[tris]
+    sub = np.zeros((len(tri), 3), np.float32)
+    for k, sun in enumerate(suns):
+        power = np.asarray(sun['color'], np.float32) * np.float32(sun['strength'] / np.pi)
+        corner = np.asarray(throughput[:, k], np.float32)[queries]
+        corner *= np.isin(scene.tri_class[rows], sun['classes'])[:, None, None]
+        for first in range(0, len(tri), CHUNK):
+            part = slice(first, first + CHUNK)
+            sub[part] += np.einsum('nc,nck->nk', weight[part], corner[tri[part]]) * power
+    image = np.zeros((3 * height, 3 * width, 3), np.float32)
+    image[wanted] = sub
+    total = image.reshape(height, 3, width, 3, 3).sum(axis=(1, 3), dtype=np.float64)
+    return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32)
+
+
 def _lit_edges(scene, tris, facing):
     """(tris, 3, suns): whether each edge (corner c to c+1) is shared, by both endpoint positions, with a triangle
     that is plane-facing for the sun, which is where tool's mesh has light up to the edge."""
@@ -145,13 +192,15 @@ def edge_queries(scene, suns, reach, facing=None):
     if facing is None:
         facing = _planes(scene, scene.tris) @ centre.T > 0
     lights = np.stack([np.isin(scene.tri_class, s['classes']) for s in suns], axis=1) if suns else facing
+    ignore_normals = (scene.tri_ignore_normals if scene.tri_ignore_normals is not None
+                      else np.zeros(len(scene.tris), bool))
     adjacency = {}
     for t, row in enumerate(keys):
         for c, key in enumerate(row):
             adjacency.setdefault(int(key), []).append((t, c))
     positions, normals, classes, masks, group_keys, offsets = [], [], [], [], [], [0]
     for key, owners in sorted(adjacency.items()):
-        away = np.any([~facing[t] & lights[t] for t, _ in owners], axis=0)
+        away = np.any([~facing[t] & lights[t] & ~ignore_normals[t] for t, _ in owners], axis=0)
         if not away.any():
             continue
         seen = set()

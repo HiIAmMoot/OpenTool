@@ -165,6 +165,23 @@ def ignore_normals_sun_scene(behind=False):
                 normals=scene.normals, inverse=np.arange(8), ignore_normals=[True] * 4 + [False] * 4)
 
 
+def sun_throughput_scene():
+    return dict(receivers=[full_quad(casts=False)], suns=[sun(-UP)],
+                occluders=[dict(quad=floor(0, 4, 0, 4, z=-1), casts=False, tint=(0.5, 0.25, 1)),
+                           dict(quad=floor(10, 14, 0, 4, z=-1), casts=False, tint=(0, 0, 0)),
+                           dict(quad=floor(20, 24, 0, 4, z=-1))],
+                query=((2, 2, 0), (12, 2, 0), (22, 2, 0), (32, 2, 0)),
+                ignore_normals=[True] * 4)
+
+
+@pytest.mark.blender
+def test_sun_throughput_carries_the_panes_colour(tmp_path):
+    out = run_driver(tmp_path, **sun_throughput_scene())
+    np.testing.assert_array_equal(out['sun_lit'], [[True], [True], [False], [True]])
+    np.testing.assert_allclose(out['vertex_sun_throughput'][:, 0],
+                               [[0.5, 0.25, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1]], rtol=1e-6)
+
+
 @pytest.mark.blender
 def test_ignore_normals_query_takes_a_sun_from_behind_at_full_strength(tmp_path):
     case = ignore_normals_sun_scene(behind=True)

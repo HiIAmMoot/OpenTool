@@ -90,6 +90,7 @@ class BakeResult:
     stages: dict | None = None
     samples_used: int | None = None
     texel_samples_used: int | None = None
+    vertex_sun_throughput: np.ndarray | None = None
 
 
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
@@ -224,7 +225,9 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                             'pages': float(data['seconds_pages']), 'vertex': float(data['seconds_vertex'])}
                            if 'seconds_start' in data.files else None),
                           int(data['samples_used']) if 'samples_used' in data.files else None,
-                          int(data['texel_samples_used']) if 'texel_samples_used' in data.files else None)
+                           int(data['texel_samples_used']) if 'texel_samples_used' in data.files else None,
+                           np.array(data['vertex_sun_throughput'], np.float32)
+                           if 'vertex_sun_throughput' in data.files else None)
 
 
 def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:
@@ -238,9 +241,11 @@ def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) ->
         return VertexPassResult(np.array(data['vertex_vector'], np.float32),
                                 np.array(data['vertex_irradiance'], np.float32),
                                 np.array(data['vertex_sun_lit'], bool),
-                                np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']))
+                                np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']),
+                                np.array(data['vertex_sun_throughput'], np.float32))
 
 
 def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
     return replace(result, vertex_vector=vp.vector, vertex_irradiance=vp.irradiance,
-                   vertex_sun_lit=vp.sun_lit, edge_sun_lit=vp.edge_sun_lit, vertex_rays_cast=vp.rays)
+                   vertex_sun_lit=vp.sun_lit, edge_sun_lit=vp.edge_sun_lit, vertex_rays_cast=vp.rays,
+                   vertex_sun_throughput=vp.sun_throughput)

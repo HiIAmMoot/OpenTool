@@ -125,6 +125,79 @@ def sun_of(scene):
             np.ones((len(scene.query_pos), 1), bool))
 
 
+def flat_scene():
+    scene = build([dict(quad=floor(0, 4, 0, 4), ignore_normals=True)])
+    scene.query_inverse = np.arange(4)
+    suns = [dict(direction=[0, 0, -1], color=[0.5, 1, 0.25], strength=np.pi * 2, classes=[0])]
+    return scene, suns, np.ones((4, 1, 3), np.float32)
+
+
+def test_flat_sun_term_lights_every_reached_corner_at_full_strength():
+    from lightmapper.terminator import flat_sun_term
+    scene, suns, throughput = flat_scene()
+    np.testing.assert_allclose(flat_sun_term(scene, suns, throughput, 0, 2, 2),
+                               np.tile([1, 2, 0.5], (2, 2, 1)), rtol=1e-6)
+    assert flat_sun_term(scene, suns, throughput, 1, 2, 2).max() == 0
+    scene.tri_class[:] = 1
+    assert flat_sun_term(scene, suns, throughput, 0, 2, 2).max() == 0
+
+
+def test_flat_sun_term_interpolates_an_unlit_corner():
+    from lightmapper.terminator import flat_sun_term
+    scene, suns, throughput = flat_scene()
+    throughput[0] = 0
+    want = np.array([[35 / 108, 0.75], [0.75, 89 / 108]])
+    np.testing.assert_allclose(flat_sun_term(scene, suns, throughput, 0, 2, 2),
+                               want[:, :, None] * [1, 2, 0.5], rtol=1e-6)
+
+
+@pytest.mark.parametrize('tint', [(0.5, 0.25, 1), (0, 0, 0)])
+def test_flat_sun_term_takes_the_throughputs_colour(tint):
+    from lightmapper.terminator import flat_sun_term
+    scene, suns, throughput = flat_scene()
+    throughput[:] = tint
+    np.testing.assert_allclose(flat_sun_term(scene, suns, throughput, 0, 2, 2),
+                               np.tile(np.array([1, 2, 0.5]) * tint, (2, 2, 1)), rtol=1e-6)
+
+
+def test_flat_sun_term_leaves_unflagged_triangles_alone():
+    from lightmapper.terminator import flat_sun_term
+    scene, suns, throughput = flat_scene()
+    scene.tri_ignore_normals[:] = False
+    assert flat_sun_term(scene, suns, throughput, 0, 2, 2).max() == 0
+
+
+def test_flagged_faces_make_no_edge_probes():
+    from lightmapper.terminator import edge_queries, prepare_boundaries
+    scene = terrace()
+    suns, _ = sun_of(scene)
+    assert len(edge_queries(scene, suns, 1)['edge_pos']) > 0
+    scene.tri_ignore_normals = np.array([False, False, True, True, False, False])
+    assert len(edge_queries(scene, suns, 1)['edge_pos']) == 0
+    assert not prepare_boundaries(scene, suns, 1).away.any()
+
+
+def test_flat_sun_term_at_the_stock_triangle_limit():
+    from lightmapper.terminator import flagged_fraction, flat_sun_term
+    scene, suns, _ = flat_scene()
+    size = 256
+    x, y = np.meshgrid(np.arange(size + 1), np.arange(size + 1))
+    scene.positions = np.column_stack([x.ravel(), y.ravel(), np.zeros(x.size)]).astype(np.float32)
+    scene.lm_uv = scene.positions[:, :2] / size
+    a = (y[:-1, :-1] * (size + 1) + x[:-1, :-1]).ravel()
+    scene.tris = np.stack([np.column_stack([a, a + 1, a + size + 2]),
+                           np.column_stack([a, a + size + 2, a + size + 1])], axis=1).reshape(-1, 3)
+    assert len(scene.tris) == 131072
+    scene.tri_page = np.zeros(len(scene.tris), np.int16)
+    scene.tri_class = np.zeros(len(scene.tris), np.int16)
+    scene.tri_ignore_normals = np.ones(len(scene.tris), bool)
+    scene.query_inverse = np.arange(len(scene.positions))
+    throughput = np.tile(np.float32([0.5, 0.25, 1]), (len(scene.positions), 1, 1))
+    np.testing.assert_allclose(flat_sun_term(scene, suns, throughput, 0, size, size),
+                               np.full((size, size, 3), 0.5), rtol=1e-6)
+    np.testing.assert_array_equal(flagged_fraction(scene, 0, size, size), 1)
+
+
 def test_wall_between_lit_floors_is_lit_only_within_reach_of_them():
     scene = terrace()
     suns, lit = sun_of(scene)

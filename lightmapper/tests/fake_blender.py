@@ -56,6 +56,7 @@ def main():
         arrays['vertex_vector'] = query_pos[:, [1, 2, 0]] * 2
         arrays['vertex_irradiance'] = (query_pos.sum(axis=1) + query_class).astype(np.float32)
         arrays['vertex_sun_lit'] = np.zeros((len(query_pos), len(job['suns'])), bool)
+        arrays['vertex_sun_throughput'] = np.zeros((len(query_pos), len(job['suns']), 3), np.float32)
         arrays['edge_sun_lit'] = np.zeros((edges, len(job['suns'])), bool)
         rays = job.get('cpu_vertex_rays', job['vertex_rays'])
         arrays['vertex_rays_used'] = np.int64(rays)

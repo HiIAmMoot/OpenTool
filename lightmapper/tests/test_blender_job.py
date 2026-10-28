@@ -347,6 +347,9 @@ def test_vertex_only_relaunch_equals_the_in_blender_pass(tmp_path):
     np.testing.assert_array_equal(relaunch.vector, first.vertex_vector)
     np.testing.assert_array_equal(relaunch.irradiance, first.vertex_irradiance)
     np.testing.assert_array_equal(relaunch.sun_lit, first.vertex_sun_lit)
+    np.testing.assert_array_equal(relaunch.sun_throughput, first.vertex_sun_throughput)
+    replaced = blender_job.with_vertex_pass(first, relaunch)
+    np.testing.assert_array_equal(replaced.vertex_sun_throughput, first.vertex_sun_throughput)
     np.testing.assert_array_equal(relaunch.edge_sun_lit, first.edge_sun_lit)
     assert relaunch.rays == first.vertex_rays_cast and relaunch.rays > 0
     log = (tmp_path / 'blender_vertex.log').read_text()
