@@ -199,7 +199,7 @@ def _read(device, buffer, dtype):
     return buffer.to_numpy().view(dtype)
 
 
-def _scene_arrays(scene, textures, pages):
+def _scene_arrays(scene, textures, pages, enhanced=False):
     """The triangles of the receivers then the occluders as the arrays the shader reads (one triangle id space)."""
     n_vertices = len(scene['positions'])
     n_recv, n_occ = len(scene['tris']), len(scene['occ_tris'])
@@ -212,6 +212,8 @@ def _scene_arrays(scene, textures, pages):
     # a see-through emitter among the occluders is still seen by the rays that gather light (a shadow ray passes it)
     glows = np.concatenate([np.zeros(n_recv, bool), emission[n_recv:].any(axis=1)])
     flags = cutout * 1 + casts * 2 + glows * 4 + (np.arange(n_recv + n_occ) < n_recv) * 8
+    if enhanced:
+        flags[:n_recv] |= scene.get('tri_ignore_normals', np.zeros(n_recv, bool)) * 16
     class_of = np.concatenate([scene['tri_class'], np.full(n_occ, -1)]).astype(np.int64)
     info = np.stack([np.concatenate([scene['tri_texture'], scene['occ_tri_texture']]), flags,
                      np.concatenate([scene['tri_page'], np.full(n_occ, -1)]), class_of], axis=1)
@@ -361,7 +363,7 @@ def run_vertex_pass(scene, job, textures, pages, device):
     suns = job['suns']
     usable, n, tangent, bitangent, spin = query_frames(scene['query_normal'], job.get('seed', 0))
     qcls = scene['query_class'].astype(np.int64)
-    arrays = _scene_arrays(scene, textures, pages)
+    arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced')
     table = ambient_table(job, qcls, arrays['class_of'])
     sun_query, sun_index, sun_origin, sun_dir, sun_cos = sun_rays(scene, job, usable, n)
     if len(scene.get('edge_pos', ())):
@@ -422,7 +424,7 @@ def _gather_texels(scene, job, textures, pages, device):
     local, phi, r = sphere(rays)
     batches = [((phi, r, local[:, 2]), (ids, scene['texel_pos'][ids], n[ids], t[ids], b[ids], spin[ids],
                                       scene['texel_class'][ids]), 4.)]
-    arrays = _scene_arrays(scene, textures, pages)
+    arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced')
     # black class ambients keep the page gather free of the ambient finish_pages adds later
     table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
     probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],

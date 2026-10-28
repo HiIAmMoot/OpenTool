@@ -137,11 +137,12 @@ float3 shade_rgb(int tri, float2 bary, float3 dir, int cls)
     bool facing = dot(tri_normal[tri], dir) < 0;
     if (!receiver(tri))
         return albedo * (with_ambient ? ambient_of(cls) : float3(0.0)) + tri_emission[tri] * (facing ? 1.0 : 0.0);
-    if (!facing)
+    if (!facing && !(tri_info[tri].y & 16))
         return float3(0.0);
     int page = tri_info[tri].z;
     float3 lit = page >= 0 ? page_at(page, interpolate(vertex_lm_uv, tri, w)) : float3(0.0);
-    return albedo * (lit + (with_ambient ? ambient_of(tri_info[tri].w) : float3(0.0))) + tri_emission[tri];
+    return albedo * (lit + (with_ambient && facing ? ambient_of(tri_info[tri].w) : float3(0.0)))
+        + tri_emission[tri] * (facing ? 1.0 : 0.0);
 }
 
 float shade(int tri, float2 bary, float3 dir, int cls)

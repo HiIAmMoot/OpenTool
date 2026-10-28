@@ -707,6 +707,8 @@ class VertexPass:
         self.tint = np.concatenate([scene['tri_tint'], scene['occ_tri_tint']]).astype(np.float64)
         self.page_of = np.concatenate([scene['tri_page'], np.full(n_occ, -1)])
         self.class_of = np.concatenate([scene['tri_class'], np.full(n_occ, -1)])
+        self.two_sided = np.concatenate([scene.get('tri_ignore_normals', np.zeros(self.n_recv, bool)),
+                                         np.zeros(n_occ, bool)]) & (job.get('ignore_normals_mode') == 'enhanced')
         self.emission = np.concatenate([scene['tri_emission'], scene['occ_tri_emission']]).astype(np.float64)
         # a see-through emitter among the occluders is still seen by the rays that gather light (a shadow ray passes it)
         self.glows = np.concatenate([np.zeros(self.n_recv, np.bool_), self.emission[self.n_recv:].any(axis=1)])
@@ -808,7 +810,7 @@ class VertexPass:
         occluder = ~recv
         lit[occluder] = (albedo[occluder] * (self.ambient_of(cls[hit][occluder]) if with_ambient else 0)
                           + self.emission[t][occluder] * facing[occluder, None])
-        front = recv & facing
+        front = recv & (facing | self.two_sided[t])
         if front.any():
             ft = t[front]
             lm = self.interpolate(self.lm_uv, ft, p[front])
@@ -816,7 +818,8 @@ class VertexPass:
             for k in np.unique(self.page_of[ft]):
                 rows = self.page_of[ft] == k
                 page_value[rows] = sample_bilinear(self.pages[k], lm[rows, 0], lm[rows, 1], False)
-            colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) if with_ambient else 0)) + self.emission[ft]
+            colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) * facing[front, None]
+                                                   if with_ambient else 0)) + self.emission[ft] * facing[front, None]
             lit[front] = colour
         radiance[hit] = lit
         return radiance

@@ -82,9 +82,9 @@ def texel_scene(kind):
                     occluders=[dict(quad=floor(-100, 100, -100, 100, z=-1),
                                     casts=False, tint=(.5, .25, 1))],
                     suns=[sun((0, 0, -1))], query=((2, 2, 0),), texel=((2, 2, 0),))
-    if kind == 'vertex':
-        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000, z=1, up=False),
-                                    ignore_normals=True)],
+    if kind in ('vertex', 'vertex_back'):
+        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000, z=1, up=kind == 'vertex_back'),
+                                     ignore_normals=True, emission=(7, 7, 7) if kind == 'vertex_back' else (0, 0, 0))],
                     suns=[sun((0, 0, 1))], query=((0, 0, 0),), texel=((0, 0, 1),) * 9,
                     pages=[np.zeros((1, 1, 3), np.float32)], rays=1024, albedo_fallback=1)
     raise ValueError(kind)
@@ -110,8 +110,9 @@ def test_texel_gather_takes_the_sun_from_behind_through_a_pane(tmp_path):
 
 
 @pytest.mark.blender
-def test_vertex_queries_see_the_gathered_flagged_texels(tmp_path):
-    out = run_driver(tmp_path, **texel_scene('vertex'))
+@pytest.mark.parametrize('kind', ['vertex', 'vertex_back'])
+def test_vertex_queries_see_the_gathered_flagged_texels(tmp_path, kind):
+    out = run_driver(tmp_path, **texel_scene(kind))
     np.testing.assert_allclose(out['texel_rgb'], [[3 / np.pi] * 3] * 9, rtol=1e-6)
     assert out['irradiance'][0] == pytest.approx(3, rel=.05)
 
