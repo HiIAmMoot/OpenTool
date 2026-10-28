@@ -199,3 +199,10 @@ def test_largest_supported_surface_block(tmp_path):
     back = tagfile.read_tag(path)
     assert len(back.root.block("surfaces")) == 131072
     assert tagfile.tag_bytes(back) == path.read_bytes()
+
+
+def test_reference_paths_are_written_with_backslashes():
+    # a path typed with forward slashes (as the CLI accepts) must still be a reference the game resolves
+    tag = tagfile.new_tag("sbsp")
+    tag.root.set_reference("lightmaps_bitmap", "bitm", "levels/test/bloodgulch/bloodgulch_32bit")
+    assert tag.root.reference("lightmaps_bitmap") == ("bitm", r"levels\test\bloodgulch\bloodgulch_32bit")

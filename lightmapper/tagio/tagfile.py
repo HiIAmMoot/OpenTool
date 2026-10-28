@@ -93,6 +93,8 @@ class Element:
         if len(fourcc) != 4:
             raise ValueError("reference group must have four characters")
         self.body[field.offset:field.offset + 4] = fourcc
+        # (the game resolves references with backslashes only; a CLI path may come in with forward slashes)
+        path = path.replace("/", "\\")
         self._children[key] = path.encode(PATH_ENCODING) + b"\0" if path else b""
 
     def _check_kind(self, key, kind):
