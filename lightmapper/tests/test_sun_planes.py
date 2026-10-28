@@ -155,7 +155,8 @@ def test_terminator_planes_complement_bake_planes_after_float32_exchange(bake_mo
     # the npz exchange hands bake.py float32 positions and normals, even for a float64 caller
     exchange = dict(positions=positions.astype(np.float32), normals=normals.astype(np.float32),
                     tris=tris, tri_class=classes)
-    scene = SimpleNamespace(positions=positions, normals=normals, tris=tris, tri_class=classes)
+    scene = SimpleNamespace(positions=positions, normals=normals, tris=tris, tri_class=classes,
+                            tri_ignore_normals=None)
     away = prepare_boundaries(scene, suns, 0.225).away
     facing = bake_module.sun_facing_planes(exchange, suns)
     bits = bake_module.receiver_sun_bits(exchange, suns)

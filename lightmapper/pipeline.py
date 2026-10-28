@@ -3,8 +3,8 @@
 All expensive stages finish before any tag is written. Diagnostic source passes
 and dry runs keep their work products but never replace a tag.
 
-Ignore-normals pages take their direct sun from RGB corner throughputs, with no cosine. Cycles' two-closure
-diffuse bake divides by both closure colours, so its flagged diffuse share is restored before finishing.
+Ignore-normals pages take their direct sun from RGB corner throughputs, with no cosine. Blender restores
+their two-closure diffuse share before averaging sub-texels, keeping the vertex pass's diffuse page unchanged.
 """
 
 from dataclasses import asdict, dataclass, fields
@@ -31,15 +31,13 @@ from .pages import DenoiseWorker, finish_pages, quantise
 from .radiosity import finalize, query_points
 from .raster import coverage
 from .settings import Settings
-from .terminator import flagged_fraction, flat_sun_term, prepare_boundaries, sun_term
+from .terminator import flat_sun_term, prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
 from .textures import TextureSet, shader_texture
 from .twins import ambiguous_warning
 
 
 MAX_BSP_SURFACES = 131072
-# measured Diffuse + Translucent / Diffuse-only bake ratio: 0.5011076 (Blender 5.2)
-BACK_SIDE_SHARE = 0.5
 logger = logging.getLogger(__name__)
 
 
@@ -327,8 +325,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             raw = raw + sun_term(scene, job_suns, result.vertex_sun_lit, i, page.width, page.height,
                                  s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries)
         if scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
-            fraction = flagged_fraction(scene, i, page.width, page.height)
-            raw = raw + result.diffuse_pages[i] * (1 / BACK_SIDE_SHARE - 1) * fraction[:, :, None]
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
         raw_pages.append(raw)

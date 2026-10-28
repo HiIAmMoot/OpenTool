@@ -132,6 +132,23 @@ def test_ignore_normals_receiver_gets_no_cycles_sun(tmp_path):
     np.testing.assert_allclose(result.pages[1][2:-2, 2:-2], 3 / np.pi, rtol=0.05)
 
 
+@pytest.mark.blender
+@pytest.mark.parametrize('radiance', [0, 4])
+def test_mixed_texel_corrects_only_its_flagged_diffuse(tmp_path, radiance):
+    left = ((0, 0), (2 / 3, 0), (2 / 3, 1), (0, 1))
+    right = ((2 / 3, 0), (1, 0), (1, 1), (2 / 3, 1))
+    receivers = [dict(quad=floor(0, 4, 0, 4, lm=left), ignore_normals=True),
+                 dict(quad=floor(10, 14, 0, 4, lm=right))]
+    panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(radiance,) * 3, casts=False)] if radiance else []
+    settings = Settings(samples=1024, vertex_rays=1, bounces=1, w_sun=1, w_emit=1,
+                        albedo_scale=1, albedo_fallback=0.5)
+    write_job(tmp_path, build(receivers, panels), [(1, 1)], [sun(strength=np.pi)], {}, settings)
+    result = run_blender(tmp_path, settings)
+    # six flagged samples take the panel, three unflagged samples take the sun; the vertex page keeps half the panel
+    np.testing.assert_allclose(result.pages[0], 2 / 3 * radiance + 1 / 3, rtol=0.05)
+    np.testing.assert_allclose(result.diffuse_pages[0], 1 / 3 * radiance + 1 / 3, rtol=0.05)
+
+
 TWIN_DEVICES = [
     'CPU',
     pytest.param('OPTIX', marks=pytest.mark.gpu_nvidia),

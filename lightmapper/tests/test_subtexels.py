@@ -47,6 +47,82 @@ def test_downsample_default_max_page_grid_snapped(bake_module):
     np.testing.assert_array_equal(page, np.broadcast_to([0.5, 1, 2], page.shape))
 
 
+def test_flagged_diffuse_is_scaled_before_averaging_and_keeps_unwritten_samples(bake_module):
+    rgb = np.ones((3, 6, 3), np.float32)
+    rgb[:, :2] = [0, 0.5, 2]
+    rgb[:, 3:5] = [0, 0.5, 2]
+    rgb[2, 5] = -1
+    scale = np.ones((3, 6), np.float32)
+    scale[:, :2] = 2
+    scale[:, 3:5] = 2
+    original = rgb.copy()
+    corrected, written = bake_module.downsample_written(rgb, scale)
+    np.testing.assert_allclose(corrected, [[[1 / 3, 1, 3], [1 / 4, 1, 13 / 4]]], rtol=1e-6)
+    np.testing.assert_array_equal(written, [[True, True]])
+    np.testing.assert_array_equal(rgb, original)
+    np.testing.assert_allclose(bake_module.downsample_written(rgb)[0],
+                               [[[1 / 3, 2 / 3, 5 / 3], [1 / 4, 5 / 8, 7 / 4]]], rtol=1e-6)
+
+
+def test_receiver_diffuse_scale_uses_blender_rows_and_first_triangle_ownership(bake_module):
+    scene = dict(lm_uv=np.float32([[0, 0], [1, 0], [0, 1], [1, 1]]),
+                 tris=np.array([[0, 1, 2], [1, 3, 2], [0, 1, 2]]),
+                 tri_page=np.zeros(3, np.int16), tri_ignore_normals=np.array([True, False, False]))
+    np.testing.assert_array_equal(bake_module.receiver_diffuse_scale(scene, 0, 1, 1),
+                                   [[2, 1, 1], [2, 2, 1], [2, 2, 2]])
+    assert bake_module.receiver_diffuse_scale(scene, 1, 1, 1) is None
+    scene['tri_ignore_normals'][:] = False
+    assert bake_module.receiver_diffuse_scale(scene, 0, 1, 1) is None
+
+
+def test_receiver_diffuse_scale_at_the_stock_triangle_limit(bake_module):
+    size = 256
+    x, y = np.meshgrid(np.arange(size + 1), np.arange(size + 1))
+    uv = np.column_stack([x.ravel(), y.ravel()]).astype(np.float32) / size
+    a = (y[:-1, :-1] * (size + 1) + x[:-1, :-1]).ravel()
+    tris = np.stack([np.column_stack([a, a + 1, a + size + 2]),
+                     np.column_stack([a, a + size + 2, a + size + 1])], axis=1).reshape(-1, 3)
+    flags = np.repeat(np.arange(size * size) % 2 == 0, 2)
+    assert len(tris) == 131072
+    scene = dict(lm_uv=uv, tris=tris, tri_page=np.zeros(len(tris), np.int16), tri_ignore_normals=flags)
+    scale = bake_module.receiver_diffuse_scale(scene, 0, size, size)
+    want = np.where(np.arange(3 * size) // 3 % 2 == 0, 2, 1)
+    np.testing.assert_array_equal(scale, np.tile(want, (3 * size, 1)))
+
+
+def test_receiver_diffuse_scale_strips_at_default_max_page_size(bake_module):
+    scene = dict(lm_uv=np.float32([[0, 0], [1, 0], [0, 1], [1, 1]]),
+                 tris=np.array([[0, 1, 2], [1, 3, 2]]), tri_page=np.zeros(2, np.int16),
+                 tri_ignore_normals=np.array([True, False]))
+    scale = bake_module.receiver_diffuse_scale(scene, 0, 1024, 1024)
+    assert scale.shape == (3072, 3072)
+    assert np.count_nonzero(scale == 2) == 4720128
+    np.testing.assert_array_equal(scale[-1], 2)
+    np.testing.assert_array_equal(scale[0, 1:], 1)
+    assert scale[0, 0] == 2
+
+
+def test_edge_topups_correct_their_own_flagged_samples(bake_module, monkeypatch):
+    cycles = types.SimpleNamespace(samples=1, seed=7)
+    bake_module.bpy.context = types.SimpleNamespace(scene=types.SimpleNamespace(cycles=cycles))
+    bake_module.bpy.ops = types.SimpleNamespace(object=types.SimpleNamespace(bake=lambda **kwargs: None))
+    image = types.SimpleNamespace(pixels=types.SimpleNamespace(foreach_set=lambda value: None))
+    raw = np.full((3, 3, 3), -1, np.float32)
+    raw[:2] = 3
+    raw[:2, :2] = [0, 1, 4]
+    monkeypatch.setattr(bake_module, 'read_page', lambda *args: raw)
+    scale = np.ones((3, 3), np.float32)
+    scale[:, :2] = 2
+    diffuse, corrected = bake_module.top_up_edge_texels(
+        np.float32([[[1 / 3, 2 / 3, 5 / 3]]]), np.float32([[[1 / 3, 1, 3]]]),
+        np.array([[6]]), image, image, np.full(36, -1, np.float32), 1, 1,
+        dict(texel_samples=9), scale)
+    # the 4..6-owned tier gets two extra samples per sub-texel, against one in the base pass
+    np.testing.assert_allclose(diffuse, [[[7 / 9, 4 / 3, 3]]], rtol=1e-6)
+    np.testing.assert_allclose(corrected, [[[7 / 9, 17 / 9, 47 / 9]]], rtol=1e-6)
+    assert cycles.samples == 1 and cycles.seed == 7
+
+
 def test_emit_pass_written_mask_is_compared_with_the_diffuse_one(bake_module):
     assert hasattr(bake_module, 'warn_if_masks_differ'), 'written-mask comparison is missing'
     same = np.zeros((2, 2), np.bool_)

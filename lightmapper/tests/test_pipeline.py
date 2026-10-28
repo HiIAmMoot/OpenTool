@@ -1093,7 +1093,7 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
     assert all(page.max() == pytest.approx(0.5) for page in out.float_pages)
 
 
-def test_pipeline_adds_the_flat_sun_term_and_the_back_side_share(tiny, monkeypatch):
+def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatch):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     from test_blender_bake import sun
     tags, settings, work = tiny
@@ -1116,9 +1116,10 @@ def test_pipeline_adds_the_flat_sun_term_and_the_back_side_share(tiny, monkeypat
         return original_write(work, scene, pages, [sun(strength=np.pi, classes=(-1,))], *args, **kwargs)
 
     def blender(work, s):
-        return BakeResult([np.full((2, 2, 3), 0.2, np.float32)], np.zeros((6, 3), np.float32),
+        diffuse = np.repeat(np.float32([[0, 1 / 3], [1 / 3, 1]])[:, :, None], 3, axis=2)
+        return BakeResult([diffuse.copy()], np.zeros((6, 3), np.float32),
                           np.ones(6), 'test', [np.ones((2, 2), bool)],
-                          vertex_sun_lit=np.zeros((6, 1), bool), diffuse_pages=[np.full((2, 2, 3), 0.4, np.float32)],
+                          vertex_sun_lit=np.zeros((6, 1), bool), diffuse_pages=[diffuse],
                           vertex_sun_throughput=np.full((6, 1, 3), 0.3, np.float32))
 
     monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
@@ -1126,8 +1127,8 @@ def test_pipeline_adds_the_flat_sun_term_and_the_back_side_share(tiny, monkeypat
     monkeypatch.setattr(pipeline, 'write_job', write)
     monkeypatch.setattr(pipeline, 'run_blender', blender)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
-    # inclusive diagonal centres belong to triangle zero: six of nine sub-texels at either seam
-    want = np.array([[0.9, 0.2 + 0.7 * 2 / 3], [0.2 + 0.7 * 2 / 3, 0.2]])
+    # flagged samples are dark, unflagged samples have diffuse 1; only the independent sun term is added here
+    want = np.array([[0.3, 1 / 3 + 0.3 * 2 / 3], [1 / 3 + 0.3 * 2 / 3, 1]])
     np.testing.assert_allclose(out.float_pages[0], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
 
 

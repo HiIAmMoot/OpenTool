@@ -8,6 +8,9 @@ shades the hits in batches.
 
 Ignore-normals queries gather uniformly over the whole sphere with weight 4pi/N and take reached suns
 at full strength from either side. Their ambient stays the same as an ordinary query's.
+
+The two-closure diffuse bake is restored on flagged sub-texels before averaging, including edge top-ups.
+The vertex pass still receives the uncorrected diffuse page; mixed texels never scale a neighbour's light.
 """
 
 import json
@@ -38,6 +41,8 @@ SEED_STRIDE = 1000
 SEED_SPIN = 0.7548776662466927
 # queries per batch: bounds the hit arrays held before they are shaded
 QUERY_CHUNK = 256
+# measured Diffuse + Translucent / Diffuse-only bake ratio: 0.5011076 (Blender 5.2)
+BACK_SIDE_SHARE = 0.5
 
 
 def log(message):
@@ -458,12 +463,47 @@ def read_page(image, h, w):
     return buffer.reshape(h, w, 4)[:, :, :3].copy()
 
 
-def downsample_written(rgb):
+def receiver_diffuse_scale(scene, page, width, height):
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    flags = scene.get('tri_ignore_normals', np.zeros(len(scene['tris']), bool))[rows]
+    if not flags.any():
+        return None
+    width, height = 3 * width, 3 * height
+    scale = np.ones((height, width), np.float32)
+    if flags.all():
+        scale.fill(1 / BACK_SIDE_SHARE)
+        return scale
+    occupied = np.zeros((height, width), bool)
+    uv = scene['lm_uv'].astype(np.float64) * [width, height]
+    for tri, flagged in zip(scene['tris'][rows], flags):
+        a, b, c = uv[tri]
+        x0 = max(0, math.ceil(min(a[0], b[0], c[0]) - 0.5))
+        x1 = min(width - 1, math.floor(max(a[0], b[0], c[0]) - 0.5))
+        y0 = max(0, math.ceil(min(a[1], b[1], c[1]) - 0.5))
+        y1 = min(height - 1, math.floor(max(a[1], b[1], c[1]) - 0.5))
+        x = np.arange(x0, x1 + 1, dtype=np.float64)[None, :] + 0.5
+        # row strips bound the edge-function temporaries even for a triangle spanning a whole page
+        for first in range(y0, y1 + 1, 64):
+            end = min(first + 64, y1 + 1)
+            y = np.arange(first, end, dtype=np.float64)[:, None] + 0.5
+            ab = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+            bc = (c[0] - b[0]) * (y - b[1]) - (c[1] - b[1]) * (x - b[0])
+            ca = (a[0] - c[0]) * (y - c[1]) - (a[1] - c[1]) * (x - c[0])
+            claimed = occupied[first:end, x0:x1 + 1]
+            inside = (((ab >= 0) & (bc >= 0) & (ca >= 0)) | ((ab <= 0) & (bc <= 0) & (ca <= 0))) & ~claimed
+            scale[first:end, x0:x1 + 1][inside] = 1 / BACK_SIDE_SHARE if flagged else 1
+            claimed[inside] = True
+    # lightmap UVs are flipped on the bake mesh; read_page returns Blender's bottom row first
+    return scale[::-1].copy()
+
+
+def downsample_written(rgb, scale=None):
     """Box-average 3x3 sub-texels, excluding the negative unwritten sentinel, not black samples."""
     h, w = rgb.shape[:2]
     written = (rgb >= 0).all(axis=2)
     count = written.reshape(h // 3, 3, w // 3, 3).sum(axis=(1, 3))
-    total = np.where(written[:, :, None], rgb, 0).reshape(h // 3, 3, w // 3, 3, 3).sum(axis=(1, 3))
+    values = rgb if scale is None else rgb * scale[:, :, None]
+    total = np.where(written[:, :, None], values, 0).reshape(h // 3, 3, w // 3, 3, 3).sum(axis=(1, 3))
     return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32), count > 0
 
 
@@ -519,24 +559,25 @@ def warn_if_masks_differ(diffuse_written, emit_written, page):
     return differs
 
 
-def bake_page(page, receivers, image, h, w, job, mask_image=None):
+def bake_page(page, receivers, image, h, w, job, mask_image=None, diffuse_scale=None):
     chosen = [obj for obj, p, _ in receivers if p == page]
     if not chosen:
         return (np.zeros((h, w, 3), np.float32), np.zeros((h, w, 3), np.float32),
                 np.zeros((h, w), np.bool_))
     size_page_image(image, w, h)
     try:
-        return _bake_page(page, chosen, image, h, w, job, mask_image)
+        return _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale)
     finally:
         release_page_image(image)
 
 
-def top_up_edge_texels(diffuse, owned, image, mask_image, sentinel, h, w, job):
+def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, sentinel, h, w, job, diffuse_scale=None):
     """Bake again, only where a texel owns few sub-texels, with other seeds, and merge by sample count."""
     cycles = bpy.context.scene.cycles
     base_spp = cycles.samples
     tiers = plan_extra_passes(owned, base_spp, job['texel_samples'])
     extra = []
+    extra_corrected = []
     seed = cycles.seed
     try:
         for n, (spp, mask) in enumerate(tiers):
@@ -550,14 +591,20 @@ def top_up_edge_texels(diffuse, owned, image, mask_image, sentinel, h, w, job):
             image.pixels.foreach_set(sentinel)
             bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
                                 target='IMAGE_TEXTURES')
-            extra.append(downsample_written(read_page(image, 3 * h, 3 * w))[0])
+            raw = read_page(image, 3 * h, 3 * w)
+            extra.append(downsample_written(raw)[0])
+            if diffuse_scale is not None:
+                extra_corrected.append(downsample_written(raw, diffuse_scale)[0])
     finally:
         cycles.seed, cycles.samples = seed, base_spp
         reset_mask(mask_image)
-    return merge_extra(diffuse, owned, base_spp, tiers, extra)
+    diffuse = merge_extra(diffuse, owned, base_spp, tiers, extra)
+    corrected = (merge_extra(corrected, owned, base_spp, tiers, extra_corrected)
+                 if diffuse_scale is not None else diffuse)
+    return diffuse, corrected
 
 
-def _bake_page(page, chosen, image, h, w, job, mask_image):
+def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
     view_layer = bpy.context.view_layer
     for obj in bpy.context.scene.objects:
         obj.select_set(False)
@@ -571,14 +618,16 @@ def _bake_page(page, chosen, image, h, w, job, mask_image):
                         target='IMAGE_TEXTURES')
     raw = read_page(image, 3 * h, 3 * w)
     diffuse, written = downsample_written(raw)
+    corrected = downsample_written(raw, diffuse_scale)[0] if diffuse_scale is not None else diffuse
     if mask_image is not None:
-        diffuse = top_up_edge_texels(diffuse, owned_subsamples(raw), image, mask_image, sentinel, h, w, job)
+        diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned_subsamples(raw), image, mask_image,
+                                               sentinel, h, w, job, diffuse_scale)
     image.pixels.foreach_set(sentinel)
     bpy.ops.object.bake(type='EMIT', margin=0, use_clear=False, target='IMAGE_TEXTURES')
     emit, emit_written = downsample_written(read_page(image, 3 * h, 3 * w))
     warn_if_masks_differ(written, emit_written, page)
     # Blender's row 0 is the bottom; the diffuse part alone comes back too, for the vertex pass to add emission once
-    return (diffuse + emit)[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
+    return (corrected + emit)[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
 
 
 def sample_bilinear(image, u, v, repeat):
@@ -891,7 +940,8 @@ def main():
         for i, (w, h) in enumerate(job['pages']):
             began = time.perf_counter()
             out[f'page_{i}'], diffuse, out[f'written_{i}'] = bake_page(i, receivers, page_images[i], h, w, job,
-                                                                   mask_images[i] if mask_images else None)
+                                                                   mask_images[i] if mask_images else None,
+                                                                   receiver_diffuse_scale(scene_data, i, w, h))
             diffuse_pages.append(diffuse)
             out[f'diffuse_{i}'] = diffuse
             out['seconds_pages'] = np.float64(out['seconds_pages'] + time.perf_counter() - began)
