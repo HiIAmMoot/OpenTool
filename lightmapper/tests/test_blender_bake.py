@@ -783,3 +783,25 @@ def test_flagged_glow_lights_a_neighbour(tmp_path):
     # (the page's first rows are the low-v side of the quad, so the neighbour on the -y side gets their light)
     assert glow[2][2:-2, 2:-2].mean() > 0.5
     assert glow[1][2:-2, 2:-2].mean() < 0.1
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('received', [0., 1.])
+def test_mixed_glow_source_uses_only_flagged_samples(tmp_path, received):
+    from lightmapper.blender_job import run_blender_glow
+    from lightmapper.raster import flagged_source
+
+    left = ((0, 0), (2/3, 0), (2/3, 1), (0, 1))
+    right = ((2/3, 0), (1, 0), (1, 1), (2/3, 1))
+    scene = build([dict(quad=floor(-100, 100, -100, 100, z=1, lm=left), ignore_normals=True),
+                   dict(quad=floor(300, 400, 300, 400, z=1, lm=right)),
+                   dict(quad=floor(-1, 1, -1, 1), page=1)])
+    s = Settings(samples=256, vertex_rays=1, albedo_fallback=.25, device='cpu', ignore_normals_mode='enhanced')
+    write_job(tmp_path, scene, [(1, 1), (8, 8)], [], {}, s)
+    with np.load(tmp_path / 'scene.npz') as data:
+        arrays = dict(data)
+    assert len(arrays['texel_pos']) == 6
+    sources = [flagged_source(arrays, i, w, h, np.full((6, 3), received, np.float32))
+               for i, (w, h) in enumerate([(1, 1), (8, 8)])]
+    glow = run_blender_glow(tmp_path, s, sources)
+    np.testing.assert_allclose(glow[1][2:-2, 2:-2], .25 * received, atol=.01)

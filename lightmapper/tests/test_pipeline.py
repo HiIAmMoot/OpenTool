@@ -1240,8 +1240,10 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0.):
 
     def glow(work, s, pages):
         assert mode == 'enhanced', 'tool mode must never start a glow run'
-        want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1]])
-        np.testing.assert_allclose(pages[0][..., 0], want, rtol=1e-6)
+        assert pages[0].shape == (6, 6, 3)
+        np.testing.assert_allclose(pages[0][0, 0], .3, rtol=1e-6)
+        np.testing.assert_allclose(pages[0][2, 2], .3, rtol=1e-6)
+        np.testing.assert_array_equal(pages[0][-1, -1], 0)
         unflagged = np.array([[0, 1/3], [1/3, 1]], np.float32)
         return [np.repeat((.6 * unflagged)[:, :, None], 3, axis=2)]
 

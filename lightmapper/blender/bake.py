@@ -217,6 +217,8 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
         image = nodes.new('ShaderNodeTexImage')
         image.image = glow_image
         image.extension = 'EXTEND'
+        # each source pixel is one receiver sample, not a mixture of the materials next to it
+        image.interpolation = 'Closest'
         links.new(uv.outputs['UV'], image.inputs['Vector'])
         multiply = nodes.new('ShaderNodeVectorMath')
         multiply.operation = 'MULTIPLY'
@@ -1028,11 +1030,13 @@ def main():
             scene_data['tri_emission'] = np.zeros_like(scene_data['tri_emission'])
             scene_data['occ_tri_emission'] = np.zeros_like(scene_data['occ_tri_emission'])
             with np.load(os.path.join(root, job['glow_pages'])) as data:
-                for i, (w, h) in enumerate(job['pages']):
+                for i in range(len(job['pages'])):
+                    source = data[f'page_{i}']
+                    h, w = source.shape[:2]
                     image = bpy.data.images.new(f'glow_{i}', w, h, alpha=False, float_buffer=True, is_data=True)
                     image.colorspace_settings.name = 'Non-Color'
                     rgba = np.ones((h, w, 4), np.float32)
-                    rgba[..., :3] = data[f'page_{i}'][::-1]
+                    rgba[..., :3] = source[::-1]
                     image.pixels.foreach_set(rgba.ravel())
                     glow_images.append(image)
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)

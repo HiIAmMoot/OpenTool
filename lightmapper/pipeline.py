@@ -332,7 +332,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         if enhanced:
             gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
             raw = raw + gathered
-            glow_pages.append(result.diffuse_pages[i] + gathered)
+            from .raster import flagged_source
+            glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb))
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)

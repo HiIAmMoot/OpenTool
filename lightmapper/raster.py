@@ -45,6 +45,23 @@ def texel_contribution(scene, page, width, height, rgb=None):
     return total, share
 
 
+def flagged_source(scene, page, width, height, rgb):
+    """Keep each flagged sample's received light separate from neighbouring materials, including in the padding."""
+    from scipy.ndimage import distance_transform_edt
+
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    source = np.zeros((3 * height, 3 * width, 3), np.float32)
+    chosen = scene['texel_page'] == page
+    xy = scene['texel_xy'][chosen]
+    source[xy[:, 1], xy[:, 0]] = rgb[chosen]
+    if (owner >= 0).any():
+        # nearest owned samples extend each chart without averaging across chart or material boundaries
+        nearest = distance_transform_edt(owner < 0, return_distances=False, return_indices=True)
+        source[owner < 0] = source[nearest[0][owner < 0], nearest[1][owner < 0]]
+    return source
+
+
 def coverage(uv, tris, tri_class, width, height):
     texels = np.asarray(uv, dtype=np.float64) * np.array([width, height])
     return _coverage(texels, np.asarray(tris), np.asarray(tri_class), width, height)
