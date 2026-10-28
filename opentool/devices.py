@@ -27,6 +27,34 @@ def device_hint(setting, adapters, reason):
     return "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."
 
 
+def stage_rows(setting, adapters, reason):
+    """(stage, 'GPU' | 'CPU' | 'Off' | None, detail) for what a bake with this setting is expected to run where."""
+    stages = ('Page bake', 'Vertex pass', 'Denoise')
+    if adapters is None:
+        return [(stage, None, 'Looking for GPUs…') for stage in stages]
+    try:
+        choice = gpu.choose(setting, adapters, reason)
+    except gpu.DeviceError:
+        name = {'nvidia': 'NVIDIA', 'amd': 'AMD'}[gpu.normalise_device(setting)]
+        return [(stage, None, f'No {name} GPU with ray tracing') for stage in stages]
+    if choice.setting == 'cpu':
+        return [(stage, 'CPU', '') for stage in stages]
+    if choice.adapter:
+        return [('Page bake', 'GPU', choice.adapter.name), ('Vertex pass', 'GPU', choice.adapter.name),
+                ('Denoise', 'CPU' if choice.oidn == 'CPU' else 'GPU', choice.adapter.name)]
+    return [('Page bake', 'GPU', "Cycles picks a GPU when the bake starts, and falls back to the CPU without one"),
+            ('Vertex pass', 'CPU', 'no GPU with ray queries'), ('Denoise', 'CPU', '')]
+
+
+def stage_rows_used(used):
+    """the same rows from a finished bake's summary, so they show what really happened."""
+    def state(name, cpu):
+        return 'CPU' if name == cpu else 'Off' if name == 'off' else 'GPU'
+    return [('Page bake', state(used['page_bake'], 'CPU'), '' if used['page_bake'] == 'CPU' else used['page_bake']),
+            ('Vertex pass', state(used['vertex_pass'], 'cpu'), '' if used['vertex_pass'] == 'cpu' else used['vertex_pass']),
+            ('Denoise', state(used['denoise'], 'CPU'), '' if used['denoise'] in ('CPU', 'off') else used['denoise'])]
+
+
 def result_line(devices, rays, warnings):
     pages = 'the CPU' if devices['page_bake'] == 'CPU' else f"the GPU ({devices['page_bake']})"
     vertex = 'the CPU' if devices['vertex_pass'] == 'cpu' else devices['vertex_pass']

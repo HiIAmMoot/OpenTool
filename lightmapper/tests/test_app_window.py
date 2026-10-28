@@ -864,6 +864,29 @@ def test_device_row_shows_the_probed_gpu(make_app):
     assert a.device_box.master.grid_info()['row'] == 12 and a.stage_label.grid_info()['row'] == 14
 
 
+def stage_texts(app):
+    return [(name['text'], state['text'], str(state['foreground'])) for name, state, _ in app.stage_rows]
+
+
+def test_stage_rows_are_green_for_gpu_and_red_for_cpu(make_app):
+    a = make_app(probe_gpu=probe_for([RTX]))
+    pump(a.root, lambda: a.stage_rows[0][1]['text'] == 'GPU')
+    assert stage_texts(a) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'GPU', 'green'), ('Denoise', 'GPU', 'green')]
+    a.device_var.set('CPU only')
+    a.device_box.event_generate('<<ComboboxSelected>>')
+    a.root.update()
+    assert stage_texts(a) == [('Page bake', 'CPU', 'red'), ('Vertex pass', 'CPU', 'red'), ('Denoise', 'CPU', 'red')]
+
+
+def test_finished_bake_shows_what_was_used_in_the_stage_rows(ready_app):
+    devices = {'page_bake': 'OPTIX', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    outcome = BakeOutcome('done', 'Done. The lit level is level.', [], Path('C:/x'), Path(), 'OPTIX',
+                          devices, None, [])
+    run_events(ready_app, [('done', outcome)])
+    assert stage_texts(ready_app) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'CPU', 'red'),
+                                      ('Denoise', 'CPU', 'red')]
+
+
 def test_device_row_says_looking_until_the_probe_answers(make_app):
     gate = threading.Event()
 

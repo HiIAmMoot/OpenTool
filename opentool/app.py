@@ -203,6 +203,14 @@ class App:
         self.gpu_label.grid(row=0, column=2, sticky='w', padx=(12, 0))
         self.device_hint = ttk.Label(device_row)
         self.device_hint.grid(row=1, column=1, columnspan=2, sticky='w', padx=(12, 0))
+        self.stage_rows = []
+        for row in range(3):
+            name, state, detail = (ttk.Label(device_row) for _ in range(3))
+            name.grid(row=row + 2, column=0, sticky='w', pady=(4 if row == 0 else 0, 0))
+            state.grid(row=row + 2, column=1, sticky='w', padx=(12, 0), pady=(4 if row == 0 else 0, 0))
+            detail.grid(row=row + 2, column=2, sticky='w', padx=(12, 0), pady=(4 if row == 0 else 0, 0))
+            self.stage_rows.append((name, state, detail))
+        self._show_stage_rows(devices.stage_rows(self._device_value(), None, None))
 
         controls = ttk.Frame(self.frame)
         controls.grid(row=13, column=0, sticky='ew', pady=(12, 0))
@@ -454,7 +462,14 @@ class App:
     def _device_value(self):
         return dict(presets.DEVICES).get(self.device_var.get(), 'auto')
 
+    def _show_stage_rows(self, rows):
+        for (name, state, detail), (stage, where, text) in zip(self.stage_rows, rows):
+            name.configure(text=stage)
+            state.configure(text=where or '…', foreground={'GPU': 'green', 'CPU': 'red'}.get(where, ''))
+            detail.configure(text=text)
+
     def _update_device_hint(self):
+        self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason))
         self.gpu_label.configure(text=devices.gpu_text(self._adapters, self._gpu_reason))
         self.device_hint.configure(text=devices.device_hint(self._device_value(), self._adapters, self._gpu_reason))
 
@@ -684,6 +699,7 @@ class App:
             for problem in outcome.problems:
                 self._append_log(str(problem))
         if outcome.devices:
+            self._show_stage_rows(devices.stage_rows_used(outcome.devices))
             self._set_optional_label(self.device_label, devices.result_line(outcome.devices, outcome.rays, outcome.warnings))
         for warning in outcome.warnings:
             # (the runner already sent most warnings as they happened)

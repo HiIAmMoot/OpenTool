@@ -1,7 +1,7 @@
 import pytest
 
 from lightmapper.gpu import Adapter
-from opentool.devices import device_hint, gpu_text, result_line
+from opentool.devices import device_hint, gpu_text, result_line, stage_rows, stage_rows_used
 
 RTX = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', 0x10DE, (1,), 'vulkan', True)
 RADEON = Adapter('AMD Radeon(TM) Graphics', 0x1002, (2,), 'vulkan', True)
@@ -51,3 +51,52 @@ def test_result_line_on_the_cpu_with_warnings():
 def test_result_line_denoiser_off_no_rays_one_warning():
     assert result_line({'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off'}, None, ['a']) == (
         'Pages on the CPU, vertex pass on the CPU, denoiser off. 1 warning, see the log.')
+
+
+OLD_NVIDIA = Adapter('NVIDIA GeForce GTX 860M', 0x10DE, (4,), 'vulkan', False)
+
+
+def test_stage_rows_while_looking():
+    assert stage_rows('auto', None, None) == [
+        ('Page bake', None, 'Looking for GPUs…'), ('Vertex pass', None, 'Looking for GPUs…'),
+        ('Denoise', None, 'Looking for GPUs…')]
+
+
+def test_stage_rows_everything_on_the_gpu():
+    assert stage_rows('auto', [RTX], None) == [
+        ('Page bake', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU'),
+        ('Vertex pass', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU'),
+        ('Denoise', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU')]
+
+
+def test_stage_rows_amd_denoises_on_the_gpu_too():
+    assert [state for _, state, _ in stage_rows('amd', [RADEON], None)] == ['GPU', 'GPU', 'GPU']
+
+
+def test_stage_rows_without_ray_queries_keep_only_the_pages_on_the_gpu():
+    rows = stage_rows('auto', [OLD_NVIDIA], None)
+    assert [(name, state) for name, state, _ in rows] == [('Page bake', 'GPU'), ('Vertex pass', 'CPU'), ('Denoise', 'CPU')]
+    assert 'Cycles' in rows[0][2] and 'ray queries' in rows[1][2]
+
+
+def test_stage_rows_no_gpu_at_all():
+    assert [state for _, state, _ in stage_rows('auto', [], 'slangpy: missing')] == ['GPU', 'CPU', 'CPU']
+
+
+def test_stage_rows_cpu_only():
+    assert [state for _, state, _ in stage_rows('cpu', [RTX], None)] == ['CPU', 'CPU', 'CPU']
+
+
+def test_stage_rows_when_the_bake_would_stop():
+    rows = stage_rows('nvidia', [RADEON], None)
+    assert [state for _, state, _ in rows] == [None, None, None]
+    assert rows[0][2] == 'No NVIDIA GPU with ray tracing'
+
+
+def test_stage_rows_used_reads_the_summary():
+    assert stage_rows_used({'page_bake': 'OPTIX', 'vertex_pass': 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)',
+                            'denoise': 'CUDA'}) == [
+        ('Page bake', 'GPU', 'OPTIX'), ('Vertex pass', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)'),
+        ('Denoise', 'GPU', 'CUDA')]
+    assert stage_rows_used({'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off'}) == [
+        ('Page bake', 'CPU', ''), ('Vertex pass', 'CPU', ''), ('Denoise', 'Off', '')]
