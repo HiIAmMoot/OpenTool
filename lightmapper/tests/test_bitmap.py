@@ -98,3 +98,17 @@ def test_32bit_pages(tmp_path):
     data = root.data('color_plate.compressed_color_plate_data')
     plate = np.frombuffer(zlib.decompress(data[4:]), np.uint8).reshape(-1, 4, 4)
     assert plate[1, 1].tolist() == [0x30, 0x20, 0x10, 255]
+
+
+def test_16bit_rebake_over_a_32bit_template_resets_encoding_format():
+    from lightmapper.formats.bitmap import write_bitmap
+
+    wide = write_bitmap([np.full((1, 1), 0xFF102030, np.uint32)])
+    assert write_bitmap([np.zeros((1, 1), np.uint16)], wide).root.get('encoding_format') == 3
+
+
+def test_mixed_page_formats_are_refused():
+    from lightmapper.formats.bitmap import write_bitmap
+
+    with pytest.raises(ValueError):
+        write_bitmap([np.zeros((1, 1), np.uint16), np.zeros((1, 1), np.uint32)])

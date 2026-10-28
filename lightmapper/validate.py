@@ -9,8 +9,8 @@ import numpy as np
 from .formats.vertices import compress, unpack_uncompressed
 from .tagio.tagfile import Tag
 
-# bytes per texel of the page formats a lightmap may use (r5g6b5, x8r8g8b8)
-PAGE_TEXEL_BYTES = {6: 2, 10: 4}
+PAGE_TEXEL_BYTES = {6: 2, 10: 4}  # r5g6b5, x8r8g8b8
+
 
 def validate_bsp(bsp: Tag, bitmap: Tag | None, strict_compression: bool = False) -> list[str]:
     """Our own outputs must also match tool's byte layout in strict_compression mode."""

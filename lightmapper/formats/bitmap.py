@@ -34,7 +34,7 @@ def _color_plate(pages):
     # tool stacks pages in bitmap order at x=1, y=1 then h+2 apart; width is max(w)+2
     # and height is sum(h+2)+2. Blue BGRA (255,0,0,0) separates sequences; opaque
     # red/yellow checkers are unwritten texels inside tool's pages, not separators.
-    # our final pages are all written, so expand 565 to opaque BGRA without a second quantisation
+    # our final pages are all written, so expand them to opaque BGRA without a second quantisation
     plate = np.full((height, width, 4), [255, 0, 0, 0], np.uint8)
     for page, (x, y) in zip(pages, origins):
         h, w = page.shape
@@ -57,9 +57,11 @@ def write_bitmap(pages: list[np.ndarray], template: Tag | None = None) -> Tag:
     if template is None:
         for key, value in [('type', 0), ('encoding_format', 3), ('usage', 4)]:
             root.set(key, value)
+    if len({page.dtype for page in pages}) > 1:
+        raise ValueError('lightmap pages must all be 16-bit or all 32-bit')
     wide = any(page.dtype == np.uint32 for page in pages)
-    if wide:
-        root.set('encoding_format', 4)
+    # (the template may come from an earlier bake in the other page format)
+    root.set('encoding_format', 4 if wide else 3)
     width, height, plate = _color_plate(pages)
     root.set('color_plate.color_plate_width', width)
     root.set('color_plate.color_plate_height', height)
