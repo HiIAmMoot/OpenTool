@@ -772,11 +772,14 @@ def test_a_masked_out_receiver_still_shadows_its_page_neighbour(tmp_path):
 @pytest.mark.blender
 def test_flagged_glow_lights_a_neighbour(tmp_path):
     from lightmapper.blender_job import run_blender_glow
-    scene = build([dict(quad=floor(-100, 100, -100, 100, z=1), ignore_normals=True),
-                   dict(quad=floor(-2, 2, -2, 2), page=1)])
+    scene = build([dict(quad=floor(-8, 8, -8, 8, z=1), ignore_normals=True),
+                   dict(quad=floor(-4, -2, 2, 4), page=1), dict(quad=floor(-4, -2, -4, -2), page=2)])
     s = Settings(samples=256, vertex_rays=1, albedo_fallback=.25, device='cpu', ignore_normals_mode='enhanced')
-    write_job(tmp_path, scene, [(8, 8), (8, 8)], [], {}, s)
-    pages = [np.full((8, 8, 3), 4, np.float32), np.zeros((8, 8, 3), np.float32)]
-    glow = run_blender_glow(tmp_path, s, pages)
-    np.testing.assert_allclose(glow[1][2:-2, 2:-2], 1, rtol=.1)
+    write_job(tmp_path, scene, [(8, 8), (8, 8), (8, 8)], [], {}, s)
+    bright = np.zeros((8, 8, 3), np.float32)
+    bright[:4] = 4
+    glow = run_blender_glow(tmp_path, s, [bright, np.zeros((8, 8, 3), np.float32), np.zeros((8, 8, 3), np.float32)])
     np.testing.assert_array_equal(glow[0], 0)
+    # (the page's first rows are the low-v side of the quad, so the neighbour on the -y side gets their light)
+    assert glow[2][2:-2, 2:-2].mean() > 0.5
+    assert glow[1][2:-2, 2:-2].mean() < 0.1

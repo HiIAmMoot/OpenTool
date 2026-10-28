@@ -464,6 +464,8 @@ def test_prepared_boundaries_reused_across_pages_without_resampling(monkeypatch)
     for page in range(2):
         actual = sun_term(scene, suns, lit, page, 96, 96, 0.225, boundaries=boundary)
         np.testing.assert_array_equal(actual, expected[page])
+
+
 def test_texel_queries_cover_each_flagged_subtexel():
     from lightmapper.raster import texel_queries
     from test_blender_bake import build, full_quad

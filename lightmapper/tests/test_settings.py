@@ -157,6 +157,8 @@ def test_quantise_follows_the_32bit_setting():
     page = np.full((2, 2, 3), 0.5, np.float32)
     assert quantise(page, Settings(dither=False)).dtype == np.uint16
     assert quantise(page, Settings(dither=False, lightmap_32bit=True)).dtype == np.uint32
+
+
 def test_ignore_normals_mode_defaults_to_tool_and_refuses_others():
     assert Settings().ignore_normals_mode == 'tool'
     assert Settings(ignore_normals_mode='enhanced').ignore_normals_mode == 'enhanced'

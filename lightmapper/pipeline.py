@@ -310,7 +310,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     stage('vertex_pass')
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
-    raw_pages, masks, class_maps, utilisation, clipped = [], [], [], [], []
+    raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
     job = json.loads((work / 'job.json').read_text())
     job_suns = job['suns']
     enhanced = s.ignore_normals_mode == 'enhanced' and scene.tri_ignore_normals is not None and scene.tri_ignore_normals.any()
@@ -330,7 +330,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             raw = raw + sun_term(scene, job_suns, result.vertex_sun_lit, i, page.width, page.height,
                                  s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries)
         if enhanced:
-            raw = raw + texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
+            gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
+            raw = raw + gathered
+            glow_pages.append(result.diffuse_pages[i] + gathered)
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
@@ -339,7 +341,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
     if enhanced:
-        glow = run_blender_glow(work, s, raw_pages)
+        # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
+        # would come back off them as albedo times emission)
+        started = perf_counter()
+        glow = run_blender_glow(work, s, glow_pages)
+        seconds['blender_glow'] = perf_counter() - started
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
     # (OIDN's HIP device cannot open on the Radeon 680M, so AMD denoises on the CPU with a warning even when `amd` is

@@ -1205,6 +1205,14 @@ def test_scenery_radiosity_is_cached_by_shader_not_uv_scale(tiny, monkeypatch):
 
 @pytest.mark.parametrize('mode', ['tool', 'enhanced'])
 def test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypatch, mode):
+    run_enhanced_pipeline(tiny, monkeypatch, mode)
+
+
+def test_glow_pages_leave_out_the_emission_the_pages_hold(tiny, monkeypatch):
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', emit=.5)
+
+
+def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0.):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1226,7 +1234,7 @@ def test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypat
             count = len(arrays['texel_pos'])
         assert (count > 0) == (mode == 'enhanced')
         raw = np.repeat(np.float32([[0, 1/3], [1/3, 1]])[:, :, None], 3, axis=2)
-        return BakeResult([raw.copy()], np.zeros((6, 3), np.float32), np.ones(6), 'test',
+        return BakeResult([raw + emit], np.zeros((6, 3), np.float32), np.ones(6), 'test',
                           [np.ones((2, 2), bool)], diffuse_pages=[raw],
                           texel_rgb=np.full((count, 3), .3, np.float32))
 
@@ -1245,8 +1253,5 @@ def test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypat
                         work=work, dry_run=True)
     want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])
             if mode == 'enhanced' else np.array([[0, 1/3], [1/3, 1]]))
-    np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
-
-
-def test_tool_mode_makes_no_texel_queries_and_no_glow_run(tiny, monkeypatch):
-    test_enhanced_mode_replaces_flagged_texels_and_adds_the_glow(tiny, monkeypatch, 'tool')
+    if not emit:
+        np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
