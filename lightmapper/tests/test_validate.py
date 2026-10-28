@@ -422,3 +422,12 @@ def test_stock_caps_and_unsigned_triangle_indices(small):
         material.set_reference('shader', 'senv', 'empty_shader')
         material.set('surfaces', 131072)
     assert validate(bsp, bitmap) == []
+
+
+def test_32bit_page_is_valid(small):
+    bsp, bitmap = small
+    page = bitmap.root.block('bitmaps')[0]
+    page.set('format', 10)
+    width, height = page.get('width'), page.get('height')
+    bitmap.root.set_data('processed_pixel_data', bytes(width * height * 4))
+    assert validate(bsp, bitmap) == []

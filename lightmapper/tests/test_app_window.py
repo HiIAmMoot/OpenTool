@@ -998,3 +998,17 @@ def test_a_probe_that_raises_still_answers(make_app):
     pump(a.root, lambda: a.gpu_label['text'] != 'Looking for GPUs…')
     assert a.gpu_label['text'] != 'Looking for GPUs…'
     assert 'no child process' in a.gpu_label['text'] + a.device_hint['text']
+
+
+def test_32bit_checkbox_reaches_the_settings_and_is_remembered(tmp_path, tiny, make_app):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    a = make_app(store_path=tmp_path / 's.json')
+    a.set_tags(str(tags))
+    a.set_scenario_file(tags / 'level.scenario')
+    pump(a.root, lambda: a.bsp_box.get() == 'room' and a.blender is not None)
+    assert a.request().settings.lightmap_32bit is False
+    a.lightmap_32bit_var.set(True)
+    assert a.request().settings.lightmap_32bit is True
+    a.remember()
+    assert make_app(store_path=tmp_path / 's.json').lightmap_32bit_var.get() is True

@@ -47,7 +47,8 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 |---|---|---|
 | `denoise` | true | Run Intel Open Image Denoise on each page. |
 | `stitch_seams` | true | Make the texels on both sides of a chart seam agree. |
-| `dither` | true | Dither when encoding to 16 bits, to hide banding. |
+| `dither` | true | Dither when encoding the pages, to hide banding. |
+| `lightmap_32bit` | false | Write 32-bit (x8r8g8b8) pages instead of 16-bit (r5g6b5): no banding, twice the size. Same as `--32bit`. |
 
 ## Light-source weights
 

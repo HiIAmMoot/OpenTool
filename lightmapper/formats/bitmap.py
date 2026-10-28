@@ -39,6 +39,10 @@ def _color_plate(pages):
     for page, (x, y) in zip(pages, origins):
         h, w = page.shape
         v = page.astype(np.uint32)
+        if page.dtype == np.uint32:
+            plate[y:y+h, x:x+w] = np.stack([v & 255, v >> 8 & 255, v >> 16 & 255,
+                                            np.full_like(v, 255)], axis=-1)
+            continue
         plate[y:y+h, x:x+w] = np.stack([(v & 31) * 255 // 31,
             (v >> 5 & 63) * 255 // 63, (v >> 11 & 31) * 255 // 31,
             np.full_like(v, 255)], axis=-1)
@@ -53,6 +57,9 @@ def write_bitmap(pages: list[np.ndarray], template: Tag | None = None) -> Tag:
     if template is None:
         for key, value in [('type', 0), ('encoding_format', 3), ('usage', 4)]:
             root.set(key, value)
+    wide = any(page.dtype == np.uint32 for page in pages)
+    if wide:
+        root.set('encoding_format', 4)
     width, height, plate = _color_plate(pages)
     root.set('color_plate.color_plate_width', width)
     root.set('color_plate.color_plate_height', height)
@@ -64,12 +71,12 @@ def write_bitmap(pages: list[np.ndarray], template: Tag | None = None) -> Tag:
         height, width = page.shape
         bitmap = new_element(layouts['bitmaps'])
         for key, value in [('signature', b'bitm'), ('width', width), ('height', height),
-                           ('depth', 1), ('format', 6), ('flags', 1),
+                           ('depth', 1), ('format', 10 if wide else 6), ('flags', 1),
                            ('registration_point', (width // 2, height // 2)),
                            ('pixel_data_offset', offset)]:
             bitmap.set(key, value)
         bitmaps.append(bitmap)
-        raw = np.asarray(page, dtype='<u2').tobytes()
+        raw = np.asarray(page, dtype='<u4' if wide else '<u2').tobytes()
         pixels.append(raw)
         offset += len(raw)
         sequence = new_element(layouts['sequences'])

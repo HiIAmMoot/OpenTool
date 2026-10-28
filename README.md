@@ -97,6 +97,7 @@ The lightmapper starts Blender in the background, builds the scene from your tag
    | `--work bake\bloodgulch` | A folder for the bake's working files and `summary.json`. Optional. |
    | `--settings settings.json` | Optional. Changes how the bake looks, for example `{"texels_per_unit": 8}` for sharper shadows. See the [settings](docs/lightmapper-settings.md). |
    | `--dry-run` | Optional. Runs the whole bake but writes no tags. |
+   | `--32bit` | Optional. Writes 32-bit (x8r8g8b8) lightmap pages instead of 16-bit, so there is no banding. Pages take twice the space. In the app, tick "32-bit lightmaps". |
 
 2. Build the map as usual, for example with the editing kit, from its folder:
 

@@ -63,6 +63,7 @@ def _parser():
             command.add_argument('--charts', type=Path)
             command.add_argument('--sources', choices=('all', 'sun', 'emit'), default='all')
             command.add_argument('--dry-run', action='store_true')
+            command.add_argument('--32bit', dest='lightmap_32bit', action='store_true')
     return parser
 
 
@@ -84,7 +85,10 @@ def main(argv=None) -> int:
                   backups=not args.no_backups)
         return 0
     if args.command == 'bake':
-        result = bake(args.tags, args.scenario, args.bsp, _blender_fallback(load_settings(args.settings)),
+        settings = _blender_fallback(load_settings(args.settings))
+        if args.lightmap_32bit:
+            settings.lightmap_32bit = True
+        result = bake(args.tags, args.scenario, args.bsp, settings,
                       args.out_bsp, args.out_scenario, args.work, args.sources, args.charts, args.dry_run,
                       backups=not args.no_backups)
         print(f'Work: {result.work}')

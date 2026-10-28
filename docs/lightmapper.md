@@ -85,6 +85,7 @@ Other options:
 - `--out-bsp` and `--out-scenario` write the result under new names and leave the input tags alone.
 - `--no-backups` keeps no copy of a tag that is replaced. Without it, the old tag goes in a `backups` folder next to it.
 - `--dry-run` runs the whole bake but writes no tags.
+- `--32bit` writes 32-bit (x8r8g8b8) lightmap pages instead of 16-bit (r5g6b5). They show no banding and take twice the space. The settings key is `lightmap_32bit`.
 - `--charts file.npz` points at a saved chart layout. It is reused only when the input BSP, the chart settings and the shaders' radiosity fields are unchanged. A normal bake rewrites its BSP, so the next bake of that level charts it again.
 - `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and write no tags. The default is `--sources all`.
 

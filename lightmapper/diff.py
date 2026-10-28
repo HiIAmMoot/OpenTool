@@ -11,7 +11,7 @@ from pathlib import Path, PureWindowsPath
 
 import numpy as np
 
-from .formats.vertices import decode_r5g6b5, unpack_uncompressed
+from .formats.vertices import decode_r5g6b5, decode_x8r8g8b8, unpack_uncompressed
 from .raster import sample_bilinear
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path
 
@@ -73,11 +73,12 @@ def bitmap_pages(tag: Tag) -> list[np.ndarray]:
     pages = []
     for bitmap in tag.root.block('bitmaps'):
         width, height = bitmap.get('width'), bitmap.get('height')
-        if bitmap.get('format') != 6:
-            raise ValueError(f'lightmap page format {bitmap.get("format")} is not r5g6b5')
+        if bitmap.get('format') not in (6, 10):
+            raise ValueError(f'lightmap page format {bitmap.get("format")} is not r5g6b5 or x8r8g8b8')
         start = bitmap.get('pixel_data_offset')
-        raw = np.frombuffer(data, '<u2', count=width * height, offset=start)
-        pages.append(decode_r5g6b5(raw.reshape(height, width)))
+        wide = bitmap.get('format') == 10
+        raw = np.frombuffer(data, '<u4' if wide else '<u2', count=width * height, offset=start)
+        pages.append((decode_x8r8g8b8 if wide else decode_r5g6b5)(raw.reshape(height, width)))
     return pages
 
 

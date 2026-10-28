@@ -9,6 +9,8 @@ import numpy as np
 from .formats.vertices import compress, unpack_uncompressed
 from .tagio.tagfile import Tag
 
+# bytes per texel of the page formats a lightmap may use (r5g6b5, x8r8g8b8)
+PAGE_TEXEL_BYTES = {6: 2, 10: 4}
 
 def validate_bsp(bsp: Tag, bitmap: Tag | None, strict_compression: bool = False) -> list[str]:
     """Our own outputs must also match tool's byte layout in strict_compression mode."""
@@ -170,8 +172,10 @@ def _bitmap_problems(bitmap):
     pages = bitmap.root.block('bitmaps')
     offset = 0
     for p, page in enumerate(pages):
-        if page.get('format') != 6:
-            problems.append((p, 'bitmap page must use format 6 (r5g6b5)'))
+        texel_bytes = PAGE_TEXEL_BYTES.get(page.get('format'))
+        if texel_bytes is None:
+            problems.append((p, 'bitmap page must use format 6 (r5g6b5) or 10 (x8r8g8b8)'))
+            texel_bytes = 2
         if page.get('type') != 0:
             problems.append((p, 'bitmap page must be type 0 (2D)'))
         if page.get('depth') != 1:
@@ -183,9 +187,9 @@ def _bitmap_problems(bitmap):
             problems.append((p, 'bitmap page mipmap count must be 0'))
         if page.get('pixel_data_offset') != offset:
             problems.append((p, f'bitmap pixel data offset must equal running offset {offset}'))
-        offset += width * height * 2
+        offset += width * height * texel_bytes
     if len(bitmap.root.data('processed_pixel_data')) != offset:
-        problems.append(('all', f'bitmap total pixel data size must equal sum of width*height*2 ({offset})'))
+        problems.append(('all', f'bitmap total pixel data size must equal the sum of the page sizes ({offset})'))
     if len(bitmap.root.block('sequences')) != len(pages) + 1:
         problems.append(('all', 'bitmap sequences count must equal pages + 1'))
     return problems

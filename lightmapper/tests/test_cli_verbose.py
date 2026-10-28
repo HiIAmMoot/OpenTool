@@ -67,3 +67,11 @@ def test_cli_forwards_no_backups_to_copy(monkeypatch, tmp_path):
     cli.main(['copy', '--tags', str(tmp_path), 'level', 'room', '--out-bsp', 'out',
               '--out-scenario', 'out', '--no-backups'])
     assert calls == [{'backups': False}]
+
+
+def test_cli_32bit_flag_sets_the_setting(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append(args[3]) or type('O', (), {'work': 'W'})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room'])
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--32bit'])
+    assert [s.lightmap_32bit for s in calls] == [False, True]

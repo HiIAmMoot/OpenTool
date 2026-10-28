@@ -148,3 +148,12 @@ def test_cpu_counts_must_be_positive(field):
 def test_cpu_counts_reject_negative_values(field):
     with pytest.raises(ValueError, match=field):
         Settings(**{field: -1})
+
+
+def test_quantise_follows_the_32bit_setting():
+    import numpy as np
+    from lightmapper.pages import quantise
+
+    page = np.full((2, 2, 3), 0.5, np.float32)
+    assert quantise(page, Settings(dither=False)).dtype == np.uint16
+    assert quantise(page, Settings(dither=False, lightmap_32bit=True)).dtype == np.uint32

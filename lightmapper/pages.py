@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import numpy as np
 
-from .formats.vertices import encode_r5g6b5
+from .formats.vertices import encode_r5g6b5, encode_x8r8g8b8
 from . import frozen
 from . import denoise_worker
 from .raster import dilate
@@ -292,7 +292,8 @@ def finish_float(raw, mask, cls, ambient, s, written=None, worker=None) -> np.nd
 
 
 def quantise(page_f, s) -> np.ndarray:
-    return encode_r5g6b5(tone(page_f, s.gamma), s.dither)
+    encode = encode_x8r8g8b8 if s.lightmap_32bit else encode_r5g6b5
+    return encode(tone(page_f, s.gamma), s.dither)
 
 
 def finish_pages(pages, raw, masks, classes, ambient, s, written=None, joined_groups=(), worker=None):

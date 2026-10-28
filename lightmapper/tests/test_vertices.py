@@ -122,3 +122,17 @@ def test_tool_maximum_reference_page():
     assert encoded.shape == (256, 256)
     assert np.count_nonzero(encoded == 0x8410) == 32768
     assert np.count_nonzero(encoded == 0x7BEF) == 32768
+
+
+def test_x8r8g8b8_channel_order_and_opaque_alpha():
+    rgb = np.array([[[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]]])
+    encoded = v.encode_x8r8g8b8(rgb, False)
+    assert encoded.dtype == np.dtype("uint32")
+    assert encoded.tolist() == [[0xFFFF0000, 0xFF00FF00, 0xFF0000FF, 0xFF000000]]
+
+
+def test_x8r8g8b8_dither_preserves_mean():
+    rgb = np.full((64, 64, 3), 0.4321)
+    red = (v.encode_x8r8g8b8(rgb, True) >> 16 & 255) / 255
+    assert abs(red.mean() - 0.4321) < 0.5 / 255 / 4
+    assert len(np.unique(red)) == 2

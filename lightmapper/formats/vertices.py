@@ -50,18 +50,32 @@ def compress(env, lm) -> bytes:
     return result_env.tobytes() + result_lm.tobytes()
 
 
-def encode_r5g6b5(rgb: np.ndarray, dither: bool) -> np.ndarray:
-    rgb = np.asarray(rgb)
+def _quantise(rgb: np.ndarray, levels, dither: bool, dtype) -> np.ndarray:
     threshold = 0.5
     if dither:
         height, width = rgb.shape[:2]
         threshold = ((_BAYER[np.arange(height)[:, None] % 4,
                               np.arange(width)[None, :] % 4] + 0.5) / 16)[..., None]
-    levels = np.array([31, 63, 31])
-    quantised = np.clip(np.floor(rgb * levels + threshold), 0, levels).astype(np.uint16)
+    levels = np.array(levels)
+    return np.clip(np.floor(rgb * levels + threshold), 0, levels).astype(dtype)
+
+
+def encode_r5g6b5(rgb: np.ndarray, dither: bool) -> np.ndarray:
+    quantised = _quantise(np.asarray(rgb), [31, 63, 31], dither, np.uint16)
     return quantised[..., 0] << 11 | quantised[..., 1] << 5 | quantised[..., 2]
+
+
+def encode_x8r8g8b8(rgb: np.ndarray, dither: bool) -> np.ndarray:
+    # (alpha stays 255: a 16-bit page always samples as opaque, so a 32-bit one must too)
+    quantised = _quantise(np.asarray(rgb), [255, 255, 255], dither, np.uint32)
+    return np.uint32(0xFF000000) | quantised[..., 0] << 16 | quantised[..., 1] << 8 | quantised[..., 2]
 
 
 def decode_r5g6b5(px: np.ndarray) -> np.ndarray:
     px = np.asarray(px, dtype=np.uint16)
     return np.stack(((px >> 11) / 31, ((px >> 5) & 63) / 63, (px & 31) / 31), axis=-1)
+
+
+def decode_x8r8g8b8(px: np.ndarray) -> np.ndarray:
+    px = np.asarray(px, dtype=np.uint32)
+    return np.stack((px >> 16 & 255, px >> 8 & 255, px & 255), axis=-1) / 255

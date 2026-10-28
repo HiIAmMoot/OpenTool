@@ -83,3 +83,18 @@ def test_plate_width_overflow_is_also_optional(caplog):
     assert result == (0, 0, b'')
     assert len(caplog.records) == 1
     assert '65536x5' in caplog.text
+
+
+def test_32bit_pages(tmp_path):
+    from lightmapper.formats.bitmap import write_bitmap
+
+    pages = [np.array([[0xFF102030, 0xFFFFFFFF]], dtype=np.uint32),
+             np.full((2, 1), 0xFF0000FF, dtype=np.uint32)]
+    write_tag(write_bitmap(pages), tmp_path / 'out.bitmap')
+    root = read_tag(tmp_path / 'out.bitmap').root
+    assert root.get('encoding_format') == 4
+    assert [(b.get('format'), b.get('pixel_data_offset')) for b in root.block('bitmaps')] == [(10, 0), (10, 8)]
+    assert root.data('processed_pixel_data') == bytes.fromhex('302010ff' 'ffffffff' 'ff0000ff' 'ff0000ff')
+    data = root.data('color_plate.compressed_color_plate_data')
+    plate = np.frombuffer(zlib.decompress(data[4:]), np.uint8).reshape(-1, 4, 4)
+    assert plate[1, 1].tolist() == [0x30, 0x20, 0x10, 255]

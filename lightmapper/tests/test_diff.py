@@ -217,3 +217,12 @@ def test_emitter_shares_use_the_luminance_of_the_emission_term():
     emit[120:] = 1
     shares = emitter_shares(names, emit, total)
     assert shares == {'lamp': pytest.approx(0.5)}
+
+
+def test_bitmap_pages_decode_32bit():
+    from lightmapper.diff import bitmap_pages
+    from lightmapper.formats.vertices import encode_x8r8g8b8
+
+    rgb = np.array([[[0.2, 0.4, 0.6], [1.0, 0.0, 0.5]]])
+    pages = bitmap_pages(write_bitmap([encode_x8r8g8b8(rgb, False)]))
+    np.testing.assert_allclose(pages[0], rgb, atol=0.5 / 255)

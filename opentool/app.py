@@ -135,6 +135,9 @@ class App:
             command=self._update_new_names_hint,
         )
         self.backups_check.grid(row=0, column=1, sticky='w', padx=(12, 0))
+        self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
+        ttk.Checkbutton(options, text='32-bit lightmaps', variable=self.lightmap_32bit_var).grid(
+            row=0, column=2, sticky='w', padx=(12, 0))
         self.new_names_hint = ttk.Label(self.frame)
         self.new_names_hint.grid(row=8, column=0, sticky='w')
         self._update_new_names_hint()
@@ -328,6 +331,7 @@ class App:
         self.advanced_error.configure(text='')
         settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path),
                                          self._device_value())
+        settings.lightmap_32bit = self.lightmap_32bit_var.get()
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get())
 
@@ -340,7 +344,7 @@ class App:
             tags=self.tags_entry.get(), scenario=self._scenario, bsp=self.bsp_var.get(),
             blender=str(self.blender.path) if self.blender else self.settings.blender,
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
-            backups=self.backups_var.get(),
+            backups=self.backups_var.get(), lightmap_32bit=self.lightmap_32bit_var.get(),
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(), device=self._device_value(),
         )

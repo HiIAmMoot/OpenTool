@@ -45,6 +45,8 @@ class Settings(ChartSettings):
     denoise: bool = True
     stitch_seams: bool = True
     dither: bool = True
+    # x8r8g8b8 pages instead of r5g6b5: no banding, twice the bytes
+    lightmap_32bit: bool = False
     # 64 let one ray that hit a bright emitter carry most of a corner's light, so the incident vectors went 15-39
     # degrees off and the bump shading showed triangles on flat walls (Chiron); 4096 brings them within 2-5 degrees
     vertex_rays: int = 4096
