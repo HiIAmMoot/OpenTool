@@ -214,6 +214,39 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     return scene, inverse, textures
 
 
+def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path) -> list:
+    chart_s = ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
+    key = chart_cache_key(input_file, chart_s, radiosity)
+    pages = load_charts(cache, key)
+    if pages is None:
+        pages = chart_and_pack(geometry.groups, radiosity, chart_s)
+        save_charts(cache, pages, key)
+    return pages
+
+
+@dataclass
+class SceneEstimate:
+    counts: memory.SceneCounts
+    pages: list[tuple[int, int]]
+
+
+def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+    tags = Path(tags)
+    scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
+    input_file = resolve_reference_path(tags, 'sbsp', input_path)
+    bsp_tag = read_tag(input_file)
+    count = len(bsp_tag.root.block('surfaces'))
+    if count > MAX_BSP_SURFACES:
+        raise ValueError(f'{count} BSP surfaces exceed stock cap {MAX_BSP_SURFACES}')
+    geometry = read_geometry(bsp_tag)
+    radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
+    classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
+    pages = _charts(input_file, geometry, radiosity, s, Path(charts))
+    scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
+                         s.scenery_emission)
+    return SceneEstimate(memory.SceneCounts.from_scene(scene), [(p.width, p.height) for p in pages])
+
+
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
@@ -263,13 +296,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     template = read_tag(resolve_reference_path(tags, group, path)) if group == 'bitm' and path else None
     stage('gather')
     begin('charts')
-    chart_s = ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
-    key = chart_cache_key(input_file, chart_s, radiosity)
-    cache = Path(charts) if charts is not None else work / 'charts.npz'
-    pages = load_charts(cache, key)
-    if pages is None:
-        pages = chart_and_pack(geometry.groups, radiosity, chart_s)
-        save_charts(cache, pages, key)
+    pages = _charts(input_file, geometry, radiosity, s,
+                    Path(charts) if charts is not None else work / 'charts.npz')
     stage('charts')
     begin('scene')
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,

@@ -97,6 +97,22 @@ def test_rebake_reads_the_original_bsp(two_bsps, monkeypatch):
     assert seen == [('level', 'room')]
 
 
+def test_bake_request_charts_reach_the_pipeline(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    seen = []
+    real = pipeline.bake
+    monkeypatch.setattr(runner.pipeline, 'bake', lambda *a, **k: seen.append(k.get('charts')) or real(*a, **k))
+    run_bake(BakeRequest(tags, 'level', 'room', settings, True, work, charts=tmp_path / 'c.npz'), lambda e: None)
+    assert seen == [tmp_path / 'c.npz']
+
+
+def test_chart_cache_path_is_one_file_per_level(tmp_path):
+    first = runner.chart_cache_path(tmp_path, 'level', 'room')
+    assert first == runner.chart_cache_path(tmp_path, 'level', 'room')
+    assert first != runner.chart_cache_path(tmp_path, 'level', 'other')
+    assert first.suffix == '.npz' and first.parent.name == 'charts'
+
+
 def test_reused_work_drops_an_old_blender_log(tiny):
     tags, settings, work = tiny
     work.mkdir(parents=True, exist_ok=True); (work / 'blender.log').write_text('[bake] device CUDA\n')

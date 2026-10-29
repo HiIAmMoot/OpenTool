@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 from datetime import datetime
+import hashlib
 import json
 import logging
 from pathlib import Path, PureWindowsPath
@@ -27,6 +28,7 @@ class BakeRequest:
     work: Path | None = None
     verbose: bool = False
     backups: bool = True
+    charts: Path | None = None
 
 
 @dataclass
@@ -44,6 +46,11 @@ class BakeOutcome:
 
 def default_work(bsp: str) -> Path:
     return Path(tempfile.gettempdir()) / 'halo_lightmapper' / f'{bsp}-{datetime.now():%Y%m%d-%H%M%S}'
+
+
+def chart_cache_path(tags: Path, scenario: str, bsp: str) -> Path:
+    digest = hashlib.sha256(f'{tags}|{scenario}|{bsp}'.encode()).hexdigest()[:16]
+    return Path(tempfile.gettempdir()) / 'halo_lightmapper' / 'charts' / f'{digest}.npz'
 
 
 class _EventHandler(logging.Handler):
@@ -161,7 +168,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         # keep pipeline reads on the modder's original tags; runner writes the lit scenario so references for other BSPs survive.
         result = pipeline.bake(request.tags, request.scenario, request.bsp, request.settings,
                                out_bsp=out_bsp, out_scenario=None, work=work, progress=progress,
-                               backups=request.backups)
+                               backups=request.backups, charts=request.charts)
         if out_scenario is not None:
             write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario,
                                backups=request.backups)

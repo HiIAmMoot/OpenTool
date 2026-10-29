@@ -135,6 +135,80 @@ def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
     assert page_max == settings.page_max
 
 
+def place_scenery(tags):
+    from test_scenery import write_model, write_scenery
+
+    write_model(tags, 'model', [[(0, [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])]],
+                shaders=(('senv', 'wall'),))
+    write_scenery(tags, 'prop', 'model')
+    scenario = read_tag(tags / 'level.scenario')
+    palette = child(scenario.root, 'scenery_palette')
+    palette.set_reference('name', 'scen', 'prop')
+    scenario.root.set_block('scenery_palette', [palette])
+    placement = child(scenario.root, 'scenery')
+    placement.set('bsp_indices', 1)
+    scenario.root.set_block('scenery', [placement])
+    put(tags, 'scnr', 'level', scenario)
+
+
+def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    place_scenery(tags)
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 64 * memory.GB)
+    estimate = api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+    seen = []
+    check = memory.check_bake_memory
+
+    def spy(counts, pages, page_max):
+        seen.append((counts, pages))
+        return check(counts, pages, page_max)
+
+    monkeypatch.setattr(memory, 'check_bake_memory', spy)
+    api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
+    assert (estimate.counts, estimate.pages) == seen[0]
+    assert estimate.counts == memory.SceneCounts(3, 9)
+
+
+def test_estimate_leaves_a_chart_cache_the_bake_reuses(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('charted again')
+
+    monkeypatch.setattr(api(), 'chart_and_pack', refuse)
+    api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
+
+
+def test_estimate_starts_no_blender(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('estimate reached the bake')
+
+    for name in ('run_blender', 'write_job'):
+        monkeypatch.setattr(api(), name, refuse)
+    monkeypatch.setattr(gpu, 'probe_choice', refuse)
+    estimate = api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+    assert estimate.pages
+
+
+def test_estimate_raises_cap_error_over_max_pages(tiny, tmp_path):
+    from lightmapper.charts import CapError
+
+    tags, settings, work = tiny
+    settings = replace(settings, texels_per_unit=4, page_max=32, max_pages=1)
+    with pytest.raises(CapError):
+        api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+
+
+def test_estimate_refuses_over_the_surface_cap(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'MAX_BSP_SURFACES', 1)
+    with pytest.raises(ValueError, match='exceed stock cap'):
+        api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+
+
 def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     tags, settings, work = tiny
     settings = replace(settings, texels_per_unit=2)
