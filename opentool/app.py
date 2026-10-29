@@ -165,6 +165,9 @@ class App:
                 entry = ttk.Entry(self.advanced_frame, textvariable=value)
             entry.grid(row=index, column=1, sticky='ew', pady=2)
             self.advanced_entries[name] = entry
+            if name == 'page_max':
+                self.page_max_hint = ttk.Label(self.advanced_frame, foreground='gray')
+                self.page_max_hint.grid(row=index, column=2, sticky='w', padx=(8, 0))
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w')
@@ -400,6 +403,8 @@ class App:
         self._advanced_open = not self._advanced_open
 
     def _advanced_value_changed(self, name):
+        if name == 'page_max':
+            self.page_max_hint.configure(text=presets.page_max_hint(self.advanced_vars['page_max'].get()))
         if self._setting_preset:
             return
         selected = self.preset_var.get()

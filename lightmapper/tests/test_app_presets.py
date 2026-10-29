@@ -3,7 +3,7 @@ from dataclasses import replace
 import pytest
 
 from lightmapper.settings import Settings
-from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PRESETS, PRESET_HINTS, build_settings, parse_advanced
+from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, build_settings, parse_advanced
 
 
 def test_page_max_choices_are_the_memory_page_sides():
@@ -109,3 +109,8 @@ def test_parse_advanced_rejects(field, text):
 def test_parse_advanced_rejects_new_ranges(field, text):
     with pytest.raises(ValueError, match=LABELS[field]):
         parse_advanced({field: text})
+
+
+@pytest.mark.parametrize('value,shown', [('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True), ('', False), ('x', False)])
+def test_page_max_hint(value, shown):
+    assert page_max_hint(value) == (PAGE_MAX_HINT if shown else '')

@@ -13,6 +13,7 @@ from opentool.app import App
 from opentool.devices import result_line
 from opentool.runner import BakeOutcome
 from opentool import app as app_module
+from opentool import presets
 from opentool import usersettings
 from opentool import form as form_module
 
@@ -1012,3 +1013,12 @@ def test_32bit_checkbox_reaches_the_settings_and_is_remembered(tmp_path, tiny, m
     assert a.request().settings.lightmap_32bit is True
     a.remember()
     assert make_app(store_path=tmp_path / 's.json').lightmap_32bit_var.get() is True
+
+
+def test_max_resolution_hint_appears_for_large_pages(app):
+    for value, shown in (('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True)):
+        app.advanced_vars['page_max'].set(value)
+        assert (app.page_max_hint['text'] == presets.PAGE_MAX_HINT) is shown
+        assert not any(ch.isdigit() for ch in app.page_max_hint['text'])
+    app._select_preset('High')
+    assert app.page_max_hint['text'] == ''

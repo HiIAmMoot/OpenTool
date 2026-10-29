@@ -26,6 +26,12 @@ ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 
 PAGE_MAX_CHOICES = PAGE_SIDES
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'sky_grid': 'Suns per sky light', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
+PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
+
+
+def page_max_hint(value: str) -> str:
+    return PAGE_MAX_HINT if value in ('2048', '4096') else ''
+
 
 def parse_advanced(texts: dict[str, str]) -> dict:
     values = {}

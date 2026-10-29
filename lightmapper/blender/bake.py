@@ -125,7 +125,7 @@ def make_images(textures_path, pages, masked=False):
             textures.append(image)
     page_images = []
     for i, (w, h) in enumerate(pages):
-        # the 3x float buffer is only allocated while its page bakes (about 151 MB per 1024 page)
+        # the 3x float buffer is only allocated while its page bakes (the 3x image alone is about 151 MB per 1024 page; the whole bake's peak is estimated in lightmapper/memory.py)
         image = bpy.data.images.new(f'page_{i}', 1, 1, alpha=False, float_buffer=True, is_data=True)
         image.colorspace_settings.name = 'Non-Color'
         page_images.append(image)
