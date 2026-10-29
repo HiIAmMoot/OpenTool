@@ -71,3 +71,9 @@ def test_child_command_when_frozen_is_the_console_exe(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
     monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
     assert frozen.child_command('--vertex-pass', 'w', '{}') == [str(tmp_path / 'OpenTool-cli.exe'), '--vertex-pass', 'w', '{}']
+
+
+def test_child_command_when_frozen_runs_the_cpu_vertex_flag(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    assert frozen.child_command(frozen.CPU_VERTEX_FLAG, 'w') == [str(tmp_path / 'OpenTool-cli.exe'), '--cpu-vertex-pass', 'w']

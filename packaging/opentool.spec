@@ -53,6 +53,8 @@ a = Analysis(
     hiddenimports=['_cffi_backend', *slangpy_modules],
     excludes=excludes,
     noarchive=False,
+    # numba's cache needs the function's source file, which a PYZ module does not have.
+    module_collection_mode={'lightmapper.vertex_cpu': 'py'},
 )
 pyz = PYZ(a.pure)
 

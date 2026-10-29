@@ -1,5 +1,6 @@
 """Facts that differ between source runs and a PyInstaller bundle."""
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -10,6 +11,11 @@ NO_WINDOW = getattr(subprocess, 'CREATE_NO_WINDOW', 0) if sys.platform == 'win32
 DENOISE_FLAG = '--denoise-worker'
 PROBE_FLAG = '--gpu-probe'
 VERTEX_FLAG = '--vertex-pass'
+CPU_VERTEX_FLAG = '--cpu-vertex-pass'
+
+
+def numba_cache_dir() -> Path:
+    return Path(os.environ.get('LOCALAPPDATA') or Path.home()) / 'OpenTool' / 'numba-cache'
 
 
 def is_frozen() -> bool:
