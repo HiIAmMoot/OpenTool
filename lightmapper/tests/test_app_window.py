@@ -1340,3 +1340,35 @@ def test_estimate_worker_does_not_capture_app(ready_app_with_fake, monkeypatch):
     app.advanced_vars['page_max'].set('1024')
     assert len(targets) == 1
     assert all(cell.cell_contents is not app for cell in targets[0].__closure__ or ())
+
+
+def test_empty_pages_estimate_ends_calculating_and_enables_bake(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: None)
+    fake.results[1] = SceneEstimate(SceneCounts(2, 4), [])
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    assert app.estimate_state == 'calculating'
+    fake.gates[1].set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert app.estimate_state == 'fits'
+    assert app.memory_label['text'] == 'Needs about 0.0 GB'
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_describe_failure_ends_calculating_and_enables_bake(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+
+    def broken_describe(*_args):
+        raise RuntimeError('description failed')
+
+    monkeypatch.setattr(app_module.estimate_module, 'describe', broken_describe)
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    assert app.estimate_state == 'calculating'
+    fake.gates[1].set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert app.estimate_state == 'error'
+    assert app.memory_label['text'] == 'The bake stopped: description failed. The full error is in the log.'
+    assert str(app.bake_button['state']) == 'normal'
+    assert 'RuntimeError: description failed' in app.log_path.read_text()

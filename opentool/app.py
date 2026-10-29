@@ -12,7 +12,7 @@ from tkinter.scrolledtext import ScrolledText
 from lightmapper import blender_find, gpu
 from lightmapper.memory import free_physical_bytes
 from lightmapper.progress import STAGE_LABELS, fraction
-from . import devices, estimate as estimate_module, form, jobobject, presets, runner, usersettings
+from . import devices, errors, estimate as estimate_module, form, jobobject, presets, runner, usersettings
 from .estimate import EstimateInputs
 
 
@@ -605,7 +605,11 @@ class App:
                 if generation != self.generation:
                     self._start_estimate()
                     continue
-                text, allowed = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
+                try:
+                    text, allowed = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
+                except Exception as exc:
+                    result = exc
+                    text, allowed = errors.explain(exc), True
                 self.memory_label.configure(text=text)
                 self.estimate_state = ('refused' if not allowed else
                                        'error' if isinstance(result, BaseException) else 'fits')

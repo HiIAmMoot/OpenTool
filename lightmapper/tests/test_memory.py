@@ -190,3 +190,38 @@ def test_bake_memory_error_is_a_bake_error():
 
     assert issubclass(memory.BakeMemoryError, pipeline.BakeError)
     assert pipeline.BakeError is BakeError
+
+
+@pytest.fixture
+def empty_pages_model(monkeypatch):
+    monkeypatch.setattr(memory, 'PER_TRIANGLE', 3)
+    monkeypatch.setattr(memory, 'PER_VERTEX', 5)
+    monkeypatch.setattr(memory, 'MARGIN', 1.15)
+    return SceneCounts(7, 11)
+
+
+def test_empty_pages_need_only_the_scene_and_margin(empty_pages_model):
+    assert memory.bake_bytes(empty_pages_model, []) == 88
+    assert memory.bake_bytes(SceneCounts(0, 0), []) == 0
+
+
+def test_empty_pages_have_no_smaller_page_suggestion(empty_pages_model):
+    assert memory.suggest_page_max(empty_pages_model, [], None) is None
+
+
+@pytest.mark.parametrize('free, free_text', [(None, ''), (87, '; this computer has 0.0 GB free')])
+def test_empty_pages_memory_message(empty_pages_model, free, free_text):
+    assert memory.out_of_memory_message(empty_pages_model, [], 1024, free) == (
+        'This bake needs about 0.0 GB of free memory' + free_text
+        + '. Try a lower texel density, or close other programs.')
+
+
+def test_empty_pages_memory_guard_accepts_or_refuses_scene_cost(empty_pages_model):
+    assert memory.check_bake_memory(empty_pages_model, [], 1024, free=88) == memory.MemoryCheck(88, 88)
+    assert memory.check_bake_memory(empty_pages_model, [], 1024, free=None) == memory.MemoryCheck(88, None)
+    with pytest.raises(memory.BakeMemoryError) as caught:
+        memory.check_bake_memory(empty_pages_model, [], 1024, free=87)
+    assert (caught.value.estimate, caught.value.free) == (88, 87)
+    assert str(caught.value) == (
+        'This bake needs about 0.0 GB of free memory; this computer has 0.0 GB free. '
+        'Try a lower texel density, or close other programs.')

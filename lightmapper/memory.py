@@ -53,7 +53,7 @@ def scene_term(counts) -> int:
 
 
 def bake_bytes(counts, pages) -> int:
-    w, h = max(pages, key=lambda page: page[0] * page[1])
+    w, h = max(pages, key=lambda page: page[0] * page[1], default=(0, 0))
     return ceil(MARGIN * (page_term(w, h) + resident_term(pages) + scene_term(counts)))
 
 
@@ -96,6 +96,8 @@ def format_gb(n: int) -> str:
 
 
 def suggest_page_max(counts, pages, free: int | None) -> int | None:
+    if not pages:
+        return None
     largest = max(pages, key=lambda page: page[0] * page[1])
     fixed = resident_term(pages) + scene_term(counts)
     for side in reversed(PAGE_SIDES):
@@ -105,9 +107,10 @@ def suggest_page_max(counts, pages, free: int | None) -> int | None:
 
 
 def out_of_memory_message(counts, pages, page_max: int, free: int | None) -> str:
-    w, h = max(pages, key=lambda page: page[0] * page[1])
-    text = (f'This bake needs about {format_gb(bake_bytes(counts, pages))} GB of free memory '
-            f'(largest page {w} x {h} at Max resolution {page_max})')
+    text = f'This bake needs about {format_gb(bake_bytes(counts, pages))} GB of free memory'
+    if pages:
+        w, h = max(pages, key=lambda page: page[0] * page[1])
+        text += f' (largest page {w} x {h} at Max resolution {page_max})'
     if free is not None:
         text += f'; this computer has {format_gb(free)} GB free'
     side = suggest_page_max(counts, pages, free)
