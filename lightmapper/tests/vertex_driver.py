@@ -27,6 +27,10 @@ def main():
     with np.load(os.path.join(root, 'pages.npz')) as data:
         pages = [data[f'page_{i}'] for i in range(len(job['pages']))]
     tracer = bake.VertexPass(scene, job, textures, pages)
+    if os.path.exists(os.path.join(root, 'fast_path')):
+        def forbidden(*args, **kwargs):
+            raise AssertionError('ordinary queries must not construct sphere or RGB shading arrays')
+        tracer.sphere = tracer.shade_rgb = forbidden
     probe_path = os.path.join(root, 'probe.json')
     if os.path.exists(probe_path):
         with open(probe_path) as handle:
@@ -45,9 +49,10 @@ def main():
         np.savez(os.path.join(root, 'sun_facing.npz'), facing=bake.sun_facing_queries(scene, job['suns']))
         return
     vector, irradiance, rays = tracer.run()
+    throughput = ({'vertex_sun_throughput': tracer.sun_throughput} if tracer.sun_throughput is not None else {})
     np.savez(os.path.join(root, 'vp.npz'), vector=vector, irradiance=irradiance, rays=rays,
              edge_sun_lit=tracer.edge_sun_lit, sun_lit=tracer.sun_lit,
-             vertex_sun_throughput=tracer.sun_throughput,
+              **throughput,
              texel_rgb=getattr(tracer, 'texel_rgb', np.empty((0, 3))))
 
 

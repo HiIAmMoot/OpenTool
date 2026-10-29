@@ -167,6 +167,15 @@ def cpu_and_gpu(tmp_path, vendor, **kwargs):
 
 
 @pytest.mark.blender
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_ordinary_gpu_queries_omit_unused_throughput(tmp_path, vendor, mode):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, receivers=[full_quad()], suns=[sun()], mode=mode)
+    assert result.irradiance[0] > 0
+    assert result.sun_throughput is None
+    assert 'vertex_sun_throughput' not in cpu.files
+
+
+@pytest.mark.blender
 @pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back', 'edge'])
 def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene(kind))
@@ -283,7 +292,10 @@ def test_gpu_matches_cpu_on_the_vertex_pass_scenes(tmp_path, vendor, case):
     np.testing.assert_allclose(result.irradiance, cpu['irradiance'], rtol=1e-4, atol=1e-6)
     np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-4, atol=1e-5)
     assert np.array_equal(result.sun_lit, cpu['sun_lit']) and np.array_equal(result.edge_sun_lit, cpu['edge_sun_lit'])
-    np.testing.assert_allclose(result.sun_throughput, cpu['vertex_sun_throughput'], rtol=1e-6, atol=1e-6)
+    if 'vertex_sun_throughput' in cpu.files:
+        np.testing.assert_allclose(result.sun_throughput, cpu['vertex_sun_throughput'], rtol=1e-6, atol=1e-6)
+    else:
+        assert result.sun_throughput is None
     if case == 'sun_throughput':
         np.testing.assert_allclose(result.sun_throughput[:, 0],
                                    [[0.5, 0.25, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1]], rtol=1e-6)
@@ -572,7 +584,7 @@ def test_bake_with_the_gpu_pass_matches_the_cpu_pass(tmp_path, vendor):
     assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
     assert result.rays == first.vertex_rays_cast
     np.testing.assert_array_equal(result.sun_lit, first.vertex_sun_lit)
-    np.testing.assert_allclose(result.sun_throughput, first.vertex_sun_throughput, rtol=1e-6, atol=1e-6)
+    assert result.sun_throughput is None and first.vertex_sun_throughput is None
     direct = load_and_run(tmp_path, first.diffuse_pages, adapter_for(vendor))
     np.testing.assert_array_equal(result.edge_sun_lit, direct.edge_sun_lit)
 

@@ -707,8 +707,9 @@ class VertexPass:
         self.tint = np.concatenate([scene['tri_tint'], scene['occ_tri_tint']]).astype(np.float64)
         self.page_of = np.concatenate([scene['tri_page'], np.full(n_occ, -1)])
         self.class_of = np.concatenate([scene['tri_class'], np.full(n_occ, -1)])
-        self.two_sided = np.concatenate([scene.get('tri_ignore_normals', np.zeros(self.n_recv, bool)),
-                                         np.zeros(n_occ, bool)]) & (job.get('ignore_normals_mode') == 'enhanced')
+        self.two_sided = None
+        if job.get('ignore_normals_mode') == 'enhanced' and scene.get('tri_ignore_normals', np.empty(0)).any():
+            self.two_sided = np.concatenate([scene['tri_ignore_normals'], np.zeros(n_occ, bool)])
         self.emission = np.concatenate([scene['tri_emission'], scene['occ_tri_emission']]).astype(np.float64)
         # a see-through emitter among the occluders is still seen by the rays that gather light (a shadow ray passes it)
         self.glows = np.concatenate([np.zeros(self.n_recv, np.bool_), self.emission[self.n_recv:].any(axis=1)])
@@ -790,10 +791,10 @@ class VertexPass:
             remaining -= distance + RAY_EPSILON
         return -1, None
 
-    def shade_rgb(self, tri, loc, direction, cls, with_ambient=True):
+    def _shade(self, tri, loc, direction, cls, with_ambient=True, rgb=False):
         """Radiance arriving along each ray: tri (n,) with -1 for a miss, loc (n,3), direction (n,3), cls (n,) of the query."""
         n = len(tri)
-        radiance = np.zeros((n, 3))
+        radiance = np.zeros((n, 3) if rgb else n)
         # a ray that misses sees the sky, which tool never gathers: the flat ambient term in run() stands for it
         hit = np.flatnonzero(tri >= 0)
         if not len(hit):
@@ -806,11 +807,12 @@ class VertexPass:
         albedo[self.glows[t] & ~self.casts[t]] = 0
         recv = t < self.n_recv
         facing = (direction[hit] * self.normals[t]).sum(1) < 0
-        lit = np.zeros((len(hit), 3))
+        lit = np.zeros((len(hit), 3) if rgb else len(hit))
         occluder = ~recv
-        lit[occluder] = (albedo[occluder] * (self.ambient_of(cls[hit][occluder]) if with_ambient else 0)
-                          + self.emission[t][occluder] * facing[occluder, None])
-        front = recv & (facing | self.two_sided[t])
+        colour = (albedo[occluder] * (self.ambient_of(cls[hit][occluder]) if with_ambient else 0)
+                  + self.emission[t][occluder] * facing[occluder, None])
+        lit[occluder] = colour if rgb else colour @ LUMA
+        front = recv & (facing | self.two_sided[t]) if self.two_sided is not None else recv & facing
         if front.any():
             ft = t[front]
             lm = self.interpolate(self.lm_uv, ft, p[front])
@@ -818,14 +820,21 @@ class VertexPass:
             for k in np.unique(self.page_of[ft]):
                 rows = self.page_of[ft] == k
                 page_value[rows] = sample_bilinear(self.pages[k], lm[rows, 0], lm[rows, 1], False)
-            colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) * facing[front, None]
-                                                   if with_ambient else 0)) + self.emission[ft] * facing[front, None]
-            lit[front] = colour
+            if self.two_sided is None:
+                colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft])
+                                                       if with_ambient else 0)) + self.emission[ft]
+            else:
+                colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) * facing[front, None]
+                                                       if with_ambient else 0)) + self.emission[ft] * facing[front, None]
+            lit[front] = colour if rgb else colour @ LUMA
         radiance[hit] = lit
         return radiance
 
     def shade(self, tri, loc, direction, cls):
-        return self.shade_rgb(tri, loc, direction, cls) @ LUMA
+        return self._shade(tri, loc, direction, cls)
+
+    def shade_rgb(self, tri, loc, direction, cls, with_ambient=True):
+        return self._shade(tri, loc, direction, cls, with_ambient=with_ambient, rgb=True)
 
     def radiance(self, tri, loc, direction, cls):
         return float(self.shade(np.array([tri]), np.array([loc]), np.array([direction]), np.array([cls]))[0])
@@ -854,8 +863,10 @@ class VertexPass:
         queries = len(scene['query_pos'])
         local, phi, r = self.hemisphere(rays)
         height = local[:, 2]
-        sphere_local, _, sphere_r = self.sphere(rays)
         ignore_normals = scene.get('query_ignore_normals', np.zeros(queries, bool))
+        flagged = ignore_normals.any()
+        if flagged:
+            sphere_local, _, sphere_r = self.sphere(rays)
         pos = scene['query_pos'].astype(np.float64)
         nrm = scene['query_normal'].astype(np.float64)
         length = np.linalg.norm(nrm, axis=1)
@@ -869,7 +880,8 @@ class VertexPass:
         sun_visible = sun_facing_queries(scene, job['suns'])
         # which queries each sun reaches, for the faces whose plane turns away from it (they take it from their corners)
         self.sun_lit = np.zeros((queries, len(job['suns'])), np.bool_)
-        self.sun_throughput = np.zeros((queries, len(job['suns']), 3), np.float32)
+        self.sun_throughput = (np.zeros((queries, len(job['suns']), 3), np.float32)
+                               if flagged and job.get('ignore_normals_mode', 'tool') == 'tool' else None)
         for first in range(0, queries, QUERY_CHUNK):
             ids = np.arange(first, min(first + QUERY_CHUNK, queries))
             m = len(ids)
@@ -880,8 +892,8 @@ class VertexPass:
             bitangent = np.cross(n, tangent)
             spin = 2 * np.pi * ((ids * GOLDEN_FRACTION + job.get('seed', 0) * SEED_SPIN) % 1.0)
             angle = phi[None, :] + spin[:, None]
-            radius = np.where(ignore_normals[ids, None], sphere_r, r)
-            h = np.where(ignore_normals[ids, None], sphere_local[:, 2], height)
+            radius = np.where(ignore_normals[ids, None], sphere_r, r) if flagged else r[None, :]
+            h = np.where(ignore_normals[ids, None], sphere_local[:, 2], height) if flagged else height[None, :]
             dirs = (radius[:, :, None] * np.cos(angle)[:, :, None] * tangent[:, None, :]
                     + radius[:, :, None] * np.sin(angle)[:, :, None] * bitangent[:, None, :]
                     + h[:, :, None] * n[:, None, :])
@@ -899,8 +911,8 @@ class VertexPass:
             lum = self.shade(tri.ravel(), loc.reshape(-1, 3), dirs.reshape(-1, 3),
                              np.repeat(qcls[ids], rays)).reshape(m, rays)
             lum[~usable[ids]] = 0
-            solid_angle = np.where(ignore_normals[ids], 4 * np.pi, np.pi)
-            vector[ids] = solid_angle[:, None] / rays * (lum[:, :, None] * dirs).sum(1)
+            solid_angle = np.where(ignore_normals[ids], 4 * np.pi, np.pi) if flagged else np.pi
+            vector[ids] = (solid_angle[:, None] if flagged else solid_angle) / rays * (lum[:, :, None] * dirs).sum(1)
             irradiance[ids] = solid_angle / rays * lum.sum(1)
             # (the pass works in pi x tool units, the sun's strength carries pi and a gathered hit has no 1/pi, so
             # the ambient that tool adds as lum x normal takes pi too; without it the sun-to-ambient ratio is off)
@@ -923,7 +935,8 @@ class VertexPass:
                         vector[ids[a]] += strength * cosine * d
                         irradiance[ids[a]] += strength * cosine
                         self.sun_lit[ids[a], sun_index] = True
-                        self.sun_throughput[ids[a], sun_index] = carried
+                        if self.sun_throughput is not None:
+                            self.sun_throughput[ids[a], sun_index] = carried
         edge_pos = scene.get('edge_pos', np.empty((0, 3), np.float32))
         self.edge_sun_lit = np.zeros((len(edge_pos), len(job['suns'])), np.bool_)
         for first in range(0, len(edge_pos), QUERY_CHUNK):
@@ -1076,7 +1089,8 @@ def main():
         vertex_pass = VertexPass(scene_data, job, raw_textures, diffuse_pages)
         out['vertex_vector'], out['vertex_irradiance'], rays = vertex_pass.run()
         out['vertex_sun_lit'] = vertex_pass.sun_lit
-        out['vertex_sun_throughput'] = vertex_pass.sun_throughput
+        if vertex_pass.sun_throughput is not None:
+            out['vertex_sun_throughput'] = vertex_pass.sun_throughput
         out['texel_rgb'] = vertex_pass.texel_rgb
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
         out['vertex_rays_cast'] = np.int64(rays)

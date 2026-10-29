@@ -29,7 +29,8 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
-                  sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None, texel_samples=None):
+                  sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None, texel_samples=None,
+                  fast_path=False, mode='tool'):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
@@ -44,7 +45,7 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                                     texel_xy=(np.indices((3, 3))[::-1].reshape(2, -1).T.astype(np.int32)
                                               if len(texel) == 9 else np.zeros((len(texel), 2), np.int32)))
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
-                                   albedo_fallback=albedo_fallback)
+                                   albedo_fallback=albedo_fallback, ignore_normals_mode=mode)
     if texel is not None:
         settings = dataclasses.replace(settings, ignore_normals_mode='enhanced', samples=9 * rays)
     if texel_samples is not None:
@@ -61,6 +62,8 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
         (tmp_path / 'sun_facing').write_text('')
     if probes is not None:
         (tmp_path / 'probe.json').write_text(json.dumps(probes))
+    if fast_path:
+        (tmp_path / 'fast_path').write_text('')
     env = dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent))
     done = subprocess.run([str(LIGHTMAPPER_BLENDER), '-b', '--factory-startup', '--python-exit-code', '1',
                            '--python', DRIVER, '--', str(tmp_path)], capture_output=True, text=True, env=env,
@@ -96,6 +99,15 @@ def texel_scene(kind):
                     suns=[sun((0, 0, 1))], query=((0, 0, 0),), texel=((0, 0, 1),) * 9,
                     pages=[np.zeros((1, 1, 3), np.float32)], rays=1024, albedo_fallback=1)
     raise ValueError(kind)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_ordinary_cpu_queries_skip_sphere_rgb_and_throughput(tmp_path, mode):
+    out = run_driver(tmp_path, [full_quad(emission=(1, 2, 3))], fast_path=True,
+                     query=((2, 2, 1),), normal=(0, 0, -1), pages=[np.ones((16, 16, 3), np.float32)], mode=mode)
+    assert out['irradiance'][0] > 0
+    assert 'vertex_sun_throughput' not in out.files
 
 
 @pytest.mark.blender

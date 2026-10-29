@@ -261,7 +261,8 @@ def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) ->
                                 np.array(data['vertex_irradiance'], np.float32),
                                 np.array(data['vertex_sun_lit'], bool),
                                 np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']),
-                                np.array(data['vertex_sun_throughput'], np.float32),
+                                np.array(data['vertex_sun_throughput'], np.float32)
+                                 if 'vertex_sun_throughput' in data.files else None,
                                 np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
 
 
