@@ -190,8 +190,10 @@ def _load_scenery(tags_root: Path, path: str, cache: dict) -> SceneryDefinition 
         if model_group not in ('mode', 'mod2') or not model_path:
             logger.warning('scenery %s has no render model', path)
             return None
-        cache[path] = SceneryDefinition(np.array(root.get('origin_offset'), np.float64),
-                                        (model_group, model_path))
+        origin_offset = np.array(root.get('origin_offset'), np.float64)
+        # shared by every placement of the scenery, so no one may change it in place
+        origin_offset.setflags(write=False)
+        cache[path] = SceneryDefinition(origin_offset, (model_group, model_path))
     return cache[path]
 
 
@@ -199,8 +201,12 @@ def _load_model(tags_root: Path, model: tuple[str, str], desired: int, cache: di
     key = (*model, desired)
     if key not in cache:
         cache[key] = None
+        if model in cache:
+            return None
         model_file = resolve_reference_path(tags_root, *model)
         if not model_file.is_file():
+            # remembered under the bare model, so another permutation of it does not warn again
+            cache[model] = None
             logger.warning('model tag is missing: %s', model_file)
             return None
         cache[key] = model_geometry(read_tag(model_file), desired)

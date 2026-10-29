@@ -328,10 +328,31 @@ def test_scenery_without_a_model_warns_once(tmp_path, caplog):
     scn = new_tag('scnr')
     add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
     for x in range(3):
-        add(scn.root, 'scenery', placement__position=(x, 0, 0))
+        add(scn.root, 'scenery', placement__position=(x, 0, 0), placement__desired_permutation=x)
     occ = gather_occluders(scn, tags, 0)
     assert len(occ.tris) == 0
     assert caplog.text.count('has no render model') == 1
+
+
+def test_missing_model_file_warns_once_across_permutations(tmp_path, caplog):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    write_scenery(tags, 's', 'gone')
+    scn = new_tag('scnr')
+    add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
+    for x in range(2):
+        add(scn.root, 'scenery', placement__position=(x, 0, 0), placement__desired_permutation=x)
+    assert len(gather_occluders(scn, tags, 0).tris) == 0
+    assert caplog.text.count('model tag is missing') == 1
+
+
+def test_cached_origin_offset_is_read_only(tmp_path):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    write_scenery(tags, 's', 'm', (1, 2, 3))
+    definition = scenery._load_scenery(tags, 's', {})
+    with pytest.raises(ValueError):
+        definition.origin_offset[0] = 9
 
 
 def test_oblique_placement_with_an_offset_matches_hand_transform(tmp_path):

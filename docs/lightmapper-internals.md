@@ -45,7 +45,7 @@ The layout is saved in `charts.npz`, together with a key made from the input BSP
 - Shader base maps are decoded from bitmap tags (`textures.py`, `formats/bitmap_decode.py`). They give the colour that light picks up when it bounces, the alpha for cut-outs such as grates, and the tint of glass.
 - Sun lamps carry the list of receivers each may light. BSP shader emission and, by default, scenery shader emission also light the scene. BSP default-lighting fields are not read.
 
-Each placement's model is first moved by the scenery tag's origin offset, then turned and placed, as the game does. A physics tag's centre-of-mass shift is not applied; none of the 251 stock scenery tags references a physics tag.
+Each placement's model is first moved by the scenery tag's origin offset, then turned and placed, as the game does. A physics tag's centre-of-mass shift is not applied; none of the 251 scenery tags of the editing kit references a physics tag (custom tag sets checked showed none either).
 
 The bake does not read these scenery flags and fields:
 
