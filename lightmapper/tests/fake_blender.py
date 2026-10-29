@@ -29,6 +29,14 @@ def main():
             stage_start += 1.5
     if mode == 'nooutput':
         return
+    if mode in ('oom', 'crash'):
+        if mode == 'oom':
+            print('Calloc returns null: len=2415919104 in Combined, total 25462081056')
+            print('Calloc returns null: len=2415919104 in BakePrimitive, total 25462081056')
+            print('Calloc returns null: len=2415919104 in BakeDifferential, total 25462081056')
+        sys.stdout.flush()
+        # no cleanup, as when Windows kills Blender on a failed allocation (it reports 3221225477)
+        os._exit(-1073741819)
     with open(job_path.with_name('args.json'), 'w') as handle:
         json.dump(sys.argv[1:], handle)
     with np.load(job_path.with_name(job['scene'])) as scene:

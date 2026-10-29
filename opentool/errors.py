@@ -2,15 +2,21 @@ import re
 from pathlib import Path
 
 from lightmapper.blender_find import BlenderNotFound
-from lightmapper.blender_job import BlenderError
+from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
 from lightmapper.charts import CapError
 from lightmapper.gpu import DeviceError
+from lightmapper.memory import BakeMemoryError
 from lightmapper.pipeline import BakeError
 
 
 def explain(exc: BaseException, work: Path | None = None) -> str:
     if isinstance(exc, BlenderNotFound):
         return str(exc)
+    if isinstance(exc, BakeMemoryError):
+        return str(exc)
+    if isinstance(exc, BlenderOutOfMemory):
+        log_location = f'blender.log in {work}' if work is not None else "blender.log in the bake's work folder"
+        return f'Blender ran out of memory during the bake. {exc.message} The whole log is {log_location}.'
     if isinstance(exc, BlenderError):
         if str(exc).startswith('blender could not start'):
             return 'Blender could not be started. Check the Blender path, or pick blender.exe again.'

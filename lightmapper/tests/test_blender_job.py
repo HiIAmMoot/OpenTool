@@ -8,7 +8,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from lightmapper.blender_job import BakeResult, BlenderError, Scene, run_blender, write_job
+import subprocess
+
+from lightmapper import blender_job, memory
+from lightmapper.blender_job import BakeResult, BlenderError, BlenderOutOfMemory, Scene, run_blender, write_job
+from lightmapper.memory import SceneCounts
 from lightmapper.gather import Sun
 from lightmapper.settings import Settings
 
@@ -280,6 +284,53 @@ def test_blender_failure_raises(tmp_path, fake, monkeypatch):
     monkeypatch.setenv('FAKE_BLENDER_MODE', 'fail')
     with pytest.raises(BlenderError, match='failing on purpose'):
         run_blender(work, s)
+
+
+def test_access_violation_with_calloc_null_is_out_of_memory(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 9_800_000_000)
+    with pytest.raises(BlenderOutOfMemory) as caught:
+        run_blender(work, s)
+    assert caught.value.message == memory.out_of_memory_message(
+        SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)], s.page_max, 9_800_000_000)
+    assert 'Calloc returns null' in str(caught.value)
+
+
+def test_access_violation_without_calloc_stays_blender_error(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'crash')
+    with pytest.raises(BlenderError) as caught:
+        run_blender(work, s)
+    assert type(caught.value) is BlenderError and 'exited with' in str(caught.value)
+
+
+def test_negative_access_violation_code_is_recognised(tmp_path, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender='blender')
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+
+    def run(command, **kwargs):
+        kwargs['stdout'].write(b'Malloc returns null: len=1 in Combined, total 2\n')
+        return subprocess.CompletedProcess(command, -1073741819)
+    monkeypatch.setattr(blender_job.subprocess, 'run', run)
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: None)
+    with pytest.raises(BlenderOutOfMemory):
+        run_blender(work, s)
+
+
+def test_vertex_only_relaunch_out_of_memory_is_mapped(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 9_800_000_000)
+    with pytest.raises(BlenderOutOfMemory):
+        blender_job.run_blender_vertex_only(work, s, [page(0, 16, 8)])
 
 
 def test_missing_output_raises(tmp_path, fake, monkeypatch):

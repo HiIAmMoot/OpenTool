@@ -14,6 +14,7 @@ import time
 
 import numpy as np
 
+from .memory import SceneCounts, free_physical_bytes, out_of_memory_message
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
 from .vertex_gpu import VertexPassResult
@@ -24,6 +25,8 @@ from . import frozen
 BAKE_SCRIPT = Path(__file__).with_name('blender') / 'bake.py'
 LOG_TAIL_LINES = 40
 SOURCES = ('all', 'sun', 'emit')
+# what Windows reports when Blender dies on a failed allocation: unsigned, or signed as Python sees it elsewhere
+ACCESS_VIOLATION = (3221225477, -1073741819)
 
 
 @dataclass
@@ -80,6 +83,12 @@ _DTYPES = {
 
 class BlenderError(RuntimeError):
     pass
+
+
+class BlenderOutOfMemory(BlenderError):
+    def __init__(self, message, tail):
+        self.message = message
+        super().__init__(f'{message}\n{tail}')
 
 
 @dataclass
@@ -220,7 +229,13 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
     except OSError as error:
         raise BlenderError(f'blender could not start: {error}') from None
     if done.returncode != 0:
-        raise BlenderError(f'blender exited with {done.returncode}\n{_log_tail(log)}')
+        tail = _log_tail(log)
+        # an access violation alone is any crash; only Blender's own failed-allocation line makes it memory
+        if done.returncode in ACCESS_VIOLATION and ('Calloc returns null' in tail or 'Malloc returns null' in tail):
+            message = out_of_memory_message(SceneCounts.from_npz(work / job['scene']),
+                                            [tuple(p) for p in job['pages']], s.page_max, free_physical_bytes())
+            raise BlenderOutOfMemory(message, tail)
+        raise BlenderError(f'blender exited with {done.returncode}\n{tail}')
     if not out.is_file():
         raise BlenderError(f'blender wrote no {out.name}\n{_log_tail(log)}')
     return job, out

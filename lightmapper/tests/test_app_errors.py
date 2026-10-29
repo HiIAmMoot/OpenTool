@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from lightmapper.blender_find import BlenderNotFound
-from lightmapper.blender_job import BlenderError
+from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
+from lightmapper.memory import BakeMemoryError
 from lightmapper.charts import CapError
 from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
@@ -25,6 +26,12 @@ from opentool.errors import explain
     (KeyError('weird'), 'The bake stopped')])
 def test_explain(exc, needle):
     assert needle in explain(exc, Path('W'))
+
+
+def test_out_of_memory_messages_are_shown_as_written():
+    assert explain(BakeMemoryError('This bake needs ...', 1, 2)) == 'This bake needs ...'
+    text = explain(BlenderOutOfMemory('This bake needs ...', 'tail'), Path('W'))
+    assert 'This bake needs ...' in text and 'blender.log in W' in text and 'tail' not in text
 
 
 def test_permission_error_names_the_file():
