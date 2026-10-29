@@ -32,7 +32,7 @@ def main():
         image.pixels.foreach_set(np.full(h * w * 4, value, np.float32))
         options = {'pass_filter': {'DIRECT', 'INDIRECT'}} if name == 'DIFFUSE' else {}
         bake.bpy.ops.object.bake(type=name, margin=0, use_clear=False, target='IMAGE_TEXTURES', **options)
-        out[name] = bake.read_page(image, h, w)[::-1].copy()
+        out[name] = bake.read_page(image, np.empty(h * w * 4, np.float32), h, w)[::-1].copy()
     np.savez(os.path.join(root, 'probe.npz'), **out)
 
 

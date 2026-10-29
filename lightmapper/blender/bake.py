@@ -485,10 +485,16 @@ def add_sun(n, sun, receiver_collection):
     obj.light_linking.receiver_collection = receiver_collection
 
 
-def read_page(image, h, w):
-    buffer = np.empty(h * w * 4, np.float32)
+def clear_page(image, buffer):
+    # (a bake leaves a texel it does not write as it was, so the sentinel has to be put back before each one)
+    buffer.fill(-1)
+    image.pixels.foreach_set(buffer)
+
+
+def read_page(image, buffer, h, w):
+    # a view of the buffer: the next clear_page overwrites it, so the caller reduces it before baking again
     image.pixels.foreach_get(buffer)
-    return buffer.reshape(h, w, 4)[:, :, :3].copy()
+    return buffer.reshape(h, w, 4)[:, :, :3]
 
 
 def receiver_diffuse_scale(scene, page, width, height, enhanced=False, coverage=False):
@@ -600,7 +606,7 @@ def bake_page(page, receivers, image, h, w, job, mask_image=None, diffuse_scale=
         release_page_image(image)
 
 
-def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, sentinel, h, w, job, diffuse_scale=None):
+def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, w, job, diffuse_scale=None):
     """Bake again, only where a texel owns few sub-texels, with other seeds, and merge by sample count."""
     cycles = bpy.context.scene.cycles
     base_spp = cycles.samples
@@ -617,10 +623,10 @@ def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, sentinel, h
             pixels = np.zeros((h, w, 4), np.float32)
             pixels[mask] = 1
             mask_image.pixels.foreach_set(pixels.ravel())
-            image.pixels.foreach_set(sentinel)
+            clear_page(image, buffer)
             bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
                                 target='IMAGE_TEXTURES')
-            raw = read_page(image, 3 * h, 3 * w)
+            raw = read_page(image, buffer, 3 * h, 3 * w)
             extra.append(downsample_written(raw)[0])
             if diffuse_scale is not None:
                 extra_corrected.append(downsample_written(raw, diffuse_scale)[0])
@@ -641,20 +647,21 @@ def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
         obj.select_set(True)
     view_layer.objects.active = chosen[0]
     # a covered edge can miss every sub-texel; zero cannot distinguish that from a baked shadow
-    sentinel = np.full(3 * h * 3 * w * 4, -1, np.float32)
-    image.pixels.foreach_set(sentinel)
+    buffer = np.empty(3 * h * 3 * w * 4, np.float32)
+    clear_page(image, buffer)
     bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
                         target='IMAGE_TEXTURES')
-    raw = read_page(image, 3 * h, 3 * w)
+    raw = read_page(image, buffer, 3 * h, 3 * w)
     diffuse, written = downsample_written(raw)
     corrected = downsample_written(raw, diffuse_scale)[0] if diffuse_scale is not None else diffuse
     if mask_image is not None:
         diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned_subsamples(raw), image, mask_image,
-                                               sentinel, h, w, job, diffuse_scale)
-    image.pixels.foreach_set(sentinel)
+                                               buffer, h, w, job, diffuse_scale)
+    clear_page(image, buffer)
     bpy.ops.object.bake(type='EMIT', margin=0, use_clear=False, target='IMAGE_TEXTURES')
     # (the glow run's emitters are the flagged receivers, whose own texels the gather has already filled)
-    emit, emit_written = downsample_written(read_page(image, 3 * h, 3 * w), diffuse_scale if job.get('glow') else None)
+    emit, emit_written = downsample_written(read_page(image, buffer, 3 * h, 3 * w),
+                                            diffuse_scale if job.get('glow') else None)
     warn_if_masks_differ(written, emit_written, page)
     # Blender's row 0 is the bottom; the diffuse part alone comes back too, for the vertex pass to add emission once
     return (corrected + emit)[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()

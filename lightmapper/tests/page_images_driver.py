@@ -24,9 +24,9 @@ def main():
     seen = []
     real_read = bake.read_page
 
-    def spy(image, h, w):
+    def spy(image, *rest):
         seen.append([int(i.size[0] * i.size[1]) for i in images])
-        return real_read(image, h, w)
+        return real_read(image, *rest)
 
     bake.read_page = spy
     for k, (w, h) in enumerate(job['pages']):

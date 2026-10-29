@@ -805,3 +805,26 @@ def test_mixed_glow_source_uses_only_flagged_samples(tmp_path, received):
                for i, (w, h) in enumerate([(1, 1), (8, 8)])]
     glow = run_blender_glow(tmp_path, s, sources)
     np.testing.assert_allclose(glow[1][2:-2, 2:-2], .25 * received, atol=.01)
+
+
+@pytest.mark.blender
+def test_page_buffer_is_refilled_before_every_bake(tmp_path, blender_exe):
+    edge = ((1.5 / 16, 1.5 / 16), (9.5 / 16, 1.5 / 16), (9.5 / 16, 9.5 / 16), (1.5 / 16, 9.5 / 16))
+    receivers = [dict(quad=floor(0, 4, 0, 4, lm=edge), casts=False)]
+    s = Settings(samples=32, bounces=1, vertex_rays=1, texel_samples=256)
+    write_job(tmp_path, build(receivers), [(16, 16)], [sun()], {}, s)
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('page_buffer_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    reads = np.load(tmp_path / 'reads.npz')
+    count = int(reads['count'])
+    assert count >= 3  # base, at least one tier, emit
+    # every read is a view of the one page buffer
+    assert bool(reads['shared'])
+    for n in range(count):
+        rgb, written = reads[f'read_{n}'], reads[f'set_{n}']
+        np.testing.assert_array_equal(rgb[written], n + 1)
+        np.testing.assert_array_equal(rgb[~written], -1)  # not the previous bake's value
