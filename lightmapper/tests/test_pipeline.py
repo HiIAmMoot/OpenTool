@@ -197,8 +197,8 @@ def test_estimate_raises_cap_error_over_max_pages(tiny, tmp_path):
     from lightmapper.charts import CapError
 
     tags, settings, work = tiny
-    settings = replace(settings, texels_per_unit=4, page_max=32, max_pages=1)
-    with pytest.raises(CapError):
+    settings = replace(settings, texels_per_unit=1, page_max=32, max_pages=1)
+    with pytest.raises(CapError, match='pages needed, over max_pages|packing exceeds max_pages'):
         api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
 
 
