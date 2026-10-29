@@ -18,7 +18,8 @@ from conftest import LIGHTMAPPER_BLENDER
 from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
                               roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
-                              unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene, texel_scene)
+                              unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene, texel_scene,
+                              assert_flagged_bounce)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -176,7 +177,16 @@ def test_ordinary_gpu_queries_omit_unused_throughput(tmp_path, vendor, mode):
 
 
 @pytest.mark.blender
-@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back', 'edge'])
+@pytest.mark.parametrize('bounces', [0, 1, 2])
+def test_flagged_stage_budget_matches_cpu(tmp_path, vendor, bounces):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene('flagged_bounce'), bounces=bounces)
+    assert_flagged_bounce(result.texel_rgb, bounces)
+    np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back', 'edge',
+                                'emission_budget', 'ordinary_budget'])
 def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene(kind))
     np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
@@ -187,6 +197,8 @@ def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     if kind == 'edge':
         assert result.rays == 512
         np.testing.assert_allclose(result.texel_rgb, .105, rtol=.3)
+    if kind in ('emission_budget', 'ordinary_budget'):
+        np.testing.assert_allclose(result.texel_rgb, 2. if kind == 'emission_budget' else 1., rtol=.05)
 
 
 @pytest.mark.blender

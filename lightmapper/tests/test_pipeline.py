@@ -1212,7 +1212,11 @@ def test_glow_pages_leave_out_the_emission_the_pages_hold(tiny, monkeypatch):
     run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', emit=.5)
 
 
-def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0.):
+def test_zero_bounces_skips_the_terminal_glow(tiny, monkeypatch):
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bounces=0)
+
+
+def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1240,6 +1244,7 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0.):
 
     def glow(work, s, pages):
         assert mode == 'enhanced', 'tool mode must never start a glow run'
+        assert bounces > 0, 'zero bounces must not start a reflected glow stage'
         assert pages[0].shape == (6, 6, 3)
         np.testing.assert_allclose(pages[0][0, 0], .3, rtol=1e-6)
         np.testing.assert_allclose(pages[0][2, 2], .3, rtol=1e-6)
@@ -1251,9 +1256,11 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0.):
     monkeypatch.setattr(pipeline, '_scene', scene)
     monkeypatch.setattr(pipeline, 'run_blender', blender)
     monkeypatch.setattr(pipeline, 'run_blender_glow', glow)
-    out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False),
+    out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False, bounces=bounces),
                         work=work, dry_run=True)
     want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])
             if mode == 'enhanced' else np.array([[0, 1/3], [1/3, 1]]))
+    if mode == 'enhanced' and not bounces:
+        want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1.]])
     if not emit:
         np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)

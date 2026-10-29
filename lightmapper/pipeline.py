@@ -341,7 +341,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
-    if enhanced:
+    if enhanced and s.bounces > 0:
         # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
         # would come back off them as albedo times emission)
         started = perf_counter()

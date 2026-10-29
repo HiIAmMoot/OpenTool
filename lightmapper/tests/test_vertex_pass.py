@@ -30,7 +30,7 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
                   sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None, texel_samples=None,
-                  fast_path=False, mode='tool'):
+                  fast_path=False, mode='tool', bounces=1, texel_pages=None, texel_normals=None):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
@@ -44,8 +44,13 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                                     texel_page=np.zeros(len(texel), np.int16),
                                     texel_xy=(np.indices((3, 3))[::-1].reshape(2, -1).T.astype(np.int32)
                                               if len(texel) == 9 else np.zeros((len(texel), 2), np.int32)))
+    if texel_pages is not None:
+        scene = dataclasses.replace(scene, texel_page=np.int16(texel_pages),
+                                    texel_xy=np.tile(np.indices((3, 3))[::-1].reshape(2, -1).T, (2, 1)).astype(np.int32))
+    if texel_normals is not None:
+        scene = dataclasses.replace(scene, texel_normal=np.float32(texel_normals))
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
-                                   albedo_fallback=albedo_fallback, ignore_normals_mode=mode)
+                                   albedo_fallback=albedo_fallback, ignore_normals_mode=mode, bounces=bounces)
     if texel is not None:
         settings = dataclasses.replace(settings, ignore_normals_mode='enhanced', samples=9 * rays)
     if texel_samples is not None:
@@ -73,6 +78,23 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
 
 
 def texel_scene(kind):
+    if kind in ('emission_budget', 'ordinary_budget'):
+        source = dict(quad=floor(-1000, 1000, -1000, 1000, z=-1), page=1,
+                      emission=(1, 1, 1) if kind == 'emission_budget' else (0, 0, 0))
+        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000), ignore_normals=True), source],
+                    query=((0, 0, 0),), normal=(0, 0, 0), rays=1024, bounces=3,
+                    texel=((0, 0, 0),) * 9,
+                    pages=[np.zeros((1, 1, 3), np.float32),
+                           np.full((1, 1, 3), 1. if kind == 'ordinary_budget' else 0., np.float32)])
+    if kind == 'flagged_bounce':
+        panel = quad([(2, -1, .1), (2, -1, 1.5), (2, 1, 1.5), (2, 1, .1)], (-1, 0, 0))
+        return dict(receivers=[dict(quad=floor(-1, 1, -1, 1), ignore_normals=True),
+                               dict(quad=panel, ignore_normals=True, page=1)],
+                    occluders=[dict(quad=floor(1.5, 2.5, -1, 1, z=2))], suns=[sun()],
+                    query=((0, 0, 0),), normal=(0, 0, 0), rays=2048, albedo_fallback=.5,
+                    texel=((0, 0, 0),) * 9 + ((2, 0, .5),) * 9, texel_pages=[0] * 9 + [1] * 9,
+                    texel_normals=[(0, 0, 1)] * 9 + [(-1, 0, 0)] * 9,
+                    pages=[np.zeros((1, 1, 3), np.float32)] * 2)
     if kind == 'edge':
         uv = [(0, 0), (1/3, 0), (1/3, 1/3), (0, 1/3)]
         return dict(receivers=[dict(quad=floor(-1, 1, -1, 1, lm=uv), ignore_normals=True),
@@ -99,6 +121,32 @@ def texel_scene(kind):
                     suns=[sun((0, 0, 1))], query=((0, 0, 0),), texel=((0, 0, 1),) * 9,
                     pages=[np.zeros((1, 1, 3), np.float32)], rays=1024, albedo_fallback=1)
     raise ValueError(kind)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind,want', [('emission_budget', 2.), ('ordinary_budget', 1.)])
+def test_flagged_stages_consume_original_sources_only_once(tmp_path, kind, want):
+    out = run_driver(tmp_path, **texel_scene(kind))
+    np.testing.assert_allclose(out['texel_rgb'], want, rtol=.05)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('bounces', [0, 1, 2])
+def test_shadowed_flagged_panel_receives_the_sunlit_flagged_panels_bounce(tmp_path, bounces):
+    out = run_driver(tmp_path, **texel_scene('flagged_bounce'), bounces=bounces)
+    assert_flagged_bounce(out['texel_rgb'], bounces)
+
+
+def assert_flagged_bounce(rgb, bounces):
+    if bounces == 0:
+        np.testing.assert_allclose(rgb[:9], 3 / np.pi, rtol=1e-6)
+        np.testing.assert_array_equal(rgb[9:], 0)
+    elif bounces == 1:
+        np.testing.assert_allclose(rgb[:9], 3 / np.pi, rtol=1e-6)
+        assert rgb[9:].min() > .01
+    else:
+        assert rgb[:9].min() > 3 / np.pi + .001
+        assert .01 < rgb[9:].mean() < .2
 
 
 @pytest.mark.blender

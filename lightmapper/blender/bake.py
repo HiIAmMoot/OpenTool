@@ -791,7 +791,7 @@ class VertexPass:
             remaining -= distance + RAY_EPSILON
         return -1, None
 
-    def _shade(self, tri, loc, direction, cls, with_ambient=True, rgb=False):
+    def _shade(self, tri, loc, direction, cls, with_ambient=True, rgb=False, with_pages=True, with_emission=True):
         """Radiance arriving along each ray: tri (n,) with -1 for a miss, loc (n,3), direction (n,3), cls (n,) of the query."""
         n = len(tri)
         radiance = np.zeros((n, 3) if rgb else n)
@@ -810,22 +810,23 @@ class VertexPass:
         lit = np.zeros((len(hit), 3) if rgb else len(hit))
         occluder = ~recv
         colour = (albedo[occluder] * (self.ambient_of(cls[hit][occluder]) if with_ambient else 0)
-                  + self.emission[t][occluder] * facing[occluder, None])
+                  + (self.emission[t][occluder] * facing[occluder, None] if with_emission else 0))
         lit[occluder] = colour if rgb else colour @ LUMA
         front = recv & (facing | self.two_sided[t]) if self.two_sided is not None else recv & facing
         if front.any():
             ft = t[front]
             lm = self.interpolate(self.lm_uv, ft, p[front])
             page_value = np.zeros((len(ft), 3))
-            for k in np.unique(self.page_of[ft]):
+            for k in np.unique(self.page_of[ft]) if with_pages else ():
                 rows = self.page_of[ft] == k
                 page_value[rows] = sample_bilinear(self.pages[k], lm[rows, 0], lm[rows, 1], False)
             if self.two_sided is None:
                 colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft])
-                                                       if with_ambient else 0)) + self.emission[ft]
+                                                       if with_ambient else 0)) + (self.emission[ft] if with_emission else 0)
             else:
                 colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft]) * facing[front, None]
-                                                       if with_ambient else 0)) + self.emission[ft] * facing[front, None]
+                                                       if with_ambient else 0)) + (self.emission[ft] * facing[front, None]
+                                                                                  if with_emission else 0)
             lit[front] = colour if rgb else colour @ LUMA
         radiance[hit] = lit
         return radiance
@@ -833,8 +834,9 @@ class VertexPass:
     def shade(self, tri, loc, direction, cls):
         return self._shade(tri, loc, direction, cls)
 
-    def shade_rgb(self, tri, loc, direction, cls, with_ambient=True):
-        return self._shade(tri, loc, direction, cls, with_ambient=with_ambient, rgb=True)
+    def shade_rgb(self, tri, loc, direction, cls, with_ambient=True, with_pages=True, with_emission=True):
+        return self._shade(tri, loc, direction, cls, with_ambient=with_ambient, rgb=True,
+                           with_pages=with_pages, with_emission=with_emission)
 
     def radiance(self, tri, loc, direction, cls):
         return float(self.shade(np.array([tri]), np.array([loc]), np.array([direction]), np.array([cls]))[0])
@@ -962,6 +964,38 @@ class VertexPass:
         self.texel_rgb = np.zeros((count, 3), np.float32)
         if not count:
             return 0
+        pos = scene['texel_pos'].astype(np.float64)
+        length = np.linalg.norm(scene['texel_normal'], axis=1)
+        usable = np.isfinite(length) & (length > 1e-12)
+        casts = 0
+        for sun in job['suns']:
+            d = np.float64(sun['direction'])
+            d /= np.linalg.norm(d)
+            for a in np.flatnonzero(usable & np.isin(scene['texel_class'], sun['classes'])):
+                carried = np.ones(3)
+                casts += 1
+                if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
+                    self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
+        base, total = self.pages, self.texel_rgb.copy()
+        self.pages = self.install_texels(base, total)
+        # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
+        # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
+        budget = max(0, int(job['bounces']))
+        for stage in range(max(1, budget)):
+            casts += self.gather_texel_reflection(with_pages=budget > 0, with_emission=stage == 0)
+            total += self.texel_rgb
+            # only the new stage travels again; the ordinary pages and original emission are consumed once
+            self.pages = self.install_texels([np.zeros_like(p) for p in base], self.texel_rgb)
+        self.texel_rgb = total
+        self.pages = self.install_texels(base, total)
+        return casts
+
+    def gather_texel_reflection(self, with_pages=True, with_emission=True):
+        scene, job = self.scene, self.job
+        count = len(scene.get('texel_pos', ()))
+        self.texel_rgb = np.zeros((count, 3), np.float32)
+        if not count:
+            return 0
         rays = max(1, round(job.get('cpu_samples', job['samples']) / 9))
         counts = np.full(count, rays, np.int64)
         target = job.get('cpu_texel_samples', job['texel_samples'])
@@ -1003,28 +1037,25 @@ class VertexPass:
                         tri[a, b], loc[a, b] = index, point
             casts += int(usable[ids].sum()) * rays
             rgb = self.shade_rgb(tri.ravel(), loc.reshape(-1, 3), dirs.reshape(-1, 3),
-                                 np.repeat(scene['texel_class'][ids], rays), with_ambient=False)
+                                 np.repeat(scene['texel_class'][ids], rays), with_ambient=False,
+                                 with_pages=with_pages, with_emission=with_emission)
             self.texel_rgb[ids] = 4 / rays * rgb.reshape(len(ids), rays, 3).sum(axis=1)
-            for sun in job['suns']:
-                d = np.float64(sun['direction'])
-                d /= np.linalg.norm(d)
-                for a in ids[usable[ids] & np.isin(scene['texel_class'][ids], sun['classes'])]:
-                    carried = np.ones(3)
-                    casts += 1
-                    if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
-                        self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
+        return casts
+
+    def install_texels(self, base, rgb):
+        scene = self.scene
         # the gathered value replaces only flagged samples; the baked page is already zero there
-        self.pages = [p.copy() for p in self.pages]
-        for page, value in enumerate(self.pages):
+        pages = [p.copy() for p in base]
+        for page, value in enumerate(pages):
             h, w = value.shape[:2]
             owned = receiver_diffuse_scale(scene, page, w, h, coverage=True)[::-1] >= 0
             owned = owned.reshape(h, 3, w, 3).sum(axis=(1, 3))
             rows = scene['texel_page'] == page
             xy = scene['texel_xy'][rows] // 3
             total = np.zeros_like(value)
-            np.add.at(total, (xy[:, 1], xy[:, 0]), self.texel_rgb[rows])
+            np.add.at(total, (xy[:, 1], xy[:, 0]), rgb[rows])
             value += total / np.maximum(owned, 1)[:, :, None]
-        return casts
+        return pages
 
 
 def main():

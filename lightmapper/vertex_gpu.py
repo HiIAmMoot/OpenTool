@@ -314,6 +314,7 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
             page_info=_upload(device, arrays['page_info'], np.int32),
             page_texels=_upload(device, arrays['page_texels'], np.float32),
             ambient=_upload(device, table, np.float32), ambient_rows=len(table), with_ambient=not rgb,
+            with_pages=job.get('gather_pages', True), with_emission=job.get('gather_emission', True),
             albedo_scale=float(job['albedo_scale']), albedo_fallback=float(job['albedo_fallback']))
     with _stage('build'):
         shared['world'], keep = _build_world(device, vertices, indices, len(arrays['positions']), arrays['tris'].size)
@@ -420,7 +421,41 @@ def _gather_texels(scene, job, textures, pages, device):
     rgb = np.zeros((count, 3), np.float32)
     if not count:
         return rgb, 0, pages
-    from .raster import texel_contribution, texel_ray_counts
+    from .raster import texel_contribution
+    usable, n, *_ = query_frames(scene['texel_normal'], job.get('seed', 0))
+    probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
+                 query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
+    probe.pop('query_inverse', None)
+    query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
+    if len(query):
+        arrays = _scene_arrays(scene, textures, pages, True)
+        table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
+        carried, escaped = _trace(device, arrays, table, job, [], (origin, direction), None, rgb=True)
+        for k, sun in enumerate(job['suns']):
+            rows = np.flatnonzero((sun_index == k) & escaped)
+            rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
+
+    def install(base, values):
+        return [p + texel_contribution(scene, i, p.shape[1], p.shape[0], values)[0] for i, p in enumerate(base)]
+
+    stable = install(pages, rgb)
+    casts = len(query)
+    # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
+    # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
+    budget = max(0, int(job['bounces']))
+    for stage in range(max(1, budget)):
+        delta, rays = _gather_texel_reflection(scene, dict(job, gather_pages=budget > 0,
+                                                          gather_emission=stage == 0), textures, stable, device)
+        rgb += delta
+        casts += rays
+        stable = install([np.zeros_like(p) for p in pages], delta)
+    return rgb, casts, install(pages, rgb)
+
+
+def _gather_texel_reflection(scene, job, textures, pages, device):
+    count = len(scene['texel_pos'])
+    rgb = np.zeros((count, 3), np.float32)
+    from .raster import texel_ray_counts
     rays = max(1, round(job['samples'] / 9))
     usable, n, t, b, spin = query_frames(scene['texel_normal'], job.get('seed', 0))
     ids = np.flatnonzero(usable)
@@ -428,27 +463,17 @@ def _gather_texels(scene, job, textures, pages, device):
     arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced')
     # black class ambients keep the page gather free of the ambient finish_pages adds later
     table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
-    probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
-                 query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
-    probe.pop('query_inverse', None)
-    query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
     def reduce(rows, value, hemi, solid_angle):
         rgb[rows] = 4 / value.shape[1] * value.sum(axis=1)
-    carried, escaped = np.zeros((len(query), 3)), np.zeros(len(query), bool)
     for rays in np.unique(counts[ids]):
         rows = ids[counts[ids] == rays]
         local, phi, r = sphere(int(rays))
         batches = [((phi, r, local[:, 2]), (rows, scene['texel_pos'][rows], n[rows], t[rows], b[rows], spin[rows],
                                           scene['texel_class'][rows]), 4.)]
-        sun_rows = counts[query] == rays
-        carried[sun_rows], escaped[sun_rows] = _trace(
+        _trace(
             device, arrays, table, dict(job, vertex_rays=int(rays)), batches,
-            (origin[sun_rows], direction[sun_rows]), reduce, rgb=True)
-    for k, sun in enumerate(job['suns']):
-        rows = np.flatnonzero((sun_index == k) & escaped)
-        rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
-    updated = [p + texel_contribution(scene, i, p.shape[1], p.shape[0], rgb)[0] for i, p in enumerate(pages)]
-    return rgb, int(counts[ids].sum()) + len(query), updated
+            (np.empty((0, 3)), np.empty((0, 3))), reduce, rgb=True)
+    return rgb, int(counts[ids].sum())
 
 
 def load_and_run(work, pages, adapter):
