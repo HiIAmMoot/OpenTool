@@ -177,6 +177,13 @@ def test_scene_counts_are_frozen(counts):
         counts.vertices = 0
 
 
+def test_bake_memory_error_carries_its_message_estimate_and_free():
+    error = memory.BakeMemoryError('This bake needs ...', 1, 2)
+    assert str(error) == 'This bake needs ...'
+    assert error.estimate == 1
+    assert error.free == 2
+
+
 def test_bake_memory_error_is_a_bake_error():
     from lightmapper import pipeline
     from lightmapper.errors import BakeError

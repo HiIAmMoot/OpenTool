@@ -124,10 +124,10 @@ class MemoryCheck:
 
 
 class BakeMemoryError(BakeError):
-    def __init__(self, counts, pages, page_max, free):
-        self.estimate = bake_bytes(counts, pages)
+    def __init__(self, message, estimate, free):
+        self.estimate = estimate
         self.free = free
-        super().__init__(out_of_memory_message(counts, pages, page_max, free))
+        super().__init__(message)
 
 
 def check_bake_memory(counts, pages, page_max, free=READ) -> MemoryCheck:
@@ -137,5 +137,5 @@ def check_bake_memory(counts, pages, page_max, free=READ) -> MemoryCheck:
     if free is None:
         logger.warning('free memory is unknown, so the bake runs without the memory check')
     elif estimate > free:
-        raise BakeMemoryError(counts, pages, page_max, free)
+        raise BakeMemoryError(out_of_memory_message(counts, pages, page_max, free), estimate, free)
     return MemoryCheck(estimate, free)
