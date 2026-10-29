@@ -451,16 +451,19 @@ def _gather_texels(scene, job, textures, pages, device):
     def flagged(values):
         return [flagged_transport(scene, i, p.shape[1], p.shape[0], values) for i, p in enumerate(pages)]
 
+    # original emission is direct reception like the sun, in place before the first reflected stage, as
+    # blender/bake.py's gather_texels
+    emitted, casts = _gather_texel_reflection(scene, dict(job, gather_pages=False, gather_emission=True), textures,
+                                              pages, device, None)
+    rgb += emitted
+    casts += len(query)
     # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
-    # the ordinary samples', as blender/bake.py's gather_texels)
+    # the ordinary samples')
     stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
-    casts = len(query)
     # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
     # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
-    budget = max(0, int(job['bounces']))
-    for stage in range(max(1, budget)):
-        delta, rays = _gather_texel_reflection(scene, dict(job, gather_pages=budget > 0,
-                                                          gather_emission=stage == 0), textures, stable, device,
+    for _ in range(max(0, int(job['bounces']))):
+        delta, rays = _gather_texel_reflection(scene, dict(job, gather_emission=False), textures, stable, device,
                                                sources)
         rgb += delta
         casts += rays

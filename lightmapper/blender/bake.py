@@ -1012,17 +1012,20 @@ class VertexPass:
                 casts += 1
                 if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
                     self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
-        base, total = self.pages, self.texel_rgb.copy()
+        sun_rgb, base = self.texel_rgb, self.pages
+        # original emission is direct reception like the sun, so it is in place before the first reflected stage
+        # (gathered inside stage zero, a flagged sheet it lights could pass that light on only a stage later)
+        casts += self.gather_texel_reflection(with_pages=False, with_emission=True)
+        total = sun_rgb + self.texel_rgb
         # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
         # the ordinary samples', or light would cross between surfaces that merely share a texel)
-        self.pages, self.flagged_pages = self.ordinary_sources(base), self.flagged_sources(self.texel_rgb)
+        self.pages, self.flagged_pages = self.ordinary_sources(base), self.flagged_sources(total)
         # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
         # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
-        budget = max(0, int(job['bounces']))
-        for stage in range(max(1, budget)):
-            casts += self.gather_texel_reflection(with_pages=budget > 0, with_emission=stage == 0)
+        for _ in range(max(0, int(job['bounces']))):
+            casts += self.gather_texel_reflection(with_emission=False)
             total += self.texel_rgb
-            # only the new stage travels again; the ordinary pages and original emission are consumed once
+            # only the new stage travels again; the ordinary pages are consumed once
             self.pages = [np.zeros_like(p) for p in base]
             self.flagged_pages = self.flagged_sources(self.texel_rgb)
         self.texel_rgb = total

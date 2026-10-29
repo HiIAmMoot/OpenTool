@@ -19,7 +19,7 @@ from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
                               roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
                               unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene, texel_scene,
-                              assert_flagged_bounce, mixed_scene, assert_mixed)
+                              assert_flagged_bounce, mixed_scene, assert_mixed, assert_emission_relay)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -204,6 +204,14 @@ def test_flagged_stage_budget_matches_cpu(tmp_path, vendor, bounces):
 
 
 @pytest.mark.blender
+@pytest.mark.parametrize('bounces', [0, 1])
+def test_direct_emission_takes_no_reflected_stage_on_gpu(tmp_path, vendor, bounces):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene('emission_relay'), bounces=bounces)
+    assert_emission_relay(result.texel_rgb, bounces)
+    np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.blender
 @pytest.mark.parametrize('kind', ['mixed_dark_flagged', 'mixed_bright_flagged', 'mixed_delta', 'mixed_ordinary'])
 def test_mixed_texel_sources_match_cpu(tmp_path, vendor, kind):
     cpu, result = cpu_and_gpu(tmp_path, vendor, **mixed_scene(kind))
@@ -222,7 +230,7 @@ def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     if kind == 'vertex_back':
         assert result.irradiance[0] == pytest.approx(3, rel=.05)
     if kind == 'edge':
-        assert result.rays == 512
+        assert result.rays == 2 * 512
         np.testing.assert_allclose(result.texel_rgb, .105, rtol=.3)
     if kind in ('emission_budget', 'ordinary_budget'):
         np.testing.assert_allclose(result.texel_rgb, 2. if kind == 'emission_budget' else 1., rtol=.05)

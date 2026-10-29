@@ -146,6 +146,14 @@ def texel_scene(kind):
                     texel=((0, 0, 0),) * 9,
                     pages=[np.zeros((1, 1, 3), np.float32),
                            np.full((1, 1, 3), 1. if kind == 'ordinary_budget' else 0., np.float32)])
+    if kind == 'emission_relay':
+        # the emitter lights the lower flagged sheet, which hides it from the upper one
+        return dict(receivers=[dict(quad=floor(-1000, 1000, -1000, 1000), ignore_normals=True),
+                               dict(quad=floor(-1000, 1000, -1000, 1000, z=1), ignore_normals=True, page=1),
+                               dict(quad=floor(-1000, 1000, -1000, 1000, z=-1), page=2, emission=(1, 1, 1))],
+                    query=((0, 0, 0),), normal=(0, 0, 0), rays=1024,
+                    texel=((0, 0, 0),) * 9 + ((0, 0, 1),) * 9, texel_pages=[0] * 9 + [1] * 9,
+                    pages=[np.zeros((1, 1, 3), np.float32)] * 3)
     if kind == 'flagged_bounce':
         panel = quad([(2, -1, .1), (2, -1, 1.5), (2, 1, 1.5), (2, 1, .1)], (-1, 0, 0))
         return dict(receivers=[dict(quad=floor(-1, 1, -1, 1), ignore_normals=True),
@@ -197,6 +205,22 @@ def test_shadowed_flagged_panel_receives_the_sunlit_flagged_panels_bounce(tmp_pa
     assert_flagged_bounce(out['texel_rgb'], bounces)
 
 
+@pytest.mark.blender
+@pytest.mark.parametrize('bounces', [0, 1])
+def test_direct_emission_takes_no_reflected_stage(tmp_path, bounces):
+    out = run_driver(tmp_path, **texel_scene('emission_relay'), bounces=bounces)
+    assert_emission_relay(out['texel_rgb'], bounces)
+
+
+def assert_emission_relay(rgb, bounces):
+    # half the sphere sees the emitter (1) or the lower sheet (2 at albedo .5), weighted 4 / rays
+    np.testing.assert_allclose(rgb[:9], 2, rtol=.05)
+    if bounces == 0:
+        np.testing.assert_array_equal(rgb[9:], 0)
+    else:
+        np.testing.assert_allclose(rgb[9:], 2, rtol=.05)
+
+
 def assert_flagged_bounce(rgb, bounces):
     if bounces == 0:
         np.testing.assert_allclose(rgb[:9], 3 / np.pi, rtol=1e-6)
@@ -221,7 +245,8 @@ def test_ordinary_cpu_queries_skip_sphere_rgb_and_throughput(tmp_path, mode):
 @pytest.mark.blender
 def test_enhanced_edge_gather_uses_the_texel_budget_under_a_small_emitter(tmp_path):
     out = run_driver(tmp_path, **texel_scene('edge'))
-    assert int(out['rays']) == 512
+    # (512 for the emission gather and 512 for the one reflected stage)
+    assert int(out['rays']) == 2 * 512
     np.testing.assert_allclose(out['texel_rgb'], .105, rtol=.3)
 
 
