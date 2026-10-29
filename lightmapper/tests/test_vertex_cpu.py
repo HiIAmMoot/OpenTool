@@ -1,3 +1,5 @@
+import ast
+import dataclasses
 import json
 import os
 import subprocess
@@ -8,6 +10,11 @@ import numpy as np
 import pytest
 
 from lightmapper import entry, frozen, vertex_cpu
+from lightmapper.blender_job import write_job
+from test_blender_bake import UP, build, floor, full_quad
+from test_vertex_gpu import CASES, textured_room
+from test_vertex_pass import (S, asymmetric_twin_scene, run_driver, twin_scene, unpaired_back_face_scene,
+                              wall_facing_minus_x)
 
 
 def run_probe(out):
@@ -260,3 +267,112 @@ def test_closest_hit_matches_blender_on_a_random_soup(tmp_path, blender_exe):
         pytest.fail(f'{len(rays)} Blender disagreements: {details[:10]}; full rays: {tmp_path}')
     np.testing.assert_array_equal(tri, ref_tri)
     np.testing.assert_allclose(t, ref_t, rtol=1e-6, atol=0)
+
+
+def test_copied_constants_equal_bake_py():
+    source = Path(vertex_cpu.__file__).parent / 'blender' / 'bake.py'
+    tree = ast.parse(source.read_text(encoding='utf-8'))
+    names = ('RAY_LENGTH', 'RAY_EPSILON', 'PASS_LIMIT', 'LUMA', 'GOLDEN_FRACTION', 'SEED_SPIN')
+    namespace = {'np': np}
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], 'id', None) in names:
+            exec(compile(ast.Module([node], []), str(source), 'exec'), namespace)
+    from_bake = {name: np.asarray(namespace[name]).tolist() for name in names}
+    copied = {name: np.asarray(getattr(vertex_cpu, name)).tolist() for name in names}
+    assert set(from_bake) == set(names)
+    assert copied == from_bake
+
+
+def load_cpu_scene(work, flagged_pages=None):
+    with np.load(work / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    job = json.loads((work / 'job.json').read_text())
+    with np.load(work / 'textures.npz') as data:
+        textures = [data[f'tex_{k}'] for k in range(len(data.files))]
+    with np.load(work / 'pages.npz') as data:
+        pages = [data[f'page_{i}'] for i in range(len(data.files))]
+    cs = vertex_cpu.cpu_scene(scene, job, textures, pages, flagged_pages)
+    return cs, vertex_cpu.build_bvh(cs.corners32)
+
+
+def blender_and_numba_probes(tmp_path, probes, **scene):
+    blender = run_driver(tmp_path, probes=probes, **scene)
+    cs, bvh = load_cpu_scene(tmp_path)
+    origins, dirs, classes = zip(*probes)
+    return blender, vertex_cpu.probe(cs, bvh, np.float64(origins), np.float64(dirs), np.int64(classes))
+
+
+def random_probes(scene, count, seed=1):
+    rng = np.random.default_rng(seed)
+    query = scene.get('query', ((2, 2, 0),))
+    dirs = rng.normal(size=(count, 3))
+    dirs /= np.linalg.norm(dirs, axis=1)[:, None]
+    # origins start one RAY_EPSILON along the ray as in bake.py: a query on a shared edge would otherwise hit both
+    # triangles at distance 0, which Blender settles by its tree order rather than by index
+    return [[(np.float64(query[i % len(query)]) + vertex_cpu.RAY_EPSILON * dirs[i]).tolist(), dirs[i].tolist(),
+             scene.get('cls', 0)] for i in range(count)]
+
+
+PROBE_CASES = {'twin': twin_scene(False, False), 'twin_reverse': twin_scene(True, False),
+               'twin_cutout': twin_scene(False, True), 'asymmetric_twin': asymmetric_twin_scene(),
+               'unpaired_back_face': unpaired_back_face_scene(), 'textured_room': textured_room(),
+               **{name: CASES[name] for name in ('cutout_hole', 'glass_tint_half', 'emit_only_front',
+                                                 'emit_only_back', 'grey_albedo', 'texture_negative_uv',
+                                                 'indoor_occluder')}}
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('case', PROBE_CASES)
+def test_probes_match_blender(tmp_path, case):
+    scene = PROBE_CASES[case]
+    probes = random_probes(scene, 2000 if case == 'textured_room' else 500)
+    blender, ours = blender_and_numba_probes(tmp_path, probes, **scene)
+    # a ray gathering light passes clear panes and emitters seen from behind, so those two scenes only miss
+    assert (blender['tri'] >= 0).any() or case in ('glass_tint_half', 'emit_only_back')
+    np.testing.assert_array_equal(ours['tri'], blender['tri'])
+    np.testing.assert_allclose(ours['uv'], blender['uv'], rtol=1e-5, atol=1e-6, equal_nan=True)
+    np.testing.assert_allclose(ours['radiance'], blender['radiance'], rtol=1e-4, atol=1e-6, equal_nan=True)
+    np.testing.assert_allclose(ours['radiance_rgb'], blender['radiance_rgb'], rtol=1e-4, atol=1e-6, equal_nan=True)
+
+
+@pytest.mark.blender
+def test_hit_uv_barycentric(tmp_path):
+    # the page's red is 16 u - 0.5 and its green 16 v - 0.5 at the hit; the wall maps u = y/4, v = z/4
+    page = np.zeros((16, 16, 3), np.float32)
+    page[:, :, 0] = np.arange(16)[None, :]
+    page[:, :, 1] = np.arange(16)[:, None]
+    wall = wall_facing_minus_x(lm=[(0.25, 0.25), (0.75, 0.25), (0.75, 0.75), (0.25, 0.75)])
+    probes = [([1, 1.3, 2.6], [1, 0, 0], 0), ([1, 2.7, 1.1], [1, 0, 0], 0)]
+    _, ours = blender_and_numba_probes(tmp_path, probes, receivers=[full_quad(), wall], pages=[page])
+    for (origin, _, _), uv, radiance in zip(probes, ours['uv'], ours['radiance']):
+        u, v = 0.25 + origin[1] / 8, 0.25 + origin[2] / 8
+        assert uv == pytest.approx([u, v], abs=1e-5)
+        red, green = 16 * u - 0.5, 16 * v - 0.5
+        assert radiance == pytest.approx(0.5 * (0.2126 * red + 0.7152 * green), rel=1e-4)
+
+
+def cutout_quad_scene(tmp_path):
+    scene = dataclasses.replace(
+        build([full_quad()], [dict(quad=floor(0, 4, 0, 4, z=1.0), texture=0, cutout=True)]),
+        query_pos=np.float32([[2, 2, 0]]), query_normal=np.float32([UP]), query_class=np.int16([0]))
+    write_job(tmp_path, scene, [(16, 16)], [], {}, S, 'all', textures=[np.full((1, 1, 4), 255, np.uint8)])
+    np.savez(tmp_path / 'pages.npz', page_0=np.zeros((16, 16, 3), np.float32))
+    return load_cpu_scene(tmp_path)
+
+
+@pytest.mark.parametrize('alpha,blocks', [(0.5, True), (0.4999, False)])
+def test_alpha_exactly_half_blocks(tmp_path, alpha, blocks):
+    cs, bvh = cutout_quad_scene(tmp_path)
+    cs.texture_texels[:, 3] = alpha
+    tri, _ = vertex_cpu._cast(cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order),
+                              np.float32([2, 2, 0.5]), np.float32([0, 0, 1]), False, np.ones(3))
+    assert (tri >= 0) == blocks
+
+
+def test_zero_area_triangle_uses_its_centre():
+    a, b, c = np.float64([[0, 0, 0], [1, 0, 0], [2, 0, 0]])
+    # the clamped weights of a finite point are never all zero, so only an unusable point reaches the centre
+    for point in ([np.nan, 0, 0], [np.inf, 0, 0]):
+        assert vertex_cpu._barycentric(a, b, c, np.float64(point)) == pytest.approx((1 / 3, 1 / 3, 1 / 3))
+    assert vertex_cpu._barycentric(a, b, c, np.float64([1, 1, 0])) == (1.0, 0.0, 0.0)
+    assert vertex_cpu._barycentric(*np.float64([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.25, 0.25, 0]]))         == pytest.approx((0.5, 0.25, 0.25))
