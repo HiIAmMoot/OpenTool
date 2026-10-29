@@ -136,7 +136,7 @@ def test_request_carries_the_form(app, tiny):
 
 def test_draft_fills_all_advanced_fields(app):
     app._select_preset('Draft')
-    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1.0', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512')
 
 
 def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
@@ -1022,3 +1022,38 @@ def test_max_resolution_hint_appears_for_large_pages(app):
         assert not any(ch.isdigit() for ch in app.page_max_hint['text'])
     app._select_preset('High')
     assert app.page_max_hint['text'] == ''
+
+
+def test_density_is_a_dropdown_of_the_choices(app):
+    entry = app.advanced_entries['texels_per_unit']
+    assert str(entry['state']) == 'readonly'
+    assert tuple(entry['values']) == ('1', '2', '4', '8', '12', '16', '24', '32')
+
+
+def test_presets_set_listed_densities(app):
+    for name, shown in (('Draft', '1'), ('Normal', '2'), ('High', '4')):
+        app._select_preset(name)
+        assert app.advanced_vars['texels_per_unit'].get() == shown
+
+
+def test_saved_density_outside_the_list_is_kept_as_a_custom_entry(tmp_path, tiny, make_app):
+    store = tmp_path / 's.json'
+    usersettings.save(
+        usersettings.UserSettings(
+            preset='Custom',
+            advanced=dict(texels_per_unit='3.0', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512'),
+        ),
+        store,
+    )
+    app = make_app(store_path=store)
+    entry = app.advanced_entries['texels_per_unit']
+    assert app.advanced_vars['texels_per_unit'].get() == '3'
+    assert tuple(entry['values'])[-1] == '3'
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+    assert app.request().settings.texels_per_unit == 3.0
+    app.advanced_vars['texels_per_unit'].set('8')
+    assert '3' not in tuple(entry['values'])

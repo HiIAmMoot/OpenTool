@@ -26,11 +26,24 @@ ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 
 PAGE_MAX_CHOICES = PAGE_SIDES
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'sky_grid': 'Suns per sky light', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
+DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
+
 PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
 
 
 def page_max_hint(value: str) -> str:
     return PAGE_MAX_HINT if value in ('2048', '4096') else ''
+
+
+def format_density(value: float) -> str:
+    return f'{value:g}'
+
+
+def density_values(current: str) -> list[str]:
+    values = [str(choice) for choice in DENSITY_CHOICES]
+    if current and current not in values:
+        values.append(current)
+    return values
 
 
 def parse_advanced(texts: dict[str, str]) -> dict:
@@ -43,7 +56,7 @@ def parse_advanced(texts: dict[str, str]) -> dict:
         try:
             if field == 'texels_per_unit':
                 value = float(text)
-                valid = 0.25 <= value <= 16
+                valid = 0.25 <= value <= 32
             elif field == 'page_max':
                 value = int(text)
                 valid = value in PAGE_MAX_CHOICES
@@ -54,7 +67,7 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if not valid:
                 raise ValueError
         except ValueError:
-            allowed = {'texels_per_unit': '0.25 to 16', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'sky_grid': '1 to 8', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
+            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'sky_grid': '1 to 8', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
             raise ValueError(f'{LABELS[field]} must be a number from {allowed}.') from None
         values[field] = value
     return values

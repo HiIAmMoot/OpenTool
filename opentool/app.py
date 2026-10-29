@@ -161,6 +161,8 @@ class App:
                                     to=maximum, textvariable=value)
             elif name == 'page_max':
                 entry = ttk.Combobox(self.advanced_frame, values=presets.PAGE_MAX_CHOICES, textvariable=value, state='readonly')
+            elif name == 'texels_per_unit':
+                entry = ttk.Combobox(self.advanced_frame, values=presets.density_values(''), textvariable=value, state='readonly')
             else:
                 entry = ttk.Entry(self.advanced_frame, textvariable=value)
             entry.grid(row=index, column=1, sticky='ew', pady=2)
@@ -216,6 +218,11 @@ class App:
         self._select_preset(self.settings.preset)
         for name, value in self.settings.advanced.items():
             if name in self.advanced_vars:
+                if name == 'texels_per_unit':
+                    try:
+                        value = presets.format_density(float(value))
+                    except (TypeError, ValueError):
+                        pass
                 self.advanced_vars[name].set(value)
         if self.settings.advanced_open:
             self._toggle_advanced()
@@ -389,7 +396,7 @@ class App:
             self._update_hint()
             if name in presets.PRESET_NAMES:
                 for field, value in presets.PRESETS[name].items():
-                    self.advanced_vars[field].set(str(value))
+                    self.advanced_vars[field].set(presets.format_density(value) if field == 'texels_per_unit' else str(value))
         finally:
             self._setting_preset = False
 
@@ -403,6 +410,8 @@ class App:
         self._advanced_open = not self._advanced_open
 
     def _advanced_value_changed(self, name):
+        if name == 'texels_per_unit':
+            self.advanced_entries[name].configure(values=presets.density_values(self.advanced_vars[name].get().strip()))
         if name == 'page_max':
             self.page_max_hint.configure(text=presets.page_max_hint(self.advanced_vars['page_max'].get()))
         if self._setting_preset:

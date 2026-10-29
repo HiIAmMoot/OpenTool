@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from lightmapper.settings import Settings
+from opentool import presets
 from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, build_settings, parse_advanced
 
 
@@ -114,3 +115,18 @@ def test_parse_advanced_rejects_new_ranges(field, text):
 @pytest.mark.parametrize('value,shown', [('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True), ('', False), ('x', False)])
 def test_page_max_hint(value, shown):
     assert page_max_hint(value) == (PAGE_MAX_HINT if shown else '')
+
+
+def test_density_choices():
+    assert presets.DENSITY_CHOICES == (1, 2, 4, 8, 12, 16, 24, 32)
+
+
+def test_density_up_to_32_is_valid():
+    assert presets.parse_advanced({'texels_per_unit': '32'}) == {'texels_per_unit': 32.0}
+    with pytest.raises(ValueError, match='0.25 to 32'):
+        presets.parse_advanced({'texels_per_unit': '33'})
+
+
+def test_density_values_add_a_custom_entry():
+    assert presets.density_values('8') == ['1', '2', '4', '8', '12', '16', '24', '32']
+    assert presets.density_values('3') == ['1', '2', '4', '8', '12', '16', '24', '32', '3']
