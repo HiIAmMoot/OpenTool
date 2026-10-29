@@ -29,7 +29,7 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
-                 sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None):
+                  sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None, texel_samples=None):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
@@ -47,6 +47,8 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                                    albedo_fallback=albedo_fallback)
     if texel is not None:
         settings = dataclasses.replace(settings, ignore_normals_mode='enhanced', samples=9 * rays)
+    if texel_samples is not None:
+        settings = dataclasses.replace(settings, texel_samples=texel_samples)
     write_job(tmp_path, scene, [(p.shape[1], p.shape[0]) for p in pages], list(suns), ambient or {}, settings,
               'all', textures=textures)
     if seed is None:
@@ -68,6 +70,12 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
 
 
 def texel_scene(kind):
+    if kind == 'edge':
+        uv = [(0, 0), (1/3, 0), (1/3, 1/3), (0, 1/3)]
+        return dict(receivers=[dict(quad=floor(-1, 1, -1, 1, lm=uv), ignore_normals=True),
+                               dict(quad=floor(-.3, .3, -.3, .3, z=1, up=False), page=1, emission=(1, 1, 1))],
+                    query=((0, 0, 0),), normal=(0, 0, 0), texel=((0, 0, 0),), rays=1, texel_samples=512,
+                    pages=[np.zeros((1, 1, 3), np.float32), np.zeros((1, 1, 3), np.float32)])
     if kind == 'grazing':
         # a thin band just above the horizon: a symmetric wall would give the cosine hemisphere the same answer by luck
         panel = dict(quad=quad([(1, -1000, 0), (1, -1000, .2),
@@ -88,6 +96,13 @@ def texel_scene(kind):
                     suns=[sun((0, 0, 1))], query=((0, 0, 0),), texel=((0, 0, 1),) * 9,
                     pages=[np.zeros((1, 1, 3), np.float32)], rays=1024, albedo_fallback=1)
     raise ValueError(kind)
+
+
+@pytest.mark.blender
+def test_enhanced_edge_gather_uses_the_texel_budget_under_a_small_emitter(tmp_path):
+    out = run_driver(tmp_path, **texel_scene('edge'))
+    assert int(out['rays']) == 512
+    np.testing.assert_allclose(out['texel_rgb'], .105, rtol=.3)
 
 
 @pytest.mark.blender

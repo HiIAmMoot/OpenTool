@@ -77,6 +77,22 @@ def test_coverage_maximum_bsp_surfaces_on_1024_page():
     expected = np.repeat(np.repeat((x + 3 * y) % 31, 4, axis=0), 4, axis=1)
     np.testing.assert_array_equal(cls, expected)
 
+    scene = dict(lm_uv=uv, tris=tris, tri_page=np.zeros(len(tris), np.int16),
+                 texel_pos=np.zeros((393216, 3), np.float32), texel_page=np.zeros(393216, np.int16),
+                 texel_xy=np.tile(np.int32([[0, 0]]), (393216, 1)))
+    counts = api().texel_ray_counts(scene, [(1024, 1024)], 28, 252)
+    np.testing.assert_array_equal(counts, 28)
+
+
+@pytest.mark.parametrize('target,want', [(0, [28, 28]), (252, [252, 28]), (512, [512, 57])])
+def test_texel_ray_counts_top_up_edges_without_raising_the_interior(target, want):
+    scene = dict(lm_uv=np.float32([[0, 0], [1/6, 0], [1/6, 1/3], [0, 1/3],
+                                 [.5, 0], [1, 0], [1, 1], [.5, 1]]),
+                 tris=np.int32([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]]),
+                 tri_page=np.zeros(4, np.int16), texel_pos=np.zeros((2, 3), np.float32),
+                 texel_page=np.zeros(2, np.int16), texel_xy=np.int32([[0, 0], [3, 0]]))
+    np.testing.assert_array_equal(api().texel_ray_counts(scene, [(2, 1)], 28, target), want)
+
 
 def test_dilate_one_iteration_fills_only_eight_neighbour_ring():
     img = np.zeros((5, 5, 2), dtype=np.float32)

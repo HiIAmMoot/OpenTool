@@ -950,15 +950,27 @@ class VertexPass:
         if not count:
             return 0
         rays = max(1, round(job.get('cpu_samples', job['samples']) / 9))
-        local, phi, r = self.sphere(rays)
+        counts = np.full(count, rays, np.int64)
+        target = job.get('cpu_texel_samples', job['texel_samples'])
+        if target > 0:
+            for page, (w, h) in enumerate(job['pages']):
+                owned = receiver_diffuse_scale(scene, page, w, h, coverage=True)[::-1] >= 0
+                owned = owned.reshape(h, 3, w, 3).sum(axis=(1, 3))
+                chosen = scene['texel_page'] == page
+                xy = scene['texel_xy'][chosen] // 3
+                counts[chosen] = np.maximum(rays, -(-target // np.maximum(owned[xy[:, 1], xy[:, 0]], 1)))
         casts = 0
         pos = scene['texel_pos'].astype(np.float64)
         normals = scene['texel_normal'].astype(np.float64)
         length = np.linalg.norm(normals, axis=1)
         usable = np.isfinite(length) & (length > 1e-12)
         normals /= np.where(usable, length, 1)[:, None]
-        for first in range(0, count, QUERY_CHUNK):
-            ids = np.arange(first, min(first + QUERY_CHUNK, count))
+        batches = []
+        for rays in np.unique(counts):
+            rows = np.flatnonzero(counts == rays)
+            batches.extend((int(rays), rows[first:first + QUERY_CHUNK]) for first in range(0, len(rows), QUERY_CHUNK))
+        for rays, ids in batches:
+            local, phi, r = self.sphere(rays)
             n = normals[ids]
             axis = np.where((np.abs(n[:, 0]) < .9)[:, None], [[1., 0, 0]], [[0, 1., 0]])
             tangent = np.cross(n, axis)

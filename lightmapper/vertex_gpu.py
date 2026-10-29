@@ -417,13 +417,11 @@ def _gather_texels(scene, job, textures, pages, device):
     rgb = np.zeros((count, 3), np.float32)
     if not count:
         return rgb, 0, pages
-    from .raster import texel_contribution
+    from .raster import texel_contribution, texel_ray_counts
     rays = max(1, round(job['samples'] / 9))
     usable, n, t, b, spin = query_frames(scene['texel_normal'], job.get('seed', 0))
     ids = np.flatnonzero(usable)
-    local, phi, r = sphere(rays)
-    batches = [((phi, r, local[:, 2]), (ids, scene['texel_pos'][ids], n[ids], t[ids], b[ids], spin[ids],
-                                      scene['texel_class'][ids]), 4.)]
+    counts = texel_ray_counts(scene, job['pages'], rays, job['texel_samples'])
     arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced')
     # black class ambients keep the page gather free of the ambient finish_pages adds later
     table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
@@ -432,14 +430,22 @@ def _gather_texels(scene, job, textures, pages, device):
     probe.pop('query_inverse', None)
     query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
     def reduce(rows, value, hemi, solid_angle):
-        rgb[rows] = 4 / rays * value.sum(axis=1)
-    carried, escaped = _trace(device, arrays, table, dict(job, vertex_rays=rays), batches,
-                              (origin, direction), reduce, rgb=True)
+        rgb[rows] = 4 / value.shape[1] * value.sum(axis=1)
+    carried, escaped = np.zeros((len(query), 3)), np.zeros(len(query), bool)
+    for rays in np.unique(counts[ids]):
+        rows = ids[counts[ids] == rays]
+        local, phi, r = sphere(int(rays))
+        batches = [((phi, r, local[:, 2]), (rows, scene['texel_pos'][rows], n[rows], t[rows], b[rows], spin[rows],
+                                          scene['texel_class'][rows]), 4.)]
+        sun_rows = counts[query] == rays
+        carried[sun_rows], escaped[sun_rows] = _trace(
+            device, arrays, table, dict(job, vertex_rays=int(rays)), batches,
+            (origin[sun_rows], direction[sun_rows]), reduce, rgb=True)
     for k, sun in enumerate(job['suns']):
         rows = np.flatnonzero((sun_index == k) & escaped)
         rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
     updated = [p + texel_contribution(scene, i, p.shape[1], p.shape[0], rgb)[0] for i, p in enumerate(pages)]
-    return rgb, len(ids) * rays + len(query), updated
+    return rgb, int(counts[ids].sum()) + len(query), updated
 
 
 def load_and_run(work, pages, adapter):

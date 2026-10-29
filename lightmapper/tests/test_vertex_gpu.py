@@ -167,7 +167,7 @@ def cpu_and_gpu(tmp_path, vendor, **kwargs):
 
 
 @pytest.mark.blender
-@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back'])
+@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back', 'edge'])
 def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene(kind))
     np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
@@ -175,6 +175,9 @@ def test_gpu_matches_cpu_on_texel_scenes(tmp_path, vendor, kind):
     np.testing.assert_allclose(result.vector, cpu['vector'], rtol=1e-5, atol=1e-6)
     if kind == 'vertex_back':
         assert result.irradiance[0] == pytest.approx(3, rel=.05)
+    if kind == 'edge':
+        assert result.rays == 512
+        np.testing.assert_allclose(result.texel_rgb, .105, rtol=.3)
 
 
 @pytest.mark.blender

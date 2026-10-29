@@ -62,6 +62,20 @@ def flagged_source(scene, page, width, height, rgb):
     return source
 
 
+def texel_ray_counts(scene, pages, base, target):
+    counts = np.full(len(scene['texel_pos']), base, np.int64)
+    if target <= 0:
+        return counts
+    for page, (width, height) in enumerate(pages):
+        rows = scene['tri_page'] == page
+        owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+        owned = (owner >= 0).reshape(height, 3, width, 3).sum(axis=(1, 3))
+        chosen = scene['texel_page'] == page
+        xy = scene['texel_xy'][chosen] // 3
+        counts[chosen] = np.maximum(base, -(-target // np.maximum(owned[xy[:, 1], xy[:, 0]], 1)))
+    return counts
+
+
 def coverage(uv, tris, tri_class, width, height):
     texels = np.asarray(uv, dtype=np.float64) * np.array([width, height])
     return _coverage(texels, np.asarray(tris), np.asarray(tri_class), width, height)
