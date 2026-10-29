@@ -120,9 +120,10 @@ def write_model(tags, name, lods, shaders=(('shdr', 'a'),), scale=(2.0, 3.0)):
     write_tag(model, tags / (name + '.gbxmodel'))
 
 
-def write_scenery(tags, name, model):
+def write_scenery(tags, name, model, origin_offset=(0, 0, 0)):
     tag = new_tag('scen')
     tag.root.set_reference('model', 'mode', model)
+    tag.root.set('origin_offset', origin_offset)
     write_tag(tag, tags / (name + '.scenery'))
 
 
@@ -190,10 +191,10 @@ def test_bloodgulch_occluders():
     assert occ.tri_shader.max() < len(occ.shaders)
     # every placement's world bounding box centre lies within its model's farthest vertex of its position
     count = 0
-    for pos, rot, geometry in scenery.iter_placed(scn, TAGS, 0):
-        world = scenery.world_positions(geometry, pos, rot).astype(np.float64)
+    for pos, rot, offset, geometry in scenery.iter_placed(scn, TAGS, 0):
+        world = scenery.world_positions(geometry, pos, rot, offset).astype(np.float64)
         centre = (world.min(axis=0) + world.max(axis=0)) / 2
-        radius = np.linalg.norm(geometry.positions.astype(np.float64), axis=1).max()
+        radius = np.linalg.norm(geometry.positions.astype(np.float64) + offset, axis=1).max()
         assert np.linalg.norm(centre - pos) <= radius + 1e-3
         count += 1
     assert count > 0
@@ -234,5 +235,123 @@ def test_oblique_placement_matches_hand_transform(tmp_path):
     left = (-(sy * cp), sy * sp * sr + cy * cr, cy * sr - sy * sp * cr)
     up = (-sp, -(cp * sr), cp * cr)
     for got, (x, y, z) in zip(occ.positions, verts):
+        want = [(10, 20, 30)[k] + x * forward[k] + y * left[k] + z * up[k] for k in range(3)]
+        assert np.allclose(got, want, atol=1e-4)
+
+
+OFFSET = (-31, -110, -2.2)
+
+
+def offset_scene(tmp_path, placements, offset=OFFSET):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    write_model(tags, 'm', [[(0, QUAD, [0, 1, 2])]])
+    write_scenery(tags, 's', 'm', offset)
+    scn = new_tag('scnr')
+    add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
+    for kw in placements:
+        add(scn.root, 'scenery', **kw)
+    return scn, tags
+
+
+def test_origin_offset_at_yaw_0(tmp_path):
+    scn, tags = offset_scene(tmp_path, [dict(placement__position=(10, 20, 30))])
+    occ = gather_occluders(scn, tags, 0)
+    assert np.allclose(occ.positions[0], [-21, -90, 27.8], atol=1e-4)
+
+
+def test_origin_offset_at_yaw_90(tmp_path):
+    scn, tags = offset_scene(tmp_path, [dict(placement__position=(10, 20, 30),
+                                             placement__rotation=(math.pi / 2, 0, 0))])
+    occ = gather_occluders(scn, tags, 0)
+    assert np.allclose(occ.positions[0], [120, -11, 27.8], atol=1e-4)
+
+
+def test_two_scenery_tags_sharing_a_model_keep_their_own_offsets(tmp_path, monkeypatch):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    write_model(tags, 'm', [[(0, QUAD, [0, 1, 2])]])
+    write_scenery(tags, 's1', 'm', (1, 0, 0))
+    write_scenery(tags, 's2', 'm', (0, 5, 0))
+    scn = new_tag('scnr')
+    for name in ('s1', 's2'):
+        add(scn.root, 'scenery_palette').set_reference('name', 'scen', name)
+    add(scn.root, 'scenery', type=0, placement__position=(0, 0, 0))
+    add(scn.root, 'scenery', type=1, placement__position=(0, 0, 0))
+    calls = []
+    real = scenery.model_geometry
+    monkeypatch.setattr(scenery, 'model_geometry', lambda *a: calls.append(a) or real(*a))
+    occ = gather_occluders(scn, tags, 0)
+    assert np.allclose(occ.positions[:4], np.array(QUAD) + (1, 0, 0))
+    assert np.allclose(occ.positions[4:], np.array(QUAD) + (0, 5, 0))
+    assert len(calls) == 1
+
+
+def test_one_tag_placed_at_two_yaws_turns_its_offset_with_each(tmp_path):
+    scn, tags = offset_scene(tmp_path, [
+        dict(placement__position=(10, 20, 30)),
+        dict(placement__position=(10, 20, 30), placement__rotation=(math.pi / 2, 0, 0))])
+    occ = gather_occluders(scn, tags, 0)
+    assert np.allclose(occ.positions[0], [-21, -90, 27.8], atol=1e-4)
+    assert np.allclose(occ.positions[4], [120, -11, 27.8], atol=1e-4)
+
+
+def test_two_permutations_of_one_model_are_cached_apart(tmp_path):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    model = new_tag('mod2')
+    root = model.root
+    add(root, 'shaders').set_reference('shader', 'shdr', 'a')
+    reg = add(root, 'regions')
+    for name, number, geo in (('base', 0, 0), ('base 2', 2, 1)):
+        add(reg, 'permutations', name=name.encode(), permutation_number=number, super_high=geo, super_low=geo)
+    for quad in (QUAD, [(5, 5, 5), (6, 5, 5), (5, 6, 5), (6, 6, 5)]):
+        part = add(add(root, 'geometries'), 'parts', shader_index=0)
+        for k, p in enumerate(quad):
+            add(part, 'uncompressed_vertices', position=p, texture_coords=(0, 0))
+        add(part, 'triangle_data', indices=0, indices_1=1, indices_2=2)
+    write_tag(model, tags / 'm.gbxmodel')
+    write_scenery(tags, 's', 'm', (1, 0, 0))
+    scn = new_tag('scnr')
+    add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
+    add(scn.root, 'scenery', placement__position=(0, 0, 0), placement__desired_permutation=0)
+    add(scn.root, 'scenery', placement__position=(0, 0, 0), placement__desired_permutation=2)
+    occ = gather_occluders(scn, tags, 0)
+    assert np.allclose(occ.positions[:4], np.array(QUAD) + (1, 0, 0))
+    assert np.allclose(occ.positions[4:], np.array([(5, 5, 5), (6, 5, 5), (5, 6, 5), (6, 6, 5)]) + (1, 0, 0))
+
+
+def test_scenery_without_a_model_warns_once(tmp_path, caplog):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    write_tag(new_tag('scen'), tags / 's.scenery')
+    scn = new_tag('scnr')
+    add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
+    for x in range(3):
+        add(scn.root, 'scenery', placement__position=(x, 0, 0))
+    occ = gather_occluders(scn, tags, 0)
+    assert len(occ.tris) == 0
+    assert caplog.text.count('has no render model') == 1
+
+
+def test_oblique_placement_with_an_offset_matches_hand_transform(tmp_path):
+    tags = tmp_path / 'tags'
+    tags.mkdir()
+    verts = [(1, 2, 3), (4, -5, 6), (-7, 8, 10)]
+    offset = (2, -3, 0.5)
+    write_model(tags, 'm', [[(0, verts, [0, 1, 2])]])
+    write_scenery(tags, 's', 'm', offset)
+    yaw, pitch, roll = 0.3, -0.4, 0.5
+    scn = new_tag('scnr')
+    add(scn.root, 'scenery_palette').set_reference('name', 'scen', 's')
+    add(scn.root, 'scenery', placement__position=(10, 20, 30), placement__rotation=(yaw, pitch, roll))
+    occ = gather_occluders(scn, tags, 0)
+    cr, sr, cp, sp, cy, sy = (math.cos(roll), math.sin(roll), math.cos(pitch), math.sin(pitch),
+                              math.cos(yaw), math.sin(yaw))
+    forward = (cy * cp, sy * cr - cy * sp * sr, cy * sp * cr + sy * sr)
+    left = (-(sy * cp), sy * sp * sr + cy * cr, cy * sr - sy * sp * cr)
+    up = (-sp, -(cp * sr), cp * cr)
+    for got, (x, y, z) in zip(occ.positions, verts):
+        x, y, z = x + offset[0], y + offset[1], z + offset[2]
         want = [(10, 20, 30)[k] + x * forward[k] + y * left[k] + z * up[k] for k in range(3)]
         assert np.allclose(got, want, atol=1e-4)

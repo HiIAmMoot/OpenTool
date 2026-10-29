@@ -41,6 +41,12 @@ class ModelGeometry:
     shaders: list[tuple[str, str, float, float]]
 
 
+@dataclass
+class SceneryDefinition:
+    origin_offset: np.ndarray
+    model: tuple[str, str]
+
+
 def decode_strip(indices: np.ndarray) -> np.ndarray:
     s = np.asarray(indices, np.int64)
     if len(s) < 3:
@@ -172,22 +178,28 @@ def model_geometry(model: Tag, desired: int) -> ModelGeometry:
         np.concatenate(tri_shader) if tri_shader else np.zeros(0, np.int32), shaders)
 
 
-def _load_model(tags_root: Path, palette_entry: Element, desired: int, cache: dict):
-    group, path = palette_entry.reference('name')
-    if group != 'scen' or not path:
-        return None
-    key = (path, desired)
-    if key not in cache:
-        cache[key] = None
-        scenery_path = resolve_reference_path(tags_root, group, path)
+def _load_scenery(tags_root: Path, path: str, cache: dict) -> SceneryDefinition | None:
+    if path not in cache:
+        cache[path] = None
+        scenery_path = resolve_reference_path(tags_root, 'scen', path)
         if not scenery_path.is_file():
             logger.warning('scenery tag is missing: %s', scenery_path)
             return None
-        model_group, model_path = read_tag(scenery_path).root.reference('model')
+        root = read_tag(scenery_path).root
+        model_group, model_path = root.reference('model')
         if model_group not in ('mode', 'mod2') or not model_path:
             logger.warning('scenery %s has no render model', path)
             return None
-        model_file = resolve_reference_path(tags_root, model_group, model_path)
+        cache[path] = SceneryDefinition(np.array(root.get('origin_offset'), np.float64),
+                                        (model_group, model_path))
+    return cache[path]
+
+
+def _load_model(tags_root: Path, model: tuple[str, str], desired: int, cache: dict) -> ModelGeometry | None:
+    key = (*model, desired)
+    if key not in cache:
+        cache[key] = None
+        model_file = resolve_reference_path(tags_root, *model)
         if not model_file.is_file():
             logger.warning('model tag is missing: %s', model_file)
             return None
@@ -197,7 +209,7 @@ def _load_model(tags_root: Path, palette_entry: Element, desired: int, cache: di
 
 def iter_placed(scenario: Tag, tags_root: Path, bsp_index: int):
     palette = scenario.root.block('scenery_palette')
-    cache = {}
+    scenery_cache, model_cache = {}, {}
     for placement in scenario.root.block('scenery'):
         if placement.get('placement.not_placed') & NOT_PLACED_AUTOMATICALLY:
             continue
@@ -208,25 +220,33 @@ def iter_placed(scenario: Tag, tags_root: Path, bsp_index: int):
         index = placement.get('type')
         if not 0 <= index < len(palette):
             continue
+        group, path = palette[index].reference('name')
+        if group != 'scen' or not path:
+            continue
+        definition = _load_scenery(tags_root, path, scenery_cache)
+        if definition is None:
+            continue
         desired = placement.get('placement.desired_permutation')
-        geometry = _load_model(tags_root, palette[index], desired, cache)
+        geometry = _load_model(tags_root, definition.model, desired, model_cache)
         if geometry is not None and len(geometry.tris):
             yield (np.array(placement.get('placement.position'), np.float64),
-                   placement.get('placement.rotation'), geometry)
+                   placement.get('placement.rotation'), definition.origin_offset, geometry)
 
 
-def world_positions(geometry: ModelGeometry, position: np.ndarray, rotation) -> np.ndarray:
-    # world = position + x*forward + y*left + z*up, the matrix rows being forward, left, up
-    return (geometry.positions.astype(np.float64) @ placement_rotation(*rotation) + position).astype(np.float32)
+def world_positions(geometry: ModelGeometry, position: np.ndarray, rotation, origin_offset: np.ndarray) -> np.ndarray:
+    # world = position + x*forward + y*left + z*up, the matrix rows being forward, left, up;
+    # the scenery tag's origin offset is in model space, so it turns with the placement
+    return ((geometry.positions.astype(np.float64) + origin_offset) @ placement_rotation(*rotation)
+            + position).astype(np.float32)
 
 
 def gather_occluders(scenario: Tag, tags_root: Path, bsp_index: int) -> Occluders:
     positions, uvs, tris, tri_shader = [], [], [], []
     remap: dict[tuple, int] = {}
     base = 0
-    for position, rotation, geometry in iter_placed(scenario, tags_root, bsp_index):
+    for position, rotation, origin_offset, geometry in iter_placed(scenario, tags_root, bsp_index):
         local = np.array([remap.setdefault(s, len(remap)) for s in geometry.shaders], np.int32)
-        positions.append(world_positions(geometry, position, rotation))
+        positions.append(world_positions(geometry, position, rotation, origin_offset))
         uvs.append(geometry.uv)
         tris.append(geometry.tris + base)
         tri_shader.append(local[geometry.tri_shader])

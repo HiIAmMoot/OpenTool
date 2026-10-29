@@ -62,9 +62,9 @@ def test_bloodgulch_occluder_winding_matches_normals(monkeypatch):
     real_placed = scenery.iter_placed
 
     def placed(*args):
-        for position, rotation, geometry in real_placed(*args):
+        for position, rotation, origin_offset, geometry in real_placed(*args):
             seen.append(geometry.normals @ scenery.placement_rotation(*rotation))
-            yield position, rotation, geometry
+            yield position, rotation, origin_offset, geometry
 
     monkeypatch.setattr(scenery, '_vertices', vertices)
     monkeypatch.setattr(scenery, 'model_geometry', model_geometry)
