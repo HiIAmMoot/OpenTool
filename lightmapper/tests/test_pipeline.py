@@ -15,7 +15,7 @@ from lightmapper.formats.vertices import ENV, LM, compress, pack_uncompressed, u
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
 from lightmapper.validate import validate_bsp
-from lightmapper import gpu, vertex_gpu, blender_job
+from lightmapper import gpu, vertex_gpu, blender_job, memory
 from test_blender_job import fake
 
 
@@ -83,6 +83,86 @@ def tiny(tmp_path, monkeypatch):
 
     monkeypatch.setattr(pipeline, 'run_blender', fake_blender)
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
+
+
+def test_memory_guard_refuses_before_blender_starts(tiny, monkeypatch):
+    tags, settings, work = tiny
+    calls = []
+    blender = api().run_blender
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 1)
+
+    def record(*args):
+        calls.append(args)
+        return blender(*args)
+
+    monkeypatch.setattr(api(), 'run_blender', record)
+    with pytest.raises(memory.BakeMemoryError):
+        api().bake(tags, 'level', 'room', settings, work=work)
+    assert calls == [] and not (work / 'job.json').exists()
+
+
+def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
+    from test_scenery import write_model, write_scenery
+
+    tags, settings, work = tiny
+    write_model(tags, 'model', [[(0, [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])]],
+                shaders=(('senv', 'wall'),))
+    write_scenery(tags, 'prop', 'model')
+    scenario = read_tag(tags / 'level.scenario')
+    palette = child(scenario.root, 'scenery_palette')
+    palette.set_reference('name', 'scen', 'prop')
+    scenario.root.set_block('scenery_palette', [palette])
+    placement = child(scenario.root, 'scenery')
+    placement.set('bsp_indices', 1)
+    scenario.root.set_block('scenery', [placement])
+    put(tags, 'scnr', 'level', scenario)
+    seen = []
+    check = memory.check_bake_memory
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 64 * memory.GB)
+
+    def spy(counts, pages, page_max):
+        seen.append((counts, pages, page_max))
+        return check(counts, pages, page_max)
+
+    monkeypatch.setattr(memory, 'check_bake_memory', spy)
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert len(seen) == 1
+    seen_counts, pages, page_max = seen[0]
+    assert seen_counts.triangles == 2 + 1
+    assert seen_counts.vertices == 6 + 3
+    job = json.loads((work / 'job.json').read_text())
+    assert pages == [tuple(page) for page in job['pages']]
+    assert page_max == settings.page_max
+
+
+def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
+    tags, settings, work = tiny
+    settings = replace(settings, texels_per_unit=2)
+    before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 1)
+    out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    counts = memory.SceneCounts(2, 6)
+    pages = summary['sizes']
+    message = memory.out_of_memory_message(counts, pages, settings.page_max, 1)
+    assert message in summary['warnings']
+    assert f'{message}; dry run continues for timing only' in caplog.text
+    assert summary['memory'] == {'estimate_gb': round(memory.bake_bytes(counts, pages) / memory.GB, 2),
+                                 'free_gb': round(1 / memory.GB, 2)}
+    assert out.work == work
+    assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
+
+
+@pytest.mark.parametrize('free', [64 * memory.GB, None])
+def test_summary_records_the_memory_check(tiny, monkeypatch, free):
+    tags, settings, work = tiny
+    settings = replace(settings, texels_per_unit=2)
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: free)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    summary = json.loads((work / 'summary.json').read_text())
+    estimate = memory.bake_bytes(memory.SceneCounts(2, 6), summary['sizes'])
+    assert summary['memory'] == {'estimate_gb': round(estimate / memory.GB, 2),
+                                 'free_gb': 64.0 if free is not None else None}
 
 
 def test_pipeline_outputs(tiny):

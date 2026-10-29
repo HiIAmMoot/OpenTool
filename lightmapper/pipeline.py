@@ -19,7 +19,7 @@ from time import perf_counter
 
 import numpy as np
 
-from . import gpu, vertex_gpu
+from . import gpu, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
@@ -274,6 +274,15 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     begin('scene')
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                                       s.scenery_emission)
+    try:
+        check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
+                                         [(p.width, p.height) for p in pages], s.page_max)
+    except memory.BakeMemoryError as error:
+        if not dry_run:
+            raise
+        logger.warning('%s; dry run continues for timing only', error)
+        warnings.append(str(error))
+        check = memory.MemoryCheck(error.estimate, error.free)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
               vertex_pass='skip' if choice.adapter else 'cpu')
@@ -402,6 +411,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
+        'memory': {'estimate_gb': round(check.estimate / memory.GB, 2),
+                   'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},
         'rays': {'samples': result.samples_used, 'texel_samples': result.texel_samples_used,
                  'vertex_rays': s.vertex_rays if vertex_device != 'cpu' else s.resolved_cpu_vertex_rays()},
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))
