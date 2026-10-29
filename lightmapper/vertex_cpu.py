@@ -15,7 +15,7 @@ import numba
 from numba import njit, prange
 import numpy as np
 
-from .vertex_gpu import ambient_table
+from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sun_rays
 
 
 # copies keep numba's source-file cache sensitive to changes in ray constants; a test holds them equal to bake.py
@@ -25,6 +25,8 @@ PASS_LIMIT = 8
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
 SEED_SPIN = 0.7548776662466927
+# about 75 MB of directions per chunk, float64 and float32
+CHUNK_RAYS = 2**21
 
 
 @dataclass
@@ -357,7 +359,7 @@ def _faces(normal, heading):
 
 
 @njit(cache=True)
-def _cast(sc, bv, o32, d32, shadow, carried):
+def _cast(sc, bv, o32, d32, shadow, carried, limit=RAY_LENGTH):
     (corners, corners32, tris, tex_uv, lm_uv, normals, twin, casts, cutout, glows, two_sided, has_two_sided,
      texture_of, page_of, class_of, tint, emission, texture_table, texture_texels, page_table, page_texels,
      flagged_table, flagged_texels, has_flagged, ambient, albedo_scale, albedo_fallback, n_recv) = sc
@@ -365,7 +367,7 @@ def _cast(sc, bv, o32, d32, shadow, carried):
     start = o32.copy()
     heading = d32.astype(np.float64)
     step = d32 * np.float32(RAY_EPSILON)
-    remaining = RAY_LENGTH
+    remaining = limit
     for _ in range(PASS_LIMIT + 1):
         index, distance = _closest_hit(lo, hi, first, count, order, corners32, start, d32, np.float32(remaining))
         if index < 0:
@@ -466,6 +468,107 @@ def probe(cs, bvh, origins, dirs, classes):
                                np.asarray(origins, np.float64), np.asarray(dirs, np.float64),
                                np.asarray(classes, np.int64))
     return {'tri': tri, 'uv': uv, 'radiance': rgb @ LUMA, 'radiance_rgb': rgb}
+
+
+@njit(parallel=True, cache=True)
+def _gather(sc, bv, origins32, dirs32, dirs64, cls, active, rgb,
+            with_ambient, with_pages, with_emission, sums):
+    for q in prange(len(origins32)):
+        x, y, z, total = 0.0, 0.0, 0.0, 0.0
+        if active[q]:
+            for ray in range(origins32.shape[1]):
+                tri, hit = _cast(sc, bv, origins32[q, ray], dirs32[q, ray], False, np.ones(3))
+                if tri < 0:
+                    continue
+                r, g, b = _shade_rgb(sc, tri, hit, dirs64[q, ray], cls[q],
+                                     with_ambient, with_pages, with_emission)
+                if rgb:
+                    x += r
+                    y += g
+                    z += b
+                else:
+                    lum = (r * LUMA[0] + g * LUMA[1]) + b * LUMA[2]
+                    x += lum * dirs64[q, ray, 0]
+                    y += lum * dirs64[q, ray, 1]
+                    z += lum * dirs64[q, ray, 2]
+                    total += lum
+        sums[q, 0], sums[q, 1], sums[q, 2], sums[q, 3] = x, y, z, total
+
+
+@njit(parallel=True, cache=True)
+def _shadow(sc, bv, origins32, dirs32, limits, carried, escaped):
+    for ray in prange(len(origins32)):
+        throughput = np.ones(3)
+        tri, _ = _cast(sc, bv, origins32[ray], dirs32[ray], True, throughput, limits[ray])
+        carried[ray] = throughput
+        escaped[ray] = tri < 0
+
+
+class CpuPassError(RuntimeError):
+    pass
+
+
+def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> VertexPassResult:
+    if np.any(scene.get('query_ignore_normals', ())) or len(scene.get('texel_pos', ())):
+        raise CpuPassError('ignore-normals queries are not in the compiled pass yet')
+    rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
+    usable, n, tangent, bitangent, spin = query_frames(scene['query_normal'], job.get('seed', 0))
+    queries = len(n)
+    pos = scene['query_pos'].astype(np.float64)
+    cls = scene['query_class'].astype(np.int64)
+    cs = cpu_scene(scene, job, textures, pages)
+    bvh = build_bvh(cs.corners32)
+    sc, bv = cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order)
+    local, phi, radius = hemisphere(rays)
+    vector, irradiance = np.zeros((queries, 3)), np.zeros(queries)
+    chunk = max(1, CHUNK_RAYS // rays)
+    for first in range(0, queries, chunk):
+        end = min(first + chunk, queries)
+        angle = phi[None, :] + spin[first:end, None]
+        dirs = (radius[None, :, None] * np.cos(angle)[:, :, None] * tangent[first:end, None, :]
+                + radius[None, :, None] * np.sin(angle)[:, :, None] * bitangent[first:end, None, :]
+                + local[None, :, 2, None] * n[first:end, None, :])
+        origins = (pos[first:end, None, :] + RAY_EPSILON * dirs).astype(np.float32)
+        sums = np.empty((end - first, 4))
+        _gather(sc, bv, origins, dirs.astype(np.float32), dirs, cls[first:end], usable[first:end],
+                False, True, True, True, sums)
+        vector[first:end] = np.pi / rays * sums[:, :3]
+        irradiance[first:end] = np.pi / rays * sums[:, 3]
+    flat = np.pi * (cs.ambient[cls + 1] @ LUMA) * usable
+    vector += flat[:, None] * n
+    irradiance += flat
+    suns = job['suns']
+    sun_query, sun_index, sun_origin, sun_dir, sun_cos = sun_rays(scene, job, usable, n)
+    if len(scene.get('edge_pos', ())):
+        edge, edge_sun, edge_origin, edge_dir = edge_rays(scene, job)
+    else:
+        edge = edge_sun = np.empty(0, np.int64)
+        edge_origin = edge_dir = np.empty((0, 3))
+    origins = np.concatenate([sun_origin, edge_origin]).astype(np.float32)
+    dirs = np.concatenate([sun_dir, edge_dir]).astype(np.float32)
+    carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
+    _shadow(sc, bv, origins, dirs, np.full(len(origins), RAY_LENGTH), carried, escaped)
+    sun_lit = np.zeros((queries, len(suns)), bool)
+    for k, sun in enumerate(suns):
+        rows = np.flatnonzero((sun_index == k) & escaped[:len(sun_query)])
+        strength = ((np.float64(sun['color']) * carried[rows]) @ LUMA) * float(sun['strength'])
+        vector[sun_query[rows]] += (strength * sun_cos[rows])[:, None] * sun_dir[rows]
+        irradiance[sun_query[rows]] += strength * sun_cos[rows]
+        sun_lit[sun_query[rows], k] = True
+    edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
+    edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
+    total = int(usable.sum()) * rays + len(sun_query) + len(edge)
+    return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total)
+
+
+def load_and_run(work: Path, pages: list) -> VertexPassResult:
+    work = Path(work)
+    job = json.loads((work / 'job.json').read_text())
+    with np.load(work / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    with np.load(work / 'textures.npz') as data:
+        textures = [data[f'tex_{k}'] for k in range(len(data.files))]
+    return run_vertex_pass(scene, job, textures, pages)
 
 
 @njit(parallel=True, cache=True)

@@ -7,14 +7,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import numba
 import pytest
 
 from lightmapper import entry, frozen, vertex_cpu
 from lightmapper.blender_job import write_job
-from test_blender_bake import UP, build, floor, full_quad
-from test_vertex_gpu import CASES, textured_room
-from test_vertex_pass import (S, asymmetric_twin_scene, run_driver, twin_scene, unpaired_back_face_scene,
-                              wall_facing_minus_x)
+from test_blender_bake import UP, build, floor, full_quad, sun
+from test_vertex_gpu import CASES, edge_receivers, textured_room, write_bare_scene
+from test_vertex_pass import (S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene, roof,
+                              run_driver, twin_scene, unpaired_back_face_scene, wall_facing_minus_x)
 
 
 def run_probe(out):
@@ -376,3 +377,281 @@ def test_zero_area_triangle_uses_its_centre():
         assert vertex_cpu._barycentric(a, b, c, np.float64(point)) == pytest.approx((1 / 3, 1 / 3, 1 / 3))
     assert vertex_cpu._barycentric(a, b, c, np.float64([1, 1, 0])) == (1.0, 0.0, 0.0)
     assert vertex_cpu._barycentric(*np.float64([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.25, 0.25, 0]]))         == pytest.approx((0.5, 0.25, 0.25))
+
+
+def saved_pages(work):
+    with np.load(work / 'pages.npz') as data:
+        return [data[f'page_{i}'] for i in range(len(data.files))]
+
+
+def blender_and_numba(tmp_path, **kwargs):
+    blender = run_driver(tmp_path, **kwargs)
+    ours = vertex_cpu.load_and_run(tmp_path, saved_pages(tmp_path))
+    metrics = {'rays': ours.rays}
+    for field in ('irradiance', 'vector'):
+        diff = np.abs(getattr(ours, field) - blender[field])
+        rel = diff / np.maximum(np.abs(blender[field]), 1e-6)
+        metrics[field] = {'max_abs': float(diff.max(initial=0)), 'max_rel': float(rel.max(initial=0)),
+                          'median_rel': float(np.median(rel)) if rel.size else 0.0}
+    metrics['sun_lit_equal'] = np.array_equal(ours.sun_lit, blender['sun_lit'])
+    metrics['edge_sun_lit_equal'] = np.array_equal(ours.edge_sun_lit, blender['edge_sun_lit'])
+    (tmp_path / 'parity.json').write_text(json.dumps(metrics, indent=2))
+    return blender, ours
+
+
+def assert_parity(blender, ours):
+    assert ours.rays == int(blender['rays'])
+    np.testing.assert_allclose(ours.irradiance, blender['irradiance'], rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(ours.vector, blender['vector'], rtol=1e-4, atol=1e-5)
+    assert np.array_equal(ours.sun_lit, blender['sun_lit']) and np.array_equal(ours.edge_sun_lit, blender['edge_sun_lit'])
+    if 'vertex_sun_throughput' in blender.files:
+        np.testing.assert_allclose(ours.sun_throughput, blender['vertex_sun_throughput'], rtol=1e-6, atol=1e-6)
+    else:
+        assert ours.sun_throughput is None
+
+
+ORDINARY = [c for c in CASES if not c.startswith(('ignore_normals', 'sun_throughput'))]
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('case', ORDINARY)
+def test_numba_matches_blender_pass_on_the_vertex_pass_scenes(tmp_path, case):
+    assert_parity(*blender_and_numba(tmp_path, **CASES[case]))
+
+
+@pytest.mark.blender
+def test_numba_matches_blender_pass_on_a_textured_room(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, **textured_room())
+    rel = np.abs(ours.irradiance - blender['irradiance']) / np.maximum(blender['irradiance'], 1e-6)
+    assert blender['irradiance'].min() > 0
+    assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
+    assert ours.rays == int(blender['rays']) and np.array_equal(ours.sun_lit, blender['sun_lit'])
+    assert ours.sun_lit.any()
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+@pytest.mark.parametrize('cutout', [False, True])
+def test_twin_faces_light_both_sides(tmp_path, reverse, cutout):
+    blender, ours = blender_and_numba(tmp_path, **twin_scene(reverse, cutout))
+    assert_parity(blender, ours)
+    assert_twin_light(blender['irradiance'], blender['vector'], blender['rays'])
+    assert_twin_light(ours.irradiance, ours.vector, ours.rays)
+
+
+@pytest.mark.blender
+def test_unpaired_back_face_still_blocks(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, **unpaired_back_face_scene())
+    assert_parity(blender, ours)
+    np.testing.assert_array_equal(blender['irradiance'], [0])
+    np.testing.assert_array_equal(ours.irradiance, [0])
+    np.testing.assert_array_equal(ours.vector, [[0, 0, 0]])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('reverse', [False, True])
+def test_twin_uses_facing_alpha_and_corner_weights_before_stopping(tmp_path, reverse):
+    blender, ours = blender_and_numba(tmp_path, **asymmetric_twin_scene(reverse))
+    assert_parity(blender, ours)
+    assert_asymmetric_twin(blender['irradiance'], blender['sun_lit'])
+    assert_asymmetric_twin(ours.irradiance, ours.sun_lit)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('panes,lit', [(8, False), (9, True)])
+def test_pass_limit_stops_after_nine_hits(tmp_path, panes, lit):
+    stack = [dict(quad=floor(-1, 5, -1, 5, z=0.1 * (k + 1)), casts=False) for k in range(panes)]
+    roof_slab = dict(quad=floor(-1, 5, -1, 5, z=2.0))
+    blender, ours = blender_and_numba(tmp_path, receivers=[full_quad()], occluders=stack + [roof_slab],
+                                     suns=[sun(UP, strength=3.0)])
+    assert_parity(blender, ours)
+    assert (ours.irradiance[0] > 0) == lit == (blender['irradiance'][0] > 0)
+
+
+@pytest.mark.blender
+def test_cutout_ray_passes(tmp_path):
+    for case, lit in [('cutout_hole', True), ('cutout_filled', False)]:
+        blender, ours = blender_and_numba(tmp_path / case, **CASES[case])
+        assert_parity(blender, ours)
+        assert (ours.irradiance[0] > 0) == lit
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('tint,passed', [((0, 0, 0), 0.0), ((1, 1, 1), 1.0), ((0.5, 0.5, 0.5), 0.5)])
+def test_sun_shadow_ray_takes_the_pane_tint(tmp_path, tint, passed):
+    glass = dict(quad=floor(-1, 5, -1, 5, z=1.0), casts=False, tint=tint)
+    blender, ours = blender_and_numba(tmp_path, receivers=[full_quad(), glass], suns=[sun(UP, strength=3.0)])
+    assert_parity(blender, ours)
+    assert ours.irradiance[0] == pytest.approx(3.0 * passed, abs=1e-3)
+    assert ours.sun_lit.tolist() == [[True]]
+
+
+@pytest.mark.blender
+def test_sun_ray_starts_in_front_of_a_slightly_overhanging_face(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, **CASES['overhanging_slab'])
+    assert_parity(blender, ours)
+    assert ours.irradiance[0] == pytest.approx(3.0 * 2 ** -0.5, rel=1e-3)
+
+
+@pytest.mark.blender
+def test_emit_only_occluder_is_seen_by_the_rays_that_gather_light(tmp_path):
+    for up in (False, True):
+        glow = dict(quad=floor(0, 4, 0, 4, z=1.0, up=up), casts=False, emission=(4, 4, 4))
+        blender, ours = blender_and_numba(tmp_path / str(up), receivers=[full_quad()], occluders=[glow],
+                                         suns=[sun(UP, strength=3.0)])
+        assert_parity(blender, ours)
+        assert ours.sun_lit.tolist() == [[True]]
+        assert (ours.irradiance[0] > 3) == (not up)
+        if up:
+            assert ours.irradiance[0] == pytest.approx(3.0, rel=1e-3)
+
+
+@pytest.mark.blender
+def test_emission_is_counted_once(tmp_path):
+    diffuse, emission = 2.0, 4.0
+    blender, ours = blender_and_numba(tmp_path, receivers=[roof(0, (emission,) * 3)], query=((0, 0, 0),),
+                                     cls=1, pages=[np.full((16, 16, 3), diffuse, np.float32)],
+                                     suns=[sun((0, 0, -1), strength=3.0)])
+    assert_parity(blender, ours)
+    assert ours.irradiance[0] == pytest.approx(np.pi * (0.5 * diffuse + emission), rel=0.02)
+
+
+@pytest.mark.blender
+def test_zero_normal_query_casts_nothing(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, **CASES['zero_normal'])
+    assert_parity(blender, ours)
+    assert np.isfinite(ours.vector).all() and np.isfinite(ours.irradiance).all()
+    assert ours.irradiance[0] == 0 and not ours.vector[0].any()
+    assert ours.irradiance[1] > 3.0
+
+
+@pytest.mark.blender
+def test_no_occluders(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, receivers=[full_quad(), wall_facing_minus_x(emission=(4, 4, 4))],
+                                     suns=[sun(UP, strength=3.0)])
+    assert_parity(blender, ours)
+    assert ours.irradiance[0] > 3 and ours.sun_lit.tolist() == [[True]]
+
+
+@pytest.mark.blender
+def test_no_queries(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, receivers=edge_receivers(), suns=[sun((0.8, 0, 0.6))],
+                                     query=np.empty((0, 3)), normals=np.empty((0, 3)))
+    assert_parity(blender, ours)
+    assert ours.vector.shape == (0, 3) and ours.irradiance.shape == (0,) and ours.sun_lit.shape == (0, 1)
+    assert ours.rays > 0 and ours.rays == ours.edge_sun_lit.size
+
+
+@pytest.mark.blender
+def test_no_suns(tmp_path):
+    blender, ours = blender_and_numba(tmp_path, receivers=[full_quad()])
+    assert_parity(blender, ours)
+    assert ours.sun_lit.shape == (1, 0) and ours.rays == 64
+
+
+@pytest.mark.blender
+def test_seed_turns_the_rays(tmp_path):
+    blender, one = blender_and_numba(tmp_path / 'one', **CASES['seed_1'])
+    assert_parity(blender, one)
+    blender, zero = blender_and_numba(tmp_path / 'zero', **dict(CASES['seed_1'], seed=0))
+    assert_parity(blender, zero)
+    assert not np.array_equal(one.vector, zero.vector)
+
+
+def test_shadow_ray_stops_at_its_limit(tmp_path):
+    scene = build([full_quad()], [dict(quad=floor(-1, 5, -1, 5, z=5))])
+    write_job(tmp_path, scene, [(16, 16)], [], {}, S, 'all')
+    np.savez(tmp_path / 'pages.npz', page_0=np.zeros((16, 16, 3), np.float32))
+    cs, bvh = load_cpu_scene(tmp_path)
+    carried, escaped = np.empty((2, 3)), np.empty(2, bool)
+    vertex_cpu._shadow(cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order),
+                       np.float32([[-0.5, 2, 0], [-0.5, 2, 0]]), np.float32([[0, 0, 1]] * 2),
+                       np.float64([4, 6]), carried, escaped)
+    np.testing.assert_array_equal(escaped, [True, False])
+    np.testing.assert_array_equal(carried, 1)
+
+
+@pytest.mark.blender
+def test_results_do_not_depend_on_thread_count(tmp_path):
+    blender = run_driver(tmp_path, **textured_room())
+    pages = saved_pages(tmp_path)
+    default = numba.get_num_threads()
+    assert default > 1
+    try:
+        numba.set_num_threads(1)
+        one = vertex_cpu.load_and_run(tmp_path, pages)
+        numba.set_num_threads(default)
+        many = vertex_cpu.load_and_run(tmp_path, pages)
+    finally:
+        numba.set_num_threads(default)
+    assert all(np.array_equal(getattr(one, f), getattr(many, f)) for f in
+               ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit')) and one.rays == many.rays
+    assert_parity(blender, many)
+
+
+@pytest.mark.blender
+def test_a_small_chunk_gives_the_same_result(tmp_path, monkeypatch):
+    blender, whole = blender_and_numba(tmp_path, **textured_room())
+    assert_parity(blender, whole)
+    monkeypatch.setattr(vertex_cpu, 'CHUNK_RAYS', 256)
+    split = vertex_cpu.load_and_run(tmp_path, saved_pages(tmp_path))
+    assert all(np.array_equal(getattr(split, f), getattr(whole, f)) for f in
+               ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit')) and split.rays == whole.rays
+
+
+@pytest.mark.parametrize('field', ['query_ignore_normals', 'texel_pos'])
+def test_flagged_queries_are_refused_until_ported(tmp_path, field):
+    pages = write_bare_scene(tmp_path)
+    with np.load(tmp_path / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    scene[field] = np.ones(1, bool) if field == 'query_ignore_normals' else np.ones((1, 3), np.float32)
+    job = json.loads((tmp_path / 'job.json').read_text())
+    with pytest.raises(vertex_cpu.CpuPassError, match='ignore-normals queries are not in the compiled pass yet'):
+        vertex_cpu.run_vertex_pass(scene, job, [], pages)
+
+
+def test_ordinary_pass_at_the_stock_query_limit(tmp_path, monkeypatch):
+    pages = write_bare_scene(tmp_path, triangles=False)
+    with np.load(tmp_path / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    count = 393216
+    scene.update(query_pos=np.zeros((count, 3), np.float32),
+                 query_normal=np.tile(np.float32(UP), (count, 1)), query_class=np.zeros(count, np.int16),
+                 query_ignore_normals=np.zeros(count, bool))
+    job = json.loads((tmp_path / 'job.json').read_text())
+    job.update(cpu_vertex_rays=8, suns=[])
+    job.pop('seed', None)
+    chunks = []
+    gather = vertex_cpu._gather
+
+    def recording(*args):
+        chunks.append(args[2].shape[:2])
+        return gather(*args)
+
+    monkeypatch.setattr(vertex_cpu, '_gather', recording)
+    result = vertex_cpu.run_vertex_pass(scene, job, [], pages)
+    assert result.rays == count * 8 and result.vector.shape == (count, 3)
+    assert len(chunks) == 2 and sum(m for m, _ in chunks) == count
+    assert max(m * rays for m, rays in chunks) <= vertex_cpu.CHUNK_RAYS
+    np.testing.assert_allclose(result.irradiance, np.pi * .2, rtol=1e-6)
+    np.testing.assert_array_equal(result.vector[:, :2], 0)
+    np.testing.assert_array_equal(result.vector[:, 2], result.irradiance)
+
+
+def test_gather_rgb_switches_and_inactive_query(tmp_path):
+    scene = build([roof(0, (1, 2, 3))])
+    write_job(tmp_path, scene, [(16, 16)], [], {'0': [.2, .4, .6]}, S, 'all')
+    np.savez(tmp_path / 'pages.npz', page_0=np.full((16, 16, 3), 2, np.float32))
+    cs, bvh = load_cpu_scene(tmp_path)
+    bv = (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order)
+    origins = np.zeros((2, 1, 3), np.float32)
+    dirs = np.tile(np.float32([0, 0, 1]), (2, 1, 1))
+    for ambient, pages, emission, want in [(True, True, True, [2.1, 3.2, 4.3]),
+                                          (False, True, False, [1, 1, 1]),
+                                          (True, False, False, [.1, .2, .3]),
+                                          (False, False, True, [1, 2, 3])]:
+        sums = np.full((2, 4), np.nan)
+        vertex_cpu._gather(cs.arrays(), bv, origins, dirs, dirs.astype(np.float64), np.zeros(2, np.int64),
+                           np.array([True, False]), True, ambient, pages, emission, sums)
+        np.testing.assert_allclose(sums[0, :3], want, rtol=1e-6)
+        np.testing.assert_array_equal(sums[1], 0)
