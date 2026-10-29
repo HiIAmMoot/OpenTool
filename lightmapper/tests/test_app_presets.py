@@ -6,6 +6,12 @@ from lightmapper.settings import Settings
 from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PRESETS, PRESET_HINTS, build_settings, parse_advanced
 
 
+def test_page_max_choices_are_the_memory_page_sides():
+    from lightmapper import memory
+
+    assert PAGE_MAX_CHOICES == memory.PAGE_SIDES == (256, 512, 1024, 2048, 4096)
+
+
 def test_gpu_preset_values():
     assert PRESETS == {
         'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=1024, sky_grid=2, bounces=1, page_max=512),

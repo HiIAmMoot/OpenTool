@@ -1,0 +1,2 @@
+class BakeError(RuntimeError):
+    pass

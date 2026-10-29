@@ -22,6 +22,7 @@ import numpy as np
 from . import gpu, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
+from .errors import BakeError
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, read_geometry
 from .formats.scenery import gather_occluders
@@ -39,10 +40,6 @@ from .twins import ambiguous_warning
 
 MAX_BSP_SURFACES = 131072
 logger = logging.getLogger(__name__)
-
-
-class BakeError(RuntimeError):
-    pass
 
 
 @dataclass

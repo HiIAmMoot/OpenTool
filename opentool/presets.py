@@ -1,3 +1,4 @@
+from lightmapper.memory import PAGE_SIDES
 from lightmapper.settings import Settings
 
 
@@ -22,7 +23,7 @@ PRESET_HINTS: dict[str, str] = {
     'Custom': 'Your own values from Advanced, on any device.',
 }
 ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
-PAGE_MAX_CHOICES = (256, 512, 1024, 2048, 4096)
+PAGE_MAX_CHOICES = PAGE_SIDES
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'sky_grid': 'Suns per sky light', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
 
