@@ -10,8 +10,10 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from lightmapper import blender_find, gpu
+from lightmapper.memory import free_physical_bytes
 from lightmapper.progress import STAGE_LABELS, fraction
-from . import devices, form, jobobject, presets, runner, usersettings
+from . import devices, estimate as estimate_module, form, jobobject, presets, runner, usersettings
+from .estimate import EstimateInputs
 
 
 class _BakeGate:
@@ -26,7 +28,8 @@ class _BakeGate:
 class App:
     def __init__(self, root: tk.Misc, *, store_path: Path | None = None,
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
-                 log_path: Path | None = None, probe_gpu=gpu.probe_adapters):
+                 log_path: Path | None = None, probe_gpu=gpu.probe_adapters,
+                 estimate=estimate_module.run_estimate):
         self.root = root
         self.window = root.winfo_toplevel()
         self.tk_root = root._root()
@@ -35,6 +38,12 @@ class App:
         self.find_blender = find_blender
         self._run_bake = run_bake
         self._probe_gpu = probe_gpu
+        self._estimate = estimate
+        self.generation = 0
+        self.estimate_state = 'idle'
+        self._estimate_inputs: EstimateInputs | None = None
+        self._estimate_running: tuple | None = None
+        self._estimate_pending: tuple | None = None
         self._adapters: list | None = None
         self._gpu_reason: str | None = None
         self.busy = False
@@ -102,7 +111,7 @@ class App:
         self.bsp_var = tk.StringVar()
         self.bsp_box = ttk.Combobox(bsp_row, textvariable=self.bsp_var, state='readonly')
         self.bsp_box.pack(side='left', fill='x', expand=True, padx=(12, 0))
-        self.bsp_box.bind('<<ComboboxSelected>>', lambda _event: self._update_bake_state())
+        self.bsp_box.bind('<<ComboboxSelected>>', lambda _event: self._inputs_changed())
         self.bsp_message = ttk.Label(self.frame)
         self.bsp_message.grid(row=5, column=0, sticky='w')
         self.bsp_message.grid_remove()
@@ -171,6 +180,8 @@ class App:
                 self.page_max_hint = ttk.Label(self.advanced_frame, foreground='gray')
                 self.page_max_hint.grid(row=index, column=2, sticky='w', padx=(8, 0))
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
+            if name in ('texels_per_unit', 'page_max'):
+                value.trace_add('write', lambda *_args: self._inputs_changed())
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w')
 
@@ -197,6 +208,8 @@ class App:
         controls.grid(row=13, column=0, sticky='ew', pady=(12, 0))
         self.bake_button = ttk.Button(controls, text='Bake', command=self.start_bake, state='disabled')
         self.bake_button.pack(side='left')
+        self.memory_label = ttk.Label(controls, wraplength=480)
+        self.memory_label.pack(side='left', padx=(12, 0))
         self._output_folder: Path | None = None
 
         self.stage_label = ttk.Label(self.frame, text='Ready')
@@ -244,7 +257,7 @@ class App:
                     self._write_exception(exc)
                 if self.settings.bsp in self._bsps:
                     self.bsp_var.set(self.settings.bsp)
-                    self._update_bake_state()
+                    self._inputs_changed()
         except Exception as exc:
             self.set_tags('')
             self._clear_scenario()
@@ -265,7 +278,7 @@ class App:
         self._set_optional_label(self.tags_error, problem or '')
         if problem or changed:
             self._clear_scenario()
-        self._update_bake_state()
+        self._inputs_changed()
 
     def _commit_tags(self, _event=None):
         self.set_tags(self.tags_entry.get())
@@ -291,7 +304,7 @@ class App:
             self.bsp_var.set('')
             self._set_optional_label(self.bsp_message, '')
             self._set_optional_label(self.scenario_error, str(exc))
-        self._update_bake_state()
+        self._inputs_changed()
 
     def _clear_scenario(self):
         self._scenario_file = None
@@ -302,6 +315,60 @@ class App:
         self.bsp_box.configure(values=())
         self.bsp_var.set('')
         self._set_optional_label(self.bsp_message, '')
+        self._inputs_changed()
+
+    def estimate_inputs(self) -> EstimateInputs | None:
+        if (self._tags is None or form.tags_folder_problem(self._tags) is not None
+                or not self._scenario or not self.bsp_var.get()):
+            return None
+        try:
+            values = presets.parse_advanced({
+                name: self.advanced_vars[name].get() for name in ('texels_per_unit', 'page_max')
+            })
+        except ValueError:
+            return None
+        if len(values) != 2:
+            return None
+        return EstimateInputs(self._tags, self._scenario, self.bsp_var.get(),
+                              values['texels_per_unit'], values['page_max'])
+
+    def _inputs_changed(self):
+        if self.busy:
+            return
+        inputs = self.estimate_inputs()
+        if inputs is None:
+            if self._estimate_inputs is not None:
+                self.generation += 1
+            self._estimate_inputs = None
+            self._estimate_pending = None
+            self.estimate_state = 'idle'
+            self.memory_label.configure(text='')
+        elif inputs != self._estimate_inputs:
+            self.generation += 1
+            self._estimate_inputs = inputs
+            self._estimate_pending = (self.generation, inputs)
+            self.estimate_state = 'calculating'
+            self.memory_label.configure(text='Calculating…')
+            self._start_estimate()
+        self._update_bake_state()
+
+    def _start_estimate(self):
+        if self._estimate_running is not None or self._estimate_pending is None:
+            return
+        generation, inputs = self._estimate_pending
+        self._estimate_pending = None
+        self._estimate_running = (generation, inputs)
+        estimate, events = self._estimate, self.events
+
+        def calculate():
+            try:
+                result = estimate(inputs)
+            except Exception as exc:
+                result = exc
+            events.put(('estimate', generation, inputs, result))
+
+        # only plain inputs and the queue cross threads; Tk-owning objects stay on the UI thread.
+        threading.Thread(target=calculate, daemon=True).start()
 
     @staticmethod
     def _set_optional_label(label, text):
@@ -343,7 +410,8 @@ class App:
                                          self._device_value())
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
-                                  verbose=self.verbose_var.get(), backups=self.backups_var.get())
+                                  verbose=self.verbose_var.get(), backups=self.backups_var.get(),
+                                  charts=runner.chart_cache_path(self._tags, self._scenario, bsp))
 
     def remember(self):
         advanced = {
@@ -363,7 +431,7 @@ class App:
     def _update_bake_state(self):
         valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
         valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
-                 and not self.busy)
+                 and not self.busy and self.estimate_state in ('idle', 'fits', 'error'))
         self.bake_button.configure(state='normal' if valid else 'disabled')
 
     def _update_new_names_hint(self):
@@ -530,7 +598,21 @@ class App:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
-            if event[0] == 'blender':
+            if event[0] == 'estimate':
+                generation, inputs, result = event[1:]
+                if self._estimate_running == (generation, inputs):
+                    self._estimate_running = None
+                if generation != self.generation:
+                    self._start_estimate()
+                    continue
+                text, allowed = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
+                self.memory_label.configure(text=text)
+                self.estimate_state = ('refused' if not allowed else
+                                       'error' if isinstance(result, BaseException) else 'fits')
+                if isinstance(result, BaseException):
+                    self._write_exception(result)
+                self._update_bake_state()
+            elif event[0] == 'blender':
                 source, result = event[1:]
                 if source == 'discovery' and self._user_chose_blender:
                     continue

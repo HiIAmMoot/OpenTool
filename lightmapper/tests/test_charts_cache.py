@@ -143,3 +143,36 @@ def test_cache_before_joined_simple_charts_is_not_reused(tmp_path):
     path = tmp_path / 'charts.npz'
     np.savez(path, meta=json.dumps({'version': 10, 'key': 'key', 'pages': []}))
     assert load_charts(path, 'key') is None
+
+
+def test_interrupted_save_preserves_previous_cache(tmp_path, monkeypatch):
+    from lightmapper import charts
+
+    path = tmp_path / 'charts.npz'
+    charts.save_charts(path, [OutPage(8, 16, [])], 'old')
+
+    def interrupted(stream, **arrays):
+        stream.write(b'partial zip')
+        raise OSError('interrupted')
+
+    monkeypatch.setattr(charts.np, 'savez', interrupted)
+    with pytest.raises(OSError, match='interrupted'):
+        charts.save_charts(path, [OutPage(32, 64, [])], 'new')
+    result = charts.load_charts(path, 'old')
+    assert [(p.width, p.height) for p in result] == [(8, 16)]
+    assert list(tmp_path.iterdir()) == [path]
+
+
+@pytest.mark.parametrize('damage', ['truncated', 'bad_json', 'missing_array'])
+def test_corrupt_cache_is_a_miss(tmp_path, damage):
+    from lightmapper import charts
+
+    path = tmp_path / 'charts.npz'
+    if damage == 'truncated':
+        charts.save_charts(path, [OutPage(8, 16, [])], 'key')
+        path.write_bytes(path.read_bytes()[:40])
+    elif damage == 'bad_json':
+        np.savez(path, meta='not json')
+    else:
+        np.savez(path, meta=json.dumps({'version': charts.CACHE_VERSION, 'key': 'key', 'pages': [[8, 16, 1]]}))
+    assert charts.load_charts(path, 'key') is None

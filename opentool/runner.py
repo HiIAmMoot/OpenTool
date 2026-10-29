@@ -49,7 +49,7 @@ def default_work(bsp: str) -> Path:
 
 
 def chart_cache_path(tags: Path, scenario: str, bsp: str) -> Path:
-    digest = hashlib.sha256(f'{tags}|{scenario}|{bsp}'.encode()).hexdigest()[:16]
+    digest = hashlib.sha256(f'{Path(tags).resolve()}|{scenario}|{bsp}'.encode()).hexdigest()[:16]
     return Path(tempfile.gettempdir()) / 'halo_lightmapper' / 'charts' / f'{digest}.npz'
 
 

@@ -11,7 +11,10 @@ from dataclasses import dataclass
 import json
 import logging
 import math
+import os
 from pathlib import Path
+import tempfile
+from zipfile import BadZipFile
 
 import numpy as np
 from scipy.sparse import coo_matrix
@@ -37,27 +40,37 @@ def save_charts(path: Path, pages: list[OutPage], key: str):
             for name, dtype in [('group', np.int32), ('env', ENV), ('lm', LM),
                                 ('tris', np.uint16), ('surface_ids', np.int32)]:
                 arrays[prefix + name] = np.asarray(getattr(material, name), dtype=dtype)
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    # passing a stream keeps the caller's exact filename, even without .npz
-    with Path(path).open('wb') as stream:
-        np.savez(stream, **arrays)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        # the old cache stays readable until a complete archive replaces it; close before replacing on Windows.
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=path.name + '.', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            np.savez(stream, **arrays)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def load_charts(path: Path, key: str) -> list[OutPage] | None:
-    if not Path(path).is_file():
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            meta = json.loads(str(data['meta']))
+            if meta['version'] != CACHE_VERSION or meta['key'] != key:
+                return None
+            pages = []
+            for i, (width, height, count) in enumerate(meta['pages']):
+                materials = []
+                for j in range(count):
+                    prefix = f'p{i}_m{j}_'
+                    materials.append(OutMaterial(int(data[prefix + 'group']),
+                        *(data[prefix + name].copy() for name in ('env', 'lm', 'tris', 'surface_ids'))))
+                pages.append(OutPage(width, height, materials))
+    except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
+        # an interrupted or damaged cache is disposable; gather and charts can rebuild it.
         return None
-    with np.load(path, allow_pickle=False) as data:
-        meta = json.loads(str(data['meta']))
-        if meta['version'] != CACHE_VERSION or meta['key'] != key:
-            return None
-        pages = []
-        for i, (width, height, count) in enumerate(meta['pages']):
-            materials = []
-            for j in range(count):
-                prefix = f'p{i}_m{j}_'
-                materials.append(OutMaterial(int(data[prefix + 'group']),
-                    *(data[prefix + name].copy() for name in ('env', 'lm', 'tris', 'surface_ids'))))
-            pages.append(OutPage(width, height, materials))
     return pages
 
 

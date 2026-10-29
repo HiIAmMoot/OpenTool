@@ -9,6 +9,9 @@ tk = pytest.importorskip('tkinter')
 from test_pipeline import tiny
 from lightmapper.blender_find import Blender, BlenderNotFound
 from lightmapper.gpu import Adapter, DeviceError
+from lightmapper.charts import CapError
+from lightmapper.memory import SceneCounts, out_of_memory_message
+from lightmapper.pipeline import SceneEstimate
 from opentool.app import App
 from opentool.devices import result_line
 from opentool.runner import BakeOutcome
@@ -16,6 +19,10 @@ from opentool import app as app_module
 from opentool import presets
 from opentool import usersettings
 from opentool import form as form_module
+from opentool import errors, runner
+
+
+ESTIMATE_FITS = SceneEstimate(SceneCounts(2, 4), [(8, 16)])
 
 
 @pytest.fixture(scope='module')
@@ -47,6 +54,7 @@ def make_app(tmp_path, monkeypatch, request, tk_root):
             lambda remembered=None: Blender(Path('C:/b/blender.exe'), (5, 2)),
         )
         kwargs.setdefault('probe_gpu', lambda: ([RTX], None))
+        kwargs.setdefault('estimate', lambda _inputs: ESTIMATE_FITS)
         app = App(
             root,
             store_path=store_path,
@@ -369,6 +377,7 @@ def test_rejected_pick_does_not_discard_discovery(make_app, monkeypatch, tmp_pat
     tags, *_ = tiny
     (tags / 'globals').mkdir()
     app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.memory_label['text'].startswith('Needs about'))
     assert app.blender.version == (5, 2) and str(app.bake_button['state']) == 'normal'
 
 
@@ -432,7 +441,8 @@ def ready_app(app, tiny):
     (tags / 'globals').mkdir()
     app.set_tags(str(tags))
     app.set_scenario_file(tags / 'level.scenario')
-    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None
+         and app.memory_label['text'].startswith('Needs about'))
     app.new_names_var.set(True)
     return app
 
@@ -1057,3 +1067,276 @@ def test_saved_density_outside_the_list_is_kept_as_a_custom_entry(tmp_path, tiny
     assert app.request().settings.texels_per_unit == 3.0
     app.advanced_vars['texels_per_unit'].set('8')
     assert '3' not in tuple(entry['values'])
+
+
+class BlockingEstimate:
+    def __init__(self):
+        self.calls = []
+        self.gates = [threading.Event() for _ in range(10)]
+        self.results = [ESTIMATE_FITS] * 10
+        self.active = 0
+        self.maximum_active = 0
+        self.threads = []
+
+    def __call__(self, inputs):
+        index = len(self.calls)
+        self.active += 1
+        self.maximum_active = max(self.maximum_active, self.active)
+        self.threads.append(threading.current_thread())
+        self.calls.append(inputs)
+        try:
+            assert self.gates[index].wait(10), 'test did not release estimate'
+            result = self.results[index]
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        finally:
+            self.active -= 1
+
+
+@pytest.fixture
+def app_with_fake(make_app):
+    fake = BlockingEstimate()
+    app = make_app(estimate=fake)
+    yield app, fake
+    for gate in fake.gates:
+        gate.set()
+    for thread in fake.threads:
+        thread.join(5)
+    app._drain()
+
+
+@pytest.fixture
+def ready_app_with_fake(app_with_fake, tiny):
+    app, fake = app_with_fake
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: len(fake.calls) == 1)
+    fake.gates[0].set()
+    pump(app.root, lambda: app.memory_label['text'].startswith('Needs about') and app.blender is not None)
+    return app, fake
+
+
+def finish_estimate(app, fake, index=1):
+    pump(app.root, lambda: len(fake.calls) > index)
+    fake.gates[index].set()
+    pump(app.root, lambda: app.estimate_state != 'calculating')
+
+
+def test_selection_starts_an_estimate_and_greys_out_bake(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app.advanced_vars['page_max'].set('1024')
+    assert app.memory_label['text'] == 'Calculating…'
+    assert str(app.bake_button['state']) == 'disabled'
+    finish_estimate(app, fake)
+    assert fake.calls[1].page_max == 1024
+    assert fake.threads[1] is not threading.main_thread()
+    assert app.memory_label['text'].startswith('Needs about')
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_two_quick_selections_show_only_the_last_result(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: None)
+    fake.results[1] = SceneEstimate(SceneCounts(2, 4), [(1024, 1024)])
+    fake.results[2] = SceneEstimate(SceneCounts(2, 4), [(2048, 2048)])
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    app.advanced_vars['page_max'].set('2048')
+    assert len(fake.calls) == 2
+    fake.gates[1].set()
+    pump(app.root, lambda: len(fake.calls) == 3)
+    assert app.memory_label['text'] == 'Calculating…'
+    fake.gates[2].set()
+    pump(app.root, lambda: app.estimate_state == 'fits')
+    assert app.memory_label['text'] == 'Needs about 12 GB'
+    assert [c.page_max for c in fake.calls] == [512, 1024, 2048]
+    assert fake.maximum_active == 1
+
+
+def test_stale_estimate_is_ignored(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    previous = (app.memory_label['text'], app.estimate_state, str(app.bake_button['state']))
+    app.events.put(('estimate', app.generation - 1, fake.calls[0], CapError('old')))
+    app._drain()
+    assert (app.memory_label['text'], app.estimate_state, str(app.bake_button['state'])) == previous
+
+
+def test_non_chart_field_starts_no_estimate(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    previous = app.memory_label['text'], app.estimate_state
+    app.advanced_vars['samples'].set('512')
+    app.advanced_vars['vertex_rays'].set('8192')
+    app.device_var.set('CPU only')
+    app._update_device_hint()
+    app.root.update()
+    assert len(fake.calls) == 1
+    assert (app.memory_label['text'], app.estimate_state) == previous
+
+
+def test_incomplete_form_starts_no_estimate(app_with_fake, tiny, monkeypatch):
+    app, fake = app_with_fake
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    monkeypatch.setattr(form_module, 'list_bsps', lambda *_: ['room', 'other'])
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    app.root.update()
+    assert fake.calls == []
+    assert app.estimate_inputs() is None
+    assert app.memory_label['text'] == '' and app.estimate_state == 'idle'
+    app.bsp_var.set('other')
+    app._inputs_changed()
+    pump(app.root, lambda: len(fake.calls) == 1)
+    assert fake.calls[0].bsp == 'other'
+
+
+def test_bake_disabled_when_the_level_will_not_fit(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: 1)
+    app.advanced_vars['page_max'].set('1024')
+    finish_estimate(app, fake)
+    assert app.memory_label['text'] == out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, 1024, 1)
+    assert app.estimate_state == 'refused'
+    assert str(app.bake_button['state']) == 'disabled'
+
+
+def check_estimate_error(ready_app_with_fake, exc, state, button):
+    app, fake = ready_app_with_fake
+    fake.results[1] = exc
+    app.advanced_vars['page_max'].set('1024')
+    finish_estimate(app, fake)
+    assert app.memory_label['text'] == errors.explain(exc)
+    assert app.estimate_state == state
+    assert str(app.bake_button['state']) == button
+    assert str(exc) in app.log_path.read_text()
+
+
+def test_cap_error_disables_bake(ready_app_with_fake):
+    check_estimate_error(ready_app_with_fake, CapError('cap'), 'refused', 'disabled')
+
+
+def test_estimate_error_leaves_bake_enabled(ready_app_with_fake):
+    check_estimate_error(ready_app_with_fake, RuntimeError('broken'), 'error', 'normal')
+
+
+def test_free_memory_is_read_when_the_result_is_shown(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    reads = []
+    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: reads.append(1) or None)
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    app.advanced_vars['page_max'].set('2048')
+    assert reads == []
+    fake.gates[1].set()
+    pump(app.root, lambda: len(fake.calls) == 3)
+    assert reads == []
+    finish_estimate(app, fake, 2)
+    assert reads == [1]
+    assert app.memory_label['text'] == 'Needs about 0.0 GB'
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_bake_request_uses_the_estimates_chart_cache(ready_app):
+    req = ready_app.request()
+    assert req.charts == runner.chart_cache_path(req.tags, req.scenario, req.bsp)
+
+
+def test_unchanged_estimate_inputs_do_not_restart(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    generation = app.generation
+    app._inputs_changed()
+    app.advanced_vars['texels_per_unit'].set('2.0')
+    app.set_scenario_file(app._scenario_file)
+    app.set_tags(str(app._tags))
+    assert app.generation == generation
+    assert len(fake.calls) == 1 and app.estimate_state == 'fits'
+
+
+def test_density_selection_and_preset_trigger_estimates(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app.advanced_vars['texels_per_unit'].set('8')
+    finish_estimate(app, fake)
+    assert fake.calls[1].texels_per_unit == 8
+    app._select_preset('Draft')
+    finish_estimate(app, fake, 2)
+    assert fake.calls[2].texels_per_unit == 1
+
+
+@pytest.mark.parametrize('field, value', [('texels_per_unit', ''), ('texels_per_unit', 'bad'),
+                                         ('page_max', ''), ('page_max', 'bad')])
+def test_invalid_chart_inputs_clear_estimate(ready_app_with_fake, field, value):
+    app, fake = ready_app_with_fake
+    app.advanced_vars[field].set(value)
+    assert app.estimate_inputs() is None
+    assert app.memory_label['text'] == '' and app.estimate_state == 'idle'
+    assert len(fake.calls) == 1
+
+
+def test_cleared_scenario_discards_running_and_waiting_estimates(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    app.advanced_vars['page_max'].set('2048')
+    app._clear_scenario()
+    fake.gates[1].set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert app.memory_label['text'] == '' and app.estimate_state == 'idle'
+    assert len(fake.calls) == 2
+    assert str(app.bake_button['state']) == 'disabled'
+
+
+def test_replacing_tags_invalidates_running_estimate(ready_app_with_fake, tmp_path):
+    app, fake = ready_app_with_fake
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    tags = tmp_path / 'other_tags'
+    (tags / 'globals').mkdir(parents=True)
+    app.set_tags(str(tags))
+    fake.gates[1].set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert app.memory_label['text'] == '' and app.estimate_state == 'idle'
+    assert len(fake.calls) == 2
+
+
+def test_only_newest_waiting_selection_runs(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: len(fake.calls) == 2)
+    app.advanced_vars['page_max'].set('2048')
+    app.advanced_vars['page_max'].set('4096')
+    fake.gates[1].set()
+    pump(app.root, lambda: len(fake.calls) == 3)
+    assert [c.page_max for c in fake.calls] == [512, 1024, 4096]
+    finish_estimate(app, fake, 2)
+    assert fake.maximum_active == 1
+
+
+def test_no_estimate_during_or_after_bake(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app.busy = True
+    generation, text = app.generation, app.memory_label['text']
+    app.advanced_vars['page_max'].set('1024')
+    assert app.generation == generation and len(fake.calls) == 1
+    app._bake_done(OUTCOME_DONE)
+    app._drain()
+    assert len(fake.calls) == 1 and app.memory_label['text'] == text
+
+
+def test_estimate_worker_does_not_capture_app(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    targets = []
+
+    class UnstartedThread:
+        def __init__(self, *, target, **_kwargs):
+            targets.append(target)
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(app_module.threading, 'Thread', UnstartedThread)
+    app.advanced_vars['page_max'].set('1024')
+    assert len(targets) == 1
+    assert all(cell.cell_contents is not app for cell in targets[0].__closure__ or ())
