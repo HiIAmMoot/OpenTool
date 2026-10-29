@@ -45,6 +45,23 @@ The layout is saved in `charts.npz`, together with a key made from the input BSP
 - Shader base maps are decoded from bitmap tags (`textures.py`, `formats/bitmap_decode.py`). They give the colour that light picks up when it bounces, the alpha for cut-outs such as grates, and the tint of glass.
 - Sun lamps carry the list of receivers each may light. BSP shader emission and, by default, scenery shader emission also light the scene. BSP default-lighting fields are not read.
 
+Each placement's model is first moved by the scenery tag's origin offset, then turned and placed, as the game does. A physics tag's centre-of-mass shift is not applied; none of the 251 stock scenery tags references a physics tag.
+
+The bake does not read these scenery flags and fields:
+
+| Flag or field | Why the bake ignores it |
+|---|---|
+| does not cast shadow | the engine reads it only for dynamic shadow maps; tool's bake ignores it, and scenery shadows bake regardless (Reclaimers Library) |
+| transparent self occlusion | an extra render pass only |
+| brighter than it should be | brightens the object's own lighting sample in game, not the lightmap |
+| not a pathfinding obstacle | AI pathfinding only |
+| extension of parent | unused |
+| cast shadow by default (H1A) | forces dynamic shadows on static objects; does not stop lightmapped shadows |
+| does not have anniversary geometry (H1A) | anniversary graphics only; the bake uses the classic geometry |
+| bounding offset | bounds only; never moves the model |
+
+Skipping shadows for "does not cast shadow" would make the bake diverge from tool.
+
 These are written into the work folder as `job.json`, `scene.npz` and `textures.npz` (`blender_job.py`).
 
 ## 4. Rendering in Blender
