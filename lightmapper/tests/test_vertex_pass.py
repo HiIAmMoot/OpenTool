@@ -30,7 +30,7 @@ def wall_facing_minus_x(x=3.0, emission=(0, 0, 0), lm=FULL_UV):
 def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, textures=None, query=((2, 2, 0),),
                normal=(0, 0, 1), cls=0, pages=None, probes=None, rays=64, normals=None, seed=0, inverse=None,
                   sun_facing=False, albedo_fallback=0.5, ignore_normals=None, texel=None, texel_samples=None,
-                  fast_path=False, mode='tool', bounces=1, texel_pages=None, texel_normals=None):
+                  fast_path=False, mode='tool', bounces=1, texel_pages=None, texel_normals=None, texel_xy=None):
     scene = dataclasses.replace(
         build(receivers, occluders), query_pos=np.float32(query), query_inverse=inverse,
         query_normal=np.float32(normals if normals is not None else [normal] * len(query)), query_class=np.int16([cls] * len(query)))
@@ -49,6 +49,8 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                                     texel_xy=np.tile(np.indices((3, 3))[::-1].reshape(2, -1).T, (2, 1)).astype(np.int32))
     if texel_normals is not None:
         scene = dataclasses.replace(scene, texel_normal=np.float32(texel_normals))
+    if texel_xy is not None:
+        scene = dataclasses.replace(scene, texel_xy=np.int32(texel_xy))
     settings = dataclasses.replace(S, vertex_rays=rays, seed=0 if seed is None else seed,
                                    albedo_fallback=albedo_fallback, ignore_normals_mode=mode, bounces=bounces)
     if texel is not None:
@@ -75,6 +77,64 @@ def run_driver(tmp_path, receivers, suns=(), occluders=(), ambient=None, texture
                           stdin=subprocess.DEVNULL)
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
     return np.load(tmp_path / ('sun_facing.npz' if sun_facing else 'probe.npz' if probes is not None else 'vp.npz'))
+
+
+# one texel shared by a flagged sheet (its two left sub-texel columns) and an ordinary one (the right column)
+FLAGGED_THIRDS = [(0, 0), (2 / 3, 0), (2 / 3, 1), (0, 1)]
+ORDINARY_THIRD = [(2 / 3, 0), (1, 0), (1, 1), (2 / 3, 1)]
+FLAGGED_XY = [(x, y) for y in range(3) for x in range(2)]
+WHOLE_XY = [(x, y) for y in range(3) for x in range(3)]
+
+
+def mixed_scene(kind):
+    """A third flagged receiver (page 1, nine samples) above sheets that share page 0's one texel six to three."""
+    if kind in ('mixed_dark_flagged', 'mixed_bright_flagged'):
+        bright = kind == 'mixed_bright_flagged'
+        receivers = [dict(quad=floor(-1000, 1000, -1000, 1000, lm=FLAGGED_THIRDS), ignore_normals=True),
+                     dict(quad=floor(990, 991, 990, 991, z=-5, up=False, lm=ORDINARY_THIRD)),
+                     dict(quad=floor(-.1, .1, -.1, .1, z=1), ignore_normals=True, page=1)]
+        return dict(receivers=receivers, occluders=[dict(quad=floor(-1, 1, -1, 1, z=2))],
+                    suns=[sun()] if bright else [], query=((0, 0, 0),), normal=(0, 0, 0), rays=1024,
+                    texel=[(5, 0, 0)] * 6 + [(0, 0, 1)] * 9, texel_pages=[0] * 6 + [1] * 9,
+                    texel_xy=FLAGGED_XY + WHOLE_XY,
+                    pages=[np.full((1, 1, 3), 0. if bright else 1 / 3, np.float32), np.zeros((1, 1, 3), np.float32)])
+    if kind in ('mixed_delta', 'mixed_ordinary'):
+        # the flagged sheet takes a stage-zero delta from the ordinary floor below; the receiver sees only the
+        # ordinary sheet's top
+        receivers = [dict(quad=floor(-1000, 1000, -1000, 1000, z=-1), page=2),
+                     dict(quad=floor(-1000, 1000, -1000, 1000, lm=FLAGGED_THIRDS), ignore_normals=True),
+                     dict(quad=floor(-1000, 1000, -1000, 1000, z=2, lm=ORDINARY_THIRD)),
+                     dict(quad=floor(-.1, .1, -.1, .1, z=3), ignore_normals=True, page=1)]
+        return dict(receivers=receivers, query=((0, 0, 0),), normal=(0, 0, 0), rays=1024,
+                    bounces=2 if kind == 'mixed_delta' else 1,
+                    texel=[(0, 0, 0)] * 6 + [(0, 0, 3)] * 9, texel_pages=[0] * 6 + [1] * 9,
+                    texel_xy=FLAGGED_XY + WHOLE_XY,
+                    pages=[np.full((1, 1, 3), 0. if kind == 'mixed_delta' else 1 / 3, np.float32),
+                           np.zeros((1, 1, 3), np.float32), np.ones((1, 1, 3), np.float32)])
+    raise ValueError(kind)
+
+
+def assert_mixed(kind, rgb):
+    receiver = rgb[6:]
+    if kind == 'mixed_dark_flagged':
+        # the ordinary third's light is not the dark flagged sheet's
+        np.testing.assert_array_equal(receiver, 0)
+    elif kind == 'mixed_bright_flagged':
+        # half the sphere sees the flagged sheet's own 3 / pi at albedo .5, not its 6 / 9 share of the texel
+        np.testing.assert_allclose(receiver, 3 / np.pi, rtol=.05)
+    elif kind == 'mixed_delta':
+        assert rgb[:6].min() > .5
+        np.testing.assert_array_equal(receiver, 0)
+    else:
+        # the ordinary third's own light (1), not a third of it
+        np.testing.assert_allclose(receiver, 1, rtol=.05)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['mixed_dark_flagged', 'mixed_bright_flagged', 'mixed_delta', 'mixed_ordinary'])
+def test_reflected_stages_read_each_surface_its_own_light_in_a_mixed_texel(tmp_path, kind):
+    out = run_driver(tmp_path, **mixed_scene(kind))
+    assert_mixed(kind, out['texel_rgb'])
 
 
 def texel_scene(kind):

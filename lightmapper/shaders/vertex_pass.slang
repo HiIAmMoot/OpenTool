@@ -14,6 +14,7 @@ LUMA arrive as defines from vertex_gpu.py.
 #define FLAG_CASTS 2
 #define FLAG_GLOWS 4
 #define FLAG_RECEIVER 8
+#define FLAG_IGNORE_NORMALS 16
 
 RaytracingAccelerationStructure world;
 /* texture id, flags, page, class */
@@ -31,6 +32,9 @@ StructuredBuffer<int4> texture_info;
 StructuredBuffer<float4> texture_texels;
 StructuredBuffer<int4> page_info;
 StructuredBuffer<float3> page_texels;
+/* the flagged samples' own light at sub-texels, as page_info and page_texels */
+StructuredBuffer<int4> flagged_info;
+StructuredBuffer<float3> flagged_texels;
 /* indexed by class + 1 */
 StructuredBuffer<float3> ambient;
 
@@ -40,6 +44,8 @@ uniform int ambient_rows;
 uniform bool with_ambient;
 uniform bool with_pages;
 uniform bool with_emission;
+/* flagged hits read flagged_texels in place of page_texels */
+uniform bool with_flagged_source;
 
 /* ---------- gather inputs and outputs */
 
@@ -115,6 +121,14 @@ float3 page_at(int id, float2 uv)
     return top * (1 - fy) + bottom * fy;
 }
 
+/* the nearest sub-texel, as the cpu pass reads the flagged sources */
+float3 flagged_at(int id, float2 uv)
+{
+    int4 info = flagged_info[id];
+    int x = clamp((int)floor(uv.x * info.y), 0, info.y - 1), y = clamp((int)floor(uv.y * info.z), 0, info.z - 1);
+    return flagged_texels[info.x + y * info.y + x];
+}
+
 float alpha_at(int tri, float2 bary)
 {
     return texture_at(tri_info[tri].x, interpolate(vertex_tex_uv, tri, weights_of(bary))).a;
@@ -140,10 +154,15 @@ float3 shade_rgb(int tri, float2 bary, float3 dir, int cls)
     if (!receiver(tri))
         return albedo * (with_ambient ? ambient_of(cls) : float3(0.0))
             + tri_emission[tri] * (with_emission && facing ? 1.0 : 0.0);
-    if (!facing && (tri_info[tri].y & 16) == 0)
+    bool flagged = (tri_info[tri].y & FLAG_IGNORE_NORMALS) != 0;
+    if (!facing && !flagged)
         return float3(0.0);
     int page = tri_info[tri].z;
-    float3 lit = with_pages && page >= 0 ? page_at(page, interpolate(vertex_lm_uv, tri, w)) : float3(0.0);
+    float3 lit = float3(0.0);
+    if (with_pages && page >= 0) {
+        float2 lm = interpolate(vertex_lm_uv, tri, w);
+        lit = with_flagged_source && flagged ? flagged_at(page, lm) : page_at(page, lm);
+    }
     return albedo * (lit + (with_ambient && facing ? ambient_of(tri_info[tri].w) : float3(0.0)))
         + tri_emission[tri] * (with_emission && facing ? 1.0 : 0.0);
 }

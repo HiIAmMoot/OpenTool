@@ -19,7 +19,7 @@ from test_blender_bake import CORNERS_UV, UP, build, floor, full_quad, quad, sun
 from test_vertex_pass import (AMBIENT, FULL_UV, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene,
                               roof, run_driver, twin_scene, ignore_normals_sun_scene, ignore_normals_emitter_scene,
                               unpaired_back_face_scene, wall_facing_minus_x, sun_throughput_scene, texel_scene,
-                              assert_flagged_bounce)
+                              assert_flagged_bounce, mixed_scene, assert_mixed)
 
 
 def test_hemisphere_and_frames_are_the_cpu_pass_formulas():
@@ -57,6 +57,25 @@ def test_gather_sums_equal_the_per_ray_sum():
     vector, irradiance = gather_sums(lum, phi, r, local[:, 2], n, t, b, spin)
     np.testing.assert_allclose(vector, np.pi / rays * (lum[:, :, None] * dirs).sum(1), rtol=0, atol=1e-12)
     np.testing.assert_allclose(irradiance, np.pi / rays * lum.sum(1), rtol=0, atol=1e-12)
+
+
+def test_flagged_subtexels_reach_one_texel_and_match_the_cpu_copy():
+    from lightmapper import raster
+    source = vertex_gpu.SHADERS.parent / 'blender' / 'bake.py'
+    tree = ast.parse(source.read_text())
+    wanted = [node for node in tree.body if (isinstance(node, ast.FunctionDef) and node.name == 'flagged_subtexels')
+              or (isinstance(node, ast.Assign) and getattr(node.targets[0], 'id', None) == 'FLAGGED_REACH')]
+    namespace = {'np': np}
+    exec(compile(ast.Module(wanted, []), str(source), 'exec'), namespace)
+    assert namespace['FLAGGED_REACH'] == raster.FLAGGED_REACH == 3
+    rng = np.random.default_rng(3)
+    cells = rng.choice(30 * 24, 12, replace=False)
+    xy = np.stack([cells % 24, cells // 24], axis=1)
+    rgb = rng.random((12, 3)).astype(np.float32)
+    np.testing.assert_array_equal(raster.flagged_subtexels((30, 24), xy, rgb),
+                                  namespace['flagged_subtexels']((30, 24), xy, rgb))
+    one = raster.flagged_subtexels((1, 9), np.int32([[0, 0]]), np.float32([[1, 2, 3]]))
+    np.testing.assert_array_equal(one[0, :, 0], [1, 1, 1, 1, 0, 0, 0, 0, 0])
 
 
 def test_sphere_is_the_cpu_pass_formula():
@@ -181,6 +200,14 @@ def test_ordinary_gpu_queries_omit_unused_throughput(tmp_path, vendor, mode):
 def test_flagged_stage_budget_matches_cpu(tmp_path, vendor, bounces):
     cpu, result = cpu_and_gpu(tmp_path, vendor, **texel_scene('flagged_bounce'), bounces=bounces)
     assert_flagged_bounce(result.texel_rgb, bounces)
+    np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['mixed_dark_flagged', 'mixed_bright_flagged', 'mixed_delta', 'mixed_ordinary'])
+def test_mixed_texel_sources_match_cpu(tmp_path, vendor, kind):
+    cpu, result = cpu_and_gpu(tmp_path, vendor, **mixed_scene(kind))
+    assert_mixed(kind, result.texel_rgb)
     np.testing.assert_allclose(result.texel_rgb, cpu['texel_rgb'], rtol=1e-5, atol=1e-6)
 
 

@@ -200,8 +200,9 @@ def _read(device, buffer, dtype):
     return buffer.to_numpy().view(dtype)
 
 
-def _scene_arrays(scene, textures, pages, enhanced=False):
-    """The triangles of the receivers then the occluders as the arrays the shader reads (one triangle id space)."""
+def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
+    """The triangles of the receivers then the occluders as the arrays the shader reads (one triangle id space);
+    flagged_pages, when given, are what flagged hits read in place of pages (a None entry reads black)."""
     n_vertices = len(scene['positions'])
     n_recv, n_occ = len(scene['tris']), len(scene['occ_tris'])
     positions = np.concatenate([scene['positions'], scene['occ_positions']]).astype(np.float64)
@@ -220,6 +221,9 @@ def _scene_arrays(scene, textures, pages, enhanced=False):
                      np.concatenate([scene['tri_page'], np.full(n_occ, -1)]), class_of], axis=1)
     texels = [(np.asarray(t, np.float32) / 255.0).reshape(-1, 4) for t in textures]
     page_texels = [np.asarray(p, np.float32).reshape(-1, 3) for p in pages]
+    flagged = [np.zeros((1, 1, 3), np.float32) if p is None else np.asarray(p, np.float32)
+               for p in (flagged_pages or [])]
+    flagged_texels = [p.reshape(-1, 3) for p in flagged]
 
     def table(images, flat):
         offsets = np.cumsum([0] + [len(a) for a in flat])[:len(flat)]
@@ -233,7 +237,10 @@ def _scene_arrays(scene, textures, pages, enhanced=False):
         lm_uv=np.concatenate([scene['lm_uv'], np.zeros((len(scene['occ_positions']), 2))]),
         texture_info=table(textures, texels), texture_texels=np.concatenate(texels) if texels else np.empty((0, 4)),
         page_info=table(pages, page_texels),
-        page_texels=np.concatenate(page_texels) if page_texels else np.empty((0, 3)))
+        page_texels=np.concatenate(page_texels) if page_texels else np.empty((0, 3)),
+        flagged_info=table(flagged, flagged_texels),
+        flagged_texels=np.concatenate(flagged_texels) if flagged_texels else np.empty((0, 3)),
+        with_flagged_source=flagged_pages is not None)
 
 
 def _build_world(device, vertices, indices, vertex_count, index_count):
@@ -313,6 +320,9 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
             texture_texels=_upload(device, arrays['texture_texels'], np.float32),
             page_info=_upload(device, arrays['page_info'], np.int32),
             page_texels=_upload(device, arrays['page_texels'], np.float32),
+            flagged_info=_upload(device, arrays['flagged_info'], np.int32),
+            flagged_texels=_upload(device, arrays['flagged_texels'], np.float32),
+            with_flagged_source=arrays['with_flagged_source'],
             ambient=_upload(device, table, np.float32), ambient_rows=len(table), with_ambient=not rgb,
             with_pages=job.get('gather_pages', True), with_emission=job.get('gather_emission', True),
             albedo_scale=float(job['albedo_scale']), albedo_fallback=float(job['albedo_fallback']))
@@ -421,7 +431,7 @@ def _gather_texels(scene, job, textures, pages, device):
     rgb = np.zeros((count, 3), np.float32)
     if not count:
         return rgb, 0, pages
-    from .raster import texel_contribution
+    from .raster import flagged_transport, ordinary_transport, texel_contribution
     usable, n, *_ = query_frames(scene['texel_normal'], job.get('seed', 0))
     probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
                  query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
@@ -438,21 +448,27 @@ def _gather_texels(scene, job, textures, pages, device):
     def install(base, values):
         return [p + texel_contribution(scene, i, p.shape[1], p.shape[0], values)[0] for i, p in enumerate(base)]
 
-    stable = install(pages, rgb)
+    def flagged(values):
+        return [flagged_transport(scene, i, p.shape[1], p.shape[0], values) for i, p in enumerate(pages)]
+
+    # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
+    # the ordinary samples', as blender/bake.py's gather_texels)
+    stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
     casts = len(query)
     # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
     # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
     budget = max(0, int(job['bounces']))
     for stage in range(max(1, budget)):
         delta, rays = _gather_texel_reflection(scene, dict(job, gather_pages=budget > 0,
-                                                          gather_emission=stage == 0), textures, stable, device)
+                                                          gather_emission=stage == 0), textures, stable, device,
+                                               sources)
         rgb += delta
         casts += rays
-        stable = install([np.zeros_like(p) for p in pages], delta)
+        stable, sources = [np.zeros_like(p) for p in pages], flagged(delta)
     return rgb, casts, install(pages, rgb)
 
 
-def _gather_texel_reflection(scene, job, textures, pages, device):
+def _gather_texel_reflection(scene, job, textures, pages, device, flagged_pages):
     count = len(scene['texel_pos'])
     rgb = np.zeros((count, 3), np.float32)
     from .raster import texel_ray_counts
@@ -460,7 +476,7 @@ def _gather_texel_reflection(scene, job, textures, pages, device):
     usable, n, t, b, spin = query_frames(scene['texel_normal'], job.get('seed', 0))
     ids = np.flatnonzero(usable)
     counts = texel_ray_counts(scene, job['pages'], rays, job['texel_samples'])
-    arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced')
+    arrays = _scene_arrays(scene, textures, pages, job.get('ignore_normals_mode') == 'enhanced', flagged_pages)
     # black class ambients keep the page gather free of the ambient finish_pages adds later
     table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
     def reduce(rows, value, hemi, solid_angle):

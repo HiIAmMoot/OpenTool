@@ -62,6 +62,51 @@ def flagged_source(scene, page, width, height, rgb):
     return source
 
 
+# (copies of blender/bake.py's, which cannot be imported here; a test holds them equal)
+FLAGGED_REACH = 3
+
+
+def flagged_subtexels(shape, xy, rgb):
+    """Each flagged sample's light at its own sub-texel, spread outward to the sub-texels FLAGGED_REACH steps away
+    that no sample holds."""
+    height, width = shape
+    source = np.zeros((height, width, 3), np.float32)
+    filled = np.zeros((height, width), bool)
+    source[xy[:, 1], xy[:, 0]] = rgb
+    filled[xy[:, 1], xy[:, 0]] = True
+    for _ in range(FLAGGED_REACH):
+        padded, padded_filled = np.pad(source, ((1, 1), (1, 1), (0, 0))), np.pad(filled, 1)
+        grown, grown_filled = source.copy(), filled.copy()
+        for dy, dx in ((0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            near = padded_filled[1 + dy:1 + dy + height, 1 + dx:1 + dx + width] & ~grown_filled
+            grown[near] = padded[1 + dy:1 + dy + height, 1 + dx:1 + dx + width][near]
+            grown_filled |= near
+        source, filled = grown, grown_filled
+    return source
+
+
+def flagged_transport(scene, page, width, height, rgb):
+    """The flagged samples' own light at sub-texels for the reflected stages, or None on a page without them."""
+    chosen = scene['texel_page'] == page
+    if not chosen.any():
+        return None
+    return flagged_subtexels((3 * height, 3 * width), scene['texel_xy'][chosen], rgb[chosen])
+
+
+def ordinary_transport(scene, page, base):
+    """The baked page over its ordinary sub-texels alone (the flagged ones bake black)."""
+    height, width = base.shape[:2]
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    owned = (owner >= 0).reshape(height, 3, width, 3).sum(axis=(1, 3))
+    xy = scene['texel_xy'][scene['texel_page'] == page] // 3
+    flagged = np.zeros((height, width), np.int64)
+    np.add.at(flagged, (xy[:, 1], xy[:, 0]), 1)
+    ordinary = owned - flagged
+    scale = np.where(flagged > 0, owned / np.maximum(ordinary, 1) * (ordinary > 0), 1.0)
+    return base * scale[:, :, None]
+
+
 def texel_ray_counts(scene, pages, base, target):
     counts = np.full(len(scene['texel_pos']), base, np.int64)
     if target <= 0:

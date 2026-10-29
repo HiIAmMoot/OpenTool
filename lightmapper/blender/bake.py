@@ -676,6 +676,30 @@ def sample_bilinear(image, u, v, repeat):
     return top * (1 - fy) + bottom * fy
 
 
+# a hit's own sub-texel can belong to an ordinary neighbour or the padding, so a flagged hit reads the nearest
+# flagged sample within this many sub-texels (one texel), and nothing beyond
+FLAGGED_REACH = 3
+
+
+def flagged_subtexels(shape, xy, rgb):
+    """Each flagged sample's light at its own sub-texel, spread outward to the sub-texels FLAGGED_REACH steps away
+    that no sample holds; vertex_gpu's copy (raster.py) must stay identical."""
+    height, width = shape
+    source = np.zeros((height, width, 3), np.float32)
+    filled = np.zeros((height, width), bool)
+    source[xy[:, 1], xy[:, 0]] = rgb
+    filled[xy[:, 1], xy[:, 0]] = True
+    for _ in range(FLAGGED_REACH):
+        padded, padded_filled = np.pad(source, ((1, 1), (1, 1), (0, 0))), np.pad(filled, 1)
+        grown, grown_filled = source.copy(), filled.copy()
+        for dy, dx in ((0, -1), (0, 1), (-1, 0), (1, 0), (-1, -1), (-1, 1), (1, -1), (1, 1)):
+            near = padded_filled[1 + dy:1 + dy + height, 1 + dx:1 + dx + width] & ~grown_filled
+            grown[near] = padded[1 + dy:1 + dy + height, 1 + dx:1 + dx + width][near]
+            grown_filled |= near
+        source, filled = grown, grown_filled
+    return source
+
+
 def radical_inverse(i):
     result, scale = 0.0, 0.5
     while i:
@@ -717,6 +741,8 @@ class VertexPass:
         self.scene = scene
         self.job = job
         self.pages = [np.asarray(p, np.float64) for p in pages]
+        # per page, the flagged samples' own light that the reflected stages read on flagged hits (None outside them)
+        self.flagged_pages = None
         self.textures = [np.asarray(t, np.float32) / 255.0 for t in textures]
         classes = [int(k) for k in job['ambient']] + [int(scene['query_class'].max(initial=0)),
                                                       int(self.class_of.max(initial=0))]
@@ -820,6 +846,16 @@ class VertexPass:
             for k in np.unique(self.page_of[ft]) if with_pages else ():
                 rows = self.page_of[ft] == k
                 page_value[rows] = sample_bilinear(self.pages[k], lm[rows, 0], lm[rows, 1], False)
+                if self.flagged_pages is not None and self.two_sided is not None:
+                    rows &= self.two_sided[ft]
+                    source = self.flagged_pages[k]
+                    if source is None:
+                        page_value[rows] = 0
+                    else:
+                        h, w = source.shape[:2]
+                        x = np.clip(np.floor(lm[rows, 0] * w).astype(np.int64), 0, w - 1)
+                        y = np.clip(np.floor(lm[rows, 1] * h).astype(np.int64), 0, h - 1)
+                        page_value[rows] = source[y, x]
             if self.two_sided is None:
                 colour = albedo[front] * (page_value + (self.ambient_of(self.class_of[ft])
                                                        if with_ambient else 0)) + (self.emission[ft] if with_emission else 0)
@@ -977,7 +1013,9 @@ class VertexPass:
                 if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
                     self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
         base, total = self.pages, self.texel_rgb.copy()
-        self.pages = self.install_texels(base, total)
+        # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
+        # the ordinary samples', or light would cross between surfaces that merely share a texel)
+        self.pages, self.flagged_pages = self.ordinary_sources(base), self.flagged_sources(self.texel_rgb)
         # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
         # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
         budget = max(0, int(job['bounces']))
@@ -985,10 +1023,41 @@ class VertexPass:
             casts += self.gather_texel_reflection(with_pages=budget > 0, with_emission=stage == 0)
             total += self.texel_rgb
             # only the new stage travels again; the ordinary pages and original emission are consumed once
-            self.pages = self.install_texels([np.zeros_like(p) for p in base], self.texel_rgb)
+            self.pages = [np.zeros_like(p) for p in base]
+            self.flagged_pages = self.flagged_sources(self.texel_rgb)
         self.texel_rgb = total
-        self.pages = self.install_texels(base, total)
+        self.pages, self.flagged_pages = self.install_texels(base, total), None
         return casts
+
+    def owned(self, page, w, h):
+        """How many of each texel's sub-texels a receiver owns, and how many of those hold a flagged sample."""
+        scene = self.scene
+        owned = receiver_diffuse_scale(scene, page, w, h, coverage=True)[::-1] >= 0
+        owned = owned.reshape(h, 3, w, 3).sum(axis=(1, 3))
+        xy = scene['texel_xy'][scene['texel_page'] == page] // 3
+        flagged = np.zeros((h, w), np.int64)
+        np.add.at(flagged, (xy[:, 1], xy[:, 0]), 1)
+        return owned, flagged
+
+    def ordinary_sources(self, base):
+        """The baked pages over their ordinary sub-texels alone (the flagged ones bake black)."""
+        pages = []
+        for page, value in enumerate(base):
+            h, w = value.shape[:2]
+            owned, flagged = self.owned(page, w, h)
+            ordinary = owned - flagged
+            scale = np.where(flagged > 0, owned / np.maximum(ordinary, 1) * (ordinary > 0), 1.0)
+            pages.append(value * scale[:, :, None])
+        return pages
+
+    def flagged_sources(self, rgb):
+        scene = self.scene
+        sources = []
+        for page, value in enumerate(self.pages):
+            rows = scene['texel_page'] == page
+            sources.append(flagged_subtexels((3 * value.shape[0], 3 * value.shape[1]), scene['texel_xy'][rows],
+                                             rgb[rows]) if rows.any() else None)
+        return sources
 
     def gather_texel_reflection(self, with_pages=True, with_emission=True):
         scene, job = self.scene, self.job
