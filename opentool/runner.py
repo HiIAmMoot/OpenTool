@@ -124,6 +124,10 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         try:
             if follower is not None:
                 follower.stop(); follower.join(); follower = None
+            if stage.startswith('lamp batch '):
+                # (a sub-step of the blender stage: the app has no stage of its own for it)
+                safe_emit(('status', f'Baking {stage}'))
+                return
             safe_emit(('stage', stage))
             if stage == 'blender':
                 try:

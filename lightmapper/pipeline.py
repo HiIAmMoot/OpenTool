@@ -7,7 +7,7 @@ Ignore-normals pages take their direct sun from RGB corner throughputs, with no 
 their two-closure diffuse share before averaging sub-texels, keeping the vertex pass's diffuse page unchanged.
 """
 
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from typing import Callable
 import hashlib
@@ -20,7 +20,7 @@ from time import perf_counter
 import numpy as np
 
 from . import cpu_vertex_job, gpu, memory, vertex_gpu
-from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
+from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
 from .formats.bitmap import write_bitmap
@@ -336,6 +336,23 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         warning = 'cycles fell back to the CPU'
         logger.warning('%s', warning)
         warnings.append(warning)
+
+    main_job = json.loads((work / 'job.json').read_text())
+    batches = 1 + max((light['batch'] for light in main_job['lights']), default=0)
+    if batches > 1:
+        # (the vertex passes read the pages: they must come after every batch, and a pass inside the main run would miss
+        # the bounce of the others)
+        assert main_job['vertex_pass'] == 'skip'
+        for k in range(1, batches):
+            begin(f'lamp batch {k} of {batches - 1}')
+            added, added_diffuse, written = run_blender_lamp_batch(work, s, k)
+            if any(not np.array_equal(a, b) for a, b in zip(written, result.written)):
+                warning = f'lamp batch {k} wrote other texels than the main bake'
+                logger.warning('%s', warning)
+                warnings.append(warning)
+            result = replace(result, pages=[a + b for a, b in zip(result.pages, added)],
+                             diffuse_pages=[a + b for a, b in zip(result.diffuse_pages, added_diffuse)])
+        stage('blender_lamp_batches')
 
     def cpu_pass():
         if s.cpu_vertex_backend == 'blender':

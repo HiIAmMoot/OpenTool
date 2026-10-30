@@ -300,6 +300,19 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                             np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
 
 
+def run_blender_lamp_batch(work: Path, s: Settings, batch: int):
+    work = Path(work)
+    job = json.loads((work / 'job.json').read_text())
+    job.update(lamps_only=True, lamp_batch=batch, suns=[], ambient={}, vertex_pass='skip', out=f'lamps_{batch}_out.npz')
+    (work / f'job_lamps_{batch}.json').write_text(json.dumps(job, indent=2))
+    _, out = _run_blender(work, s, f'job_lamps_{batch}.json', f'blender_lamps_{batch}.log')
+    count = len(job['pages'])
+    with np.load(out) as data:
+        return ([np.array(data[f'page_{i}'], np.float32) for i in range(count)],
+                [np.array(data[f'diffuse_{i}'], np.float32) for i in range(count)],
+                [np.array(data[f'written_{i}'], np.bool_) for i in range(count)])
+
+
 def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) -> VertexPassResult:
     work = Path(work)
     np.savez(work / 'diffuse.npz', **{f'diffuse_{i}': p for i, p in enumerate(pages)})

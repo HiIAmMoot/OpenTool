@@ -38,6 +38,8 @@ PASS_LIMIT = 8
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
 SEED_STRIDE = 1000
+# a lamp batch's bake takes its own noise: summed batches sharing a seed would share their noise
+LAMP_BATCH_SEED_STEP = 100
 SEED_SPIN = 0.7548776662466927
 # queries per batch: bounds the hit arrays held before they are shaded
 QUERY_CHUNK = 256
@@ -99,7 +101,7 @@ def setup_scene(job):
     job.update(cpu_counts(job, device))
     log(f'samples {job["samples"]}, texel samples {job["texel_samples"]}')
     cycles.samples = max(1, round(job['samples'] / 9))
-    cycles.seed = job.get('seed', 0) * SEED_STRIDE
+    cycles.seed = job.get('seed', 0) * SEED_STRIDE + LAMP_BATCH_SEED_STEP * job.get('lamp_batch', 0)
     log(f'cycles seed {cycles.seed}')
     cycles.max_bounces = cycles.diffuse_bounces = job['bounces']
     cycles.glossy_bounces = cycles.transmission_bounces = cycles.volume_bounces = 0
@@ -767,6 +769,8 @@ def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
     if mask_image is not None:
         diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned_subsamples(raw), image, mask_image,
                                                buffer, h, w, job, diffuse_scale)
+    if job.get('lamps_only'):
+        return corrected[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
     clear_page(image, buffer)
     bpy.ops.object.bake(type='EMIT', margin=0, use_clear=False, target='IMAGE_TEXTURES')
     # (the glow run's emitters are the flagged receivers, whose own texels the gather has already filled)
@@ -1274,9 +1278,11 @@ def main():
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
                                                         job['texel_samples'] > 0)
         glow_images = []
-        if job.get('glow'):
+        # (a lamps-only run adds to pages that already hold the emission)
+        if job.get('glow') or job.get('lamps_only'):
             scene_data['tri_emission'] = np.zeros_like(scene_data['tri_emission'])
             scene_data['occ_tri_emission'] = np.zeros_like(scene_data['occ_tri_emission'])
+        if job.get('glow'):
             with np.load(os.path.join(root, job['glow_pages'])) as data:
                 for i in range(len(job['pages'])):
                     source = data[f'page_{i}']
@@ -1288,7 +1294,8 @@ def main():
                     image.pixels.foreach_set(rgba.ravel())
                     glow_images.append(image)
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)
-        add_suns(job, receivers, occluders)
+        if not job.get('lamps_only'):
+            add_suns(job, receivers, occluders)
         add_lamps(job, receivers, occluders, job.get('lamp_batch', 0))
         out['seconds_scene'] = np.float64(time.perf_counter() - scene_started)
         diffuse_pages = []

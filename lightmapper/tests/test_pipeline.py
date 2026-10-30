@@ -1678,3 +1678,87 @@ def test_bake_hands_the_lights_to_the_job(tiny, monkeypatch):
     api().bake(tags, 'level', 'room', settings, work=work)
     job = json.loads((work / 'job.json').read_text())
     assert [(l['owner'], l['batch']) for l in job['lights']] == [(4, 0)]
+
+
+def lamps_of_owners(count):
+    return [scenery_lamp(owner, 0.1 * owner) for owner in range(count)]
+
+
+def many_lamps(monkeypatch, count):
+    monkeypatch.setattr(api(), 'scene_lights', lambda *args: (lamps_of_owners(count), {'baked': count}))
+
+
+def batch_runs(monkeypatch, extra=None):
+    calls = []
+
+    def batch(work, s, k):
+        calls.append(k)
+        job = json.loads((work / 'job.json').read_text())
+        pages = [np.full((h, w, 3), k, np.float32) for w, h in job['pages']]
+        return pages, pages, [np.ones((h, w), bool) for w, h in job['pages']]
+
+    monkeypatch.setattr(api(), 'run_blender_lamp_batch', extra or batch)
+    return calls
+
+
+def test_more_lamp_owners_than_link_sets_are_batched_not_refused(tiny, fake, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 70)
+    seen = []
+    api().bake(tags, 'level', 'room', replace(settings, blender=fake), work=work, progress=seen.append)
+    job = json.loads((work / 'job.json').read_text())
+    assert sorted({l['batch'] for l in job['lights']}) == [0, 1]
+    assert (work / 'lamps_1_out.npz').is_file() and not (work / 'lamps_2_out.npz').exists()
+    assert 'lamp batch 1 of 1' in seen
+    assert 'blender_lamp_batches' in json.loads((work / 'summary.json').read_text())['seconds']
+
+
+def test_lamp_batches_reach_the_vertex_pass_pages(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 70)
+    batch_runs(monkeypatch)
+    passed = []
+    vertex_pass = vertex_cpu.run_in_child
+
+    def record(work, pages, timeout):
+        passed.append(pages)
+        return vertex_pass(work, pages, timeout)
+
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', record)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert len(passed) == 1 and all((page == 1).all() for page in passed[0])
+
+
+def test_one_batch_launches_no_extra_run(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 62)
+    calls = batch_runs(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert calls == []
+
+
+def test_a_batch_that_writes_other_texels_warns(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 70)
+
+    def batch(work, s, k):
+        job = json.loads((work / 'job.json').read_text())
+        pages = [np.zeros((h, w, 3), np.float32) for w, h in job['pages']]
+        return pages, pages, [np.zeros((h, w), bool) for w, h in job['pages']]
+
+    batch_runs(monkeypatch, batch)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert any('lamp batch 1' in w for w in json.loads((work / 'summary.json').read_text())['warnings'])
+
+
+def test_batch_runs_keep_their_own_log_and_seed(tiny, fake, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 70)
+    seen = []
+    api().bake(tags, 'level', 'room', replace(settings, blender=fake), work=work, progress=seen.append)
+    job = json.loads((work / 'job_lamps_1.json').read_text())
+    assert (job['lamp_batch'], job['lamps_only'], job['suns'], job['ambient'], job['vertex_pass'], job['out']) == (
+        1, True, [], {}, 'skip', 'lamps_1_out.npz')
+    assert 'lamp_batch' not in json.loads((work / 'job.json').read_text())
+    assert (work / 'blender_lamps_1.log').is_file() and not (work / 'blender.log').exists()
+    assert 'lamp batch 1 of 1' in seen

@@ -1553,3 +1553,19 @@ def test_describe_failure_ends_calculating_and_enables_bake(ready_app_with_fake,
     assert app.memory_label['text'] == 'The bake stopped: description failed. The full error is in the log.'
     assert str(app.bake_button['state']) == 'normal'
     assert 'RuntimeError: description failed' in app.log_path.read_text()
+
+
+def test_status_event_sets_the_stage_label(ready_app):
+    gate = threading.Event()
+
+    def fake(req, emit):
+        emit(('stage', 'blender'))
+        emit(('status', 'Baking lamp batch 1 of 2'))
+        gate.wait(5)
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: ready_app.stage_label.cget('text') == 'Baking lamp batch 1 of 2')
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)

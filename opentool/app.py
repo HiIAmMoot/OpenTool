@@ -713,6 +713,9 @@ class App:
                 if not self.close_after_write:
                     self.stage_label.configure(text=STAGE_LABELS[event[1]])
                 self.progress['value'] = fraction(event[1]) * 1000
+            elif event[0] == 'status':
+                if not self.close_after_write:
+                    self.stage_label.configure(text=event[1])
             elif event[0] == 'pages':
                 _, done, total = event
                 if not self.close_after_write:

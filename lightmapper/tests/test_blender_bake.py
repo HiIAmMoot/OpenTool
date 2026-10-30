@@ -1043,3 +1043,33 @@ def test_link_budget_guard(tmp_path, blender_exe):
     out = run_lamp_objects_driver(tmp_path / 'over', blender_exe, [full_quad()], walls(63), list(range(63)),
                                   lamps(63), edit_job=one_batch)
     assert '64 shadow' in out['error']
+
+
+@pytest.mark.blender
+def test_batched_lamps_equal_one_batch(tmp_path, monkeypatch):
+    from lightmapper import blender_job
+    boxes = [dict(quad=q) for n in range(3) for q in box_faces((1.5 + 2 * n, 0.5, 0.2), (2.0 + 2 * n, 1.0, 0.7))]
+    owners = [n for n in range(3) for _ in range(6)]
+    lights = [replace(lamp_light((1.75 + 2 * n, 3, 2.5)), owner=n) for n in range(3)]
+    suns = [sun((1, 1, 2), strength=1.0)]
+    s = Settings(**{**LAMP_SETTINGS, 'samples': 1024, 'bounces': 1})
+    receivers = [dict(quad=floor(0, 8, 0, 8))]
+    scene = owned_scene(receivers, boxes, owners)
+
+    def run(name, seed=0, per_batch=None):
+        root = tmp_path / name
+        t = replace(s, seed=seed)
+        with monkeypatch.context() as patch:
+            if per_batch:
+                patch.setattr(blender_job, 'lamp_batches', lambda owners, suns: [[o] for o in dict.fromkeys(owners)])
+            write_job(root, scene, [(LAMP_PAGE, LAMP_PAGE)], suns, {}, t, 'all', lights=lights)
+        total = run_blender(root, t).pages[0]
+        if per_batch:
+            for k in (1, 2):
+                total = total + blender_job.run_blender_lamp_batch(root, t, k)[0][0]
+        return total
+
+    one, other, batched = run('one'), run('other', seed=1), run('batched', per_batch=True)
+    assert batched.mean() == pytest.approx(one.mean(), rel=0.02)
+    noise = (one - other).std()
+    assert (np.abs(batched - one) < 3 * noise).mean() > 0.97

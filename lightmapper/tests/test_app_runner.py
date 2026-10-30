@@ -371,3 +371,12 @@ def test_summary_without_all_three_devices_leaves_devices_empty(tiny, monkeypatc
     monkeypatch.setattr(runner.pipeline, 'bake', bake_then_cut)
     out, _ = run(tiny)
     assert out.status == 'done' and out.devices is None and out.warnings == []
+
+
+def test_lamp_batch_stages_reach_the_status_line_not_the_stage_list(tiny, monkeypatch):
+    from test_pipeline import batch_runs, many_lamps
+    many_lamps(monkeypatch, 70)
+    batch_runs(monkeypatch)
+    _, events = run(tiny)
+    assert ('status', 'Baking lamp batch 1 of 1') in events
+    assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write', 'validate']
