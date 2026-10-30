@@ -94,8 +94,11 @@ def test_variant_number_from_name_digits():
     assert [scenery.variant_number(p) for p in reg.block('permutations')] == [0, 12, 7, 70000 - 65536]
 
 
-def write_model(tags, name, lods, shaders=(('shdr', 'a'),), scale=(2.0, 3.0)):
-    """lods: geometry index -> list of (positions, strip) parts; the permutation uses them in order."""
+def write_model(tags, name, lods, shaders=(('shdr', 'a'),), scale=(2.0, 3.0), nodes=None, markers=None):
+    """lods: geometry index -> list of (positions, strip) parts; the permutation uses them in order.
+
+    nodes: (parent, translation, quaternion) each. markers: (region, permutation name, marker name, node,
+    translation, quaternion) each; a region has one permutation per distinct name used for it."""
     model = new_tag('mod2')
     root = model.root
     root.set('base_map_u_scale', scale[0])
@@ -103,8 +106,17 @@ def write_model(tags, name, lods, shaders=(('shdr', 'a'),), scale=(2.0, 3.0)):
     for group, path in shaders:
         shader = add(root, 'shaders')
         shader.set_reference('shader', group, path)
-    reg = add(root, 'regions')
-    perm = add(reg, 'permutations', permutation_number=0)
+    for parent, translation, rotation in nodes or ():
+        add(root, 'nodes', parent_node=parent, default_translation=translation, default_rotation=rotation)
+    slots = list(dict.fromkeys((m[0], m[1]) for m in markers or ())) or [(0, '')]
+    perms = {}
+    for region_index in range(max(r for r, _ in slots) + 1):
+        reg = add(root, 'regions')
+        for slot in (s for s in slots if s[0] == region_index):
+            perms[slot] = add(reg, 'permutations', name=slot[1].encode(), permutation_number=0)
+    for region_index, perm_name, marker_name, node, translation, rotation in markers or ():
+        add(perms[(region_index, perm_name)], 'markers', name=marker_name.encode(), node_index=node,
+            translation=translation, rotation=rotation)
     for i, parts in enumerate(lods):
         geo = add(root, 'geometries')
         for shader_index, positions, strip in parts:
@@ -115,8 +127,9 @@ def write_model(tags, name, lods, shaders=(('shdr', 'a'),), scale=(2.0, 3.0)):
             for j in range(0, len(padded), 3):
                 add(part, 'triangle_data', indices=padded[j], indices_1=padded[j + 1],
                     indices_2=padded[j + 2])
-    perm.set('super_low', 0)
-    perm.set('super_high', len(lods) - 1)
+    for perm in perms.values():
+        perm.set('super_low', 0)
+        perm.set('super_high', len(lods) - 1)
     write_tag(model, tags / (name + '.gbxmodel'))
 
 

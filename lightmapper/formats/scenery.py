@@ -3,8 +3,13 @@
 The shadow casters are the highest-detail gbxmodel parts, as the player sees
 them, never the collision model. Vertices are already in the default pose, so
 a static placement needs only its own transform and node weights are ignored.
+
+A light attached to a scenery sits on a model marker. A marker is a rotation and translation on a
+node, so its model-space frame is its node's chain of default poses composed with it, and it turns
+with the placement like the geometry does. Each region's chosen permutation brings its own markers.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 import logging
 import math
@@ -15,6 +20,7 @@ import struct
 import numpy as np
 
 from ..tagio.tagfile import Element, Tag, read_tag, resolve_reference_path
+from .lights import SceneLight, bakes, read_light, scene_light
 
 
 logger = logging.getLogger(__name__)
@@ -30,6 +36,13 @@ class Occluders:
     uv: np.ndarray
     tri_shader: np.ndarray
     shaders: list[tuple[str, str, float, float]]
+    tri_owner: np.ndarray
+
+
+@dataclass
+class ModelMarkers:
+    node0: np.ndarray
+    named: dict[str, np.ndarray]
 
 
 @dataclass
@@ -39,12 +52,23 @@ class ModelGeometry:
     uv: np.ndarray
     tri_shader: np.ndarray
     shaders: list[tuple[str, str, float, float]]
+    markers: ModelMarkers | None = None
 
 
 @dataclass
 class SceneryDefinition:
     origin_offset: np.ndarray
     model: tuple[str, str]
+    lights: tuple[tuple[str, str], ...] = ()
+
+
+@dataclass
+class Placement:
+    index: int
+    position: np.ndarray
+    rotation: tuple
+    definition: SceneryDefinition
+    desired: int
 
 
 def decode_strip(indices: np.ndarray) -> np.ndarray:
@@ -67,6 +91,67 @@ def placement_rotation(yaw: float, pitch: float, roll: float) -> np.ndarray:
         [cy * cp, sy * cr - cy * sp * sr, cy * sp * cr + sy * sr],
         [-(sy * cp), sy * sp * sr + cy * cr, cy * sr - sy * sp * cr],
         [-sp, -(cp * sr), cp * cr]])
+
+
+def quaternion_matrix(q) -> np.ndarray:
+    # columns forward, left, up; the engine turns the opposite way to the textbook quaternion matrix
+    x, y, z, w = (float(v) for v in q)
+    return np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]]).T
+
+
+def _frame(rotation, translation) -> np.ndarray:
+    return np.hstack([quaternion_matrix(rotation), np.asarray(translation, np.float64).reshape(3, 1)])
+
+
+def _compose(outer: np.ndarray, inner: np.ndarray) -> np.ndarray:
+    return np.hstack([outer[:, :3] @ inner[:, :3], outer[:, :3] @ inner[:, 3:] + outer[:, 3:]])
+
+
+def _node_frames(nodes) -> list[np.ndarray | None]:
+    frames: list[np.ndarray | None] = [None] * len(nodes)
+
+    def frame(index: int, depth: int = 0) -> np.ndarray | None:
+        # (a parent loop in a bad tag ends at the depth bound instead of recursing forever)
+        if frames[index] is None and depth <= len(nodes):
+            node = nodes[index]
+            local = _frame(node.get('default_rotation'), node.get('default_translation'))
+            parent = node.get('parent_node')
+            if 0 <= parent < len(nodes) and parent != index:
+                above = frame(parent, depth + 1)
+                local = _compose(above, local) if above is not None else local
+            frames[index] = local
+        return frames[index]
+
+    for index in range(len(nodes)):
+        frame(index)
+    return frames
+
+
+def model_markers(root: Element, picks: list[tuple[Element, int]]) -> ModelMarkers:
+    frames = _node_frames(root.block('nodes'))
+    named: dict[str, np.ndarray] = {}
+    for region, pick in picks:
+        permutations = region.block('permutations')
+        if not 0 <= pick < len(permutations):
+            continue
+        for marker in permutations[pick].block('markers'):
+            node = marker.get('node_index')
+            if not 0 <= node < len(frames) or frames[node] is None:
+                continue
+            name = marker.get('name').split(b'\0')[0].decode('ascii', 'replace').lower()
+            named.setdefault(name, _compose(frames[node], _frame(marker.get('rotation'), marker.get('translation'))))
+    return ModelMarkers(frames[0] if frames else np.hstack([np.eye(3), np.zeros((3, 1))]), named)
+
+
+def marker_frame(markers: ModelMarkers, name: str) -> tuple[np.ndarray, np.ndarray, bool]:
+    # an empty name asks for node 0 and an unknown one falls back to it (the caller says which)
+    frame = markers.named.get(name.lower()) if name else None
+    found = frame is not None or not name
+    frame = markers.node0 if frame is None else frame
+    return frame[:, 3], frame[:, 0], found
 
 
 def variant_number(permutation: Element) -> int:
@@ -149,7 +234,8 @@ def model_geometry(model: Tag, desired: int) -> ModelGeometry:
     regions = list(root.block('regions'))
     if desired > 0 and not any(variant_number(p) == desired for r in regions for p in r.block('permutations')):
         logger.warning('no permutation is numbered %d, the model falls back to its default', desired)
-    for region, pick in zip(regions, choose_permutations(regions, desired)):
+    picks = choose_permutations(regions, desired)
+    for region, pick in zip(regions, picks):
         permutations = region.block('permutations')
         if not permutations:
             continue
@@ -175,7 +261,8 @@ def model_geometry(model: Tag, desired: int) -> ModelGeometry:
         np.concatenate(positions) if positions else np.zeros((0, 3), np.float32),
         np.concatenate(tris).astype(np.int32) if tris else np.zeros((0, 3), np.int32),
         np.concatenate(uvs) if uvs else np.zeros((0, 2), np.float32),
-        np.concatenate(tri_shader) if tri_shader else np.zeros(0, np.int32), shaders)
+        np.concatenate(tri_shader) if tri_shader else np.zeros(0, np.int32), shaders,
+        model_markers(root, list(zip(regions, picks))))
 
 
 def _load_scenery(tags_root: Path, path: str, cache: dict) -> SceneryDefinition | None:
@@ -193,7 +280,12 @@ def _load_scenery(tags_root: Path, path: str, cache: dict) -> SceneryDefinition 
         origin_offset = np.array(root.get('origin_offset'), np.float64)
         # shared by every placement of the scenery, so no one may change it in place
         origin_offset.setflags(write=False)
-        cache[path] = SceneryDefinition(origin_offset, (model_group, model_path))
+        lights = []
+        for attachment in root.block('attachments'):
+            group, light = attachment.reference('type')
+            if group == 'ligh' and light:
+                lights.append((light, attachment.get('marker').split(b'\0')[0].decode('ascii', 'replace')))
+        cache[path] = SceneryDefinition(origin_offset, (model_group, model_path), tuple(lights))
     return cache[path]
 
 
@@ -213,30 +305,40 @@ def _load_model(tags_root: Path, model: tuple[str, str], desired: int, cache: di
     return cache[key]
 
 
-def iter_placed(scenario: Tag, tags_root: Path, bsp_index: int):
+def iter_placements(scenario: Tag, tags_root: Path, bsp_index: int, cache: dict | None = None) -> Iterator[Placement]:
     palette = scenario.root.block('scenery_palette')
-    scenery_cache, model_cache = {}, {}
-    for placement in scenario.root.block('scenery'):
+    # one dict serves both loaders: scenery paths are strings and model keys are tuples
+    cache = {} if cache is None else cache
+    for index, placement in enumerate(scenario.root.block('scenery')):
         if placement.get('placement.not_placed') & NOT_PLACED_AUTOMATICALLY:
             continue
         mask = placement.get('bsp_indices')
         # a zero mask is every BSP: all placements of the stock levels carry it and are in play
         if mask and not mask >> bsp_index & 1:
             continue
-        index = placement.get('type')
-        if not 0 <= index < len(palette):
+        type_index = placement.get('type')
+        if not 0 <= type_index < len(palette):
             continue
-        group, path = palette[index].reference('name')
+        group, path = palette[type_index].reference('name')
         if group != 'scen' or not path:
             continue
-        definition = _load_scenery(tags_root, path, scenery_cache)
+        definition = _load_scenery(tags_root, path, cache)
         if definition is None:
             continue
-        desired = placement.get('placement.desired_permutation')
-        geometry = _load_model(tags_root, definition.model, desired, model_cache)
+        yield Placement(index, np.array(placement.get('placement.position'), np.float64),
+                        placement.get('placement.rotation'), definition,
+                        placement.get('placement.desired_permutation'))
+
+
+def iter_placed(scenario: Tag, tags_root: Path, bsp_index: int, owners: list[int] | None = None):
+    # owners, when given, collects the scenario index of each placement yielded
+    cache = {}
+    for placement in iter_placements(scenario, tags_root, bsp_index, cache):
+        geometry = _load_model(tags_root, placement.definition.model, placement.desired, cache)
         if geometry is not None and len(geometry.tris):
-            yield (np.array(placement.get('placement.position'), np.float64),
-                   placement.get('placement.rotation'), definition.origin_offset, geometry)
+            if owners is not None:
+                owners.append(placement.index)
+            yield (placement.position, placement.rotation, placement.definition.origin_offset, geometry)
 
 
 def world_positions(geometry: ModelGeometry, position: np.ndarray, rotation, origin_offset: np.ndarray) -> np.ndarray:
@@ -247,18 +349,58 @@ def world_positions(geometry: ModelGeometry, position: np.ndarray, rotation, ori
 
 
 def gather_occluders(scenario: Tag, tags_root: Path, bsp_index: int) -> Occluders:
-    positions, uvs, tris, tri_shader = [], [], [], []
+    positions, uvs, tris, tri_shader, tri_owner = [], [], [], [], []
     remap: dict[tuple, int] = {}
     base = 0
-    for position, rotation, origin_offset, geometry in iter_placed(scenario, tags_root, bsp_index):
+    owners: list[int] = []
+    for position, rotation, origin_offset, geometry in iter_placed(scenario, tags_root, bsp_index, owners):
         local = np.array([remap.setdefault(s, len(remap)) for s in geometry.shaders], np.int32)
         positions.append(world_positions(geometry, position, rotation, origin_offset))
         uvs.append(geometry.uv)
         tris.append(geometry.tris + base)
         tri_shader.append(local[geometry.tri_shader])
+        tri_owner.append(np.full(len(geometry.tris), owners[len(tris) - 1], np.int32))
         base += len(geometry.positions)
     if not tris:
         return Occluders(np.zeros((0, 3), np.float32), np.zeros((0, 3), np.int32),
-                         np.zeros((0, 2), np.float32), np.zeros(0, np.int32), [])
+                         np.zeros((0, 2), np.float32), np.zeros(0, np.int32), [], np.zeros(0, np.int32))
     return Occluders(np.concatenate(positions), np.concatenate(tris).astype(np.int32),
-                     np.concatenate(uvs), np.concatenate(tri_shader).astype(np.int32), list(remap))
+                     np.concatenate(uvs), np.concatenate(tri_shader).astype(np.int32), list(remap),
+                     np.concatenate(tri_owner))
+
+
+def gather_lights(scenario: Tag, tags_root: Path, bsp_index: int) -> tuple[list[SceneLight], dict[str, int]]:
+    counts = dict.fromkeys(('attached', 'dynamic', 'dark', 'missing_light', 'missing_model',
+                            'missing_marker', 'placed'), 0)
+    lights: list[SceneLight] = []
+    cache, light_cache, warned = {}, {}, set()
+    for placement in iter_placements(scenario, tags_root, bsp_index, cache):
+        for light_path, marker in placement.definition.lights:
+            counts['attached'] += 1
+            definition = read_light(tags_root, light_path, light_cache)
+            if definition is None:
+                counts['missing_light'] += 1
+                continue
+            if definition.dynamic:
+                counts['dynamic'] += 1
+                continue
+            if not bakes(definition):
+                counts['dark'] += 1
+                continue
+            geometry = _load_model(tags_root, placement.definition.model, placement.desired, cache)
+            if geometry is None:
+                counts['missing_model'] += 1
+                continue
+            position, forward, found = marker_frame(geometry.markers, marker)
+            if not found:
+                counts['missing_marker'] += 1
+                if (placement.definition.model, marker) not in warned:
+                    warned.add((placement.definition.model, marker))
+                    logger.warning('model %s has no marker %r, its light sits on node 0',
+                                   placement.definition.model[1], marker)
+            rotation = placement_rotation(*placement.rotation)
+            lights.append(scene_light(
+                definition, (position + placement.definition.origin_offset) @ rotation + placement.position,
+                forward @ rotation, placement.index, light_path))
+            counts['placed'] += 1
+    return lights, counts
