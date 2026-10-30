@@ -395,6 +395,9 @@ def blender_and_numba(tmp_path, **kwargs):
                           'median_rel': float(np.median(rel)) if rel.size else 0.0}
     metrics['sun_lit_equal'] = np.array_equal(ours.sun_lit, blender['sun_lit'])
     metrics['edge_sun_lit_equal'] = np.array_equal(ours.edge_sun_lit, blender['edge_sun_lit'])
+    if ours.sun_throughput is not None and 'vertex_sun_throughput' in blender.files:
+        diff = np.abs(ours.sun_throughput - blender['vertex_sun_throughput'])
+        metrics['sun_throughput_max_abs'] = float(diff.max(initial=0))
     (tmp_path / 'parity.json').write_text(json.dumps(metrics, indent=2))
     return blender, ours
 
@@ -411,6 +414,42 @@ def assert_parity(blender, ours):
 
 
 ORDINARY = [c for c in CASES if not c.startswith(('ignore_normals', 'sun_throughput'))]
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('case', ['sun_throughput', 'ignore_normals_sun_behind', 'ignore_normals_sun_60',
+                                  'ignore_normals_emitter_behind'])
+def test_numba_matches_blender_pass_on_the_flagged_scenes(tmp_path, case):
+    blender, ours = blender_and_numba(tmp_path, **CASES[case])
+    assert_parity(blender, ours)
+    assert ours.sun_throughput.dtype == np.float32
+    if case == 'sun_throughput':
+        np.testing.assert_allclose(ours.sun_throughput[:, 0],
+                                   [[0.5, 0.25, 1], [0, 0, 0], [0, 0, 0], [1, 1, 1]], rtol=1e-6)
+
+
+@pytest.mark.blender
+def test_ignore_normals_tool_mode_matches(tmp_path):
+    scene = textured_room()
+    scene['ignore_normals'] = [i % 3 == 0 for i in range(64)]
+    blender, ours = blender_and_numba(tmp_path, **scene)
+    rel = np.abs(ours.irradiance - blender['irradiance']) / np.maximum(blender['irradiance'], 1e-6)
+    assert blender['irradiance'].min() > 0
+    assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
+    assert ours.rays == int(blender['rays']) and np.array_equal(ours.sun_lit, blender['sun_lit'])
+    assert ours.sun_lit.any()
+    np.testing.assert_allclose(ours.sun_throughput, blender['vertex_sun_throughput'], rtol=1e-6, atol=1e-6)
+    assert ours.sun_throughput.dtype == np.float32
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_ordinary_queries_omit_unused_throughput(tmp_path, mode):
+    blender, ours = blender_and_numba(tmp_path, receivers=[full_quad()], suns=[sun()], mode=mode)
+    assert_parity(blender, ours)
+    assert ours.irradiance[0] > 0
+    assert ours.sun_throughput is None
+    assert 'vertex_sun_throughput' not in blender.files
 
 
 @pytest.mark.blender
@@ -599,25 +638,25 @@ def test_a_small_chunk_gives_the_same_result(tmp_path, monkeypatch):
                ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit')) and split.rays == whole.rays
 
 
-@pytest.mark.parametrize('field', ['query_ignore_normals', 'texel_pos'])
-def test_flagged_queries_are_refused_until_ported(tmp_path, field):
+def test_texel_queries_are_refused_until_ported(tmp_path):
     pages = write_bare_scene(tmp_path)
     with np.load(tmp_path / 'scene.npz') as data:
         scene = {key: data[key] for key in data.files}
-    scene[field] = np.ones(1, bool) if field == 'query_ignore_normals' else np.ones((1, 3), np.float32)
+    scene['texel_pos'] = np.ones((1, 3), np.float32)
     job = json.loads((tmp_path / 'job.json').read_text())
-    with pytest.raises(vertex_cpu.CpuPassError, match='ignore-normals queries are not in the compiled pass yet'):
+    with pytest.raises(vertex_cpu.CpuPassError, match='texel queries are not in the compiled pass yet'):
         vertex_cpu.run_vertex_pass(scene, job, [], pages)
 
 
-def test_ordinary_pass_at_the_stock_query_limit(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mixed', [False, True])
+def test_pass_at_the_stock_query_limit(tmp_path, monkeypatch, mixed):
     pages = write_bare_scene(tmp_path, triangles=False)
     with np.load(tmp_path / 'scene.npz') as data:
         scene = {key: data[key] for key in data.files}
     count = 393216
     scene.update(query_pos=np.zeros((count, 3), np.float32),
                  query_normal=np.tile(np.float32(UP), (count, 1)), query_class=np.zeros(count, np.int16),
-                 query_ignore_normals=np.zeros(count, bool))
+                 query_ignore_normals=(np.arange(count) % 2 == 0) if mixed else np.zeros(count, bool))
     job = json.loads((tmp_path / 'job.json').read_text())
     job.update(cpu_vertex_rays=8, suns=[])
     job.pop('seed', None)
@@ -636,6 +675,11 @@ def test_ordinary_pass_at_the_stock_query_limit(tmp_path, monkeypatch):
     np.testing.assert_allclose(result.irradiance, np.pi * .2, rtol=1e-6)
     np.testing.assert_array_equal(result.vector[:, :2], 0)
     np.testing.assert_array_equal(result.vector[:, 2], result.irradiance)
+    if mixed:
+        assert result.sun_throughput.shape == (count, 0, 3)
+        assert result.sun_throughput.dtype == np.float32
+    else:
+        assert result.sun_throughput is None
 
 
 def test_gather_rgb_switches_and_inactive_query(tmp_path):

@@ -15,7 +15,7 @@ import numba
 from numba import njit, prange
 import numpy as np
 
-from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sun_rays
+from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sphere, sun_rays
 
 
 # copies keep numba's source-file cache sensitive to changes in ray constants; a test holds them equal to bake.py
@@ -509,8 +509,8 @@ class CpuPassError(RuntimeError):
 
 
 def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> VertexPassResult:
-    if np.any(scene.get('query_ignore_normals', ())) or len(scene.get('texel_pos', ())):
-        raise CpuPassError('ignore-normals queries are not in the compiled pass yet')
+    if len(scene.get('texel_pos', ())):
+        raise CpuPassError('texel queries are not in the compiled pass yet')
     rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
     usable, n, tangent, bitangent, spin = query_frames(scene['query_normal'], job.get('seed', 0))
     queries = len(n)
@@ -519,21 +519,26 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
     cs = cpu_scene(scene, job, textures, pages)
     bvh = build_bvh(cs.corners32)
     sc, bv = cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order)
-    local, phi, radius = hemisphere(rays)
+    ignore_normals = scene.get('query_ignore_normals', np.zeros(queries, bool))
     vector, irradiance = np.zeros((queries, 3)), np.zeros(queries)
     chunk = max(1, CHUNK_RAYS // rays)
-    for first in range(0, queries, chunk):
-        end = min(first + chunk, queries)
-        angle = phi[None, :] + spin[first:end, None]
-        dirs = (radius[None, :, None] * np.cos(angle)[:, :, None] * tangent[first:end, None, :]
-                + radius[None, :, None] * np.sin(angle)[:, :, None] * bitangent[first:end, None, :]
-                + local[None, :, 2, None] * n[first:end, None, :])
-        origins = (pos[first:end, None, :] + RAY_EPSILON * dirs).astype(np.float32)
-        sums = np.empty((end - first, 4))
-        _gather(sc, bv, origins, dirs.astype(np.float32), dirs, cls[first:end], usable[first:end],
-                False, True, True, True, sums)
-        vector[first:end] = np.pi / rays * sums[:, :3]
-        irradiance[first:end] = np.pi / rays * sums[:, 3]
+    for flagged, sample, solid_angle in ((False, hemisphere, np.pi), (True, sphere, 4 * np.pi)):
+        ids = np.flatnonzero(ignore_normals == flagged)
+        if not len(ids):
+            continue
+        local, phi, radius = sample(rays)
+        for first in range(0, len(ids), chunk):
+            rows = ids[first:first + chunk]
+            angle = phi[None, :] + spin[rows, None]
+            dirs = (radius[None, :, None] * np.cos(angle)[:, :, None] * tangent[rows, None, :]
+                    + radius[None, :, None] * np.sin(angle)[:, :, None] * bitangent[rows, None, :]
+                    + local[None, :, 2, None] * n[rows, None, :])
+            origins = (pos[rows, None, :] + RAY_EPSILON * dirs).astype(np.float32)
+            sums = np.empty((len(rows), 4))
+            _gather(sc, bv, origins, dirs.astype(np.float32), dirs, cls[rows], usable[rows],
+                    False, True, True, True, sums)
+            vector[rows] = solid_angle / rays * sums[:, :3]
+            irradiance[rows] = solid_angle / rays * sums[:, 3]
     flat = np.pi * (cs.ambient[cls + 1] @ LUMA) * usable
     vector += flat[:, None] * n
     irradiance += flat
@@ -549,16 +554,21 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
     carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
     _shadow(sc, bv, origins, dirs, np.full(len(origins), RAY_LENGTH), carried, escaped)
     sun_lit = np.zeros((queries, len(suns)), bool)
+    sun_throughput = (np.zeros((queries, len(suns), 3), np.float32)
+                      if ignore_normals.any() and job.get('ignore_normals_mode', 'tool') == 'tool' else None)
     for k, sun in enumerate(suns):
         rows = np.flatnonzero((sun_index == k) & escaped[:len(sun_query)])
         strength = ((np.float64(sun['color']) * carried[rows]) @ LUMA) * float(sun['strength'])
         vector[sun_query[rows]] += (strength * sun_cos[rows])[:, None] * sun_dir[rows]
         irradiance[sun_query[rows]] += strength * sun_cos[rows]
         sun_lit[sun_query[rows], k] = True
+        if sun_throughput is not None:
+            sun_throughput[sun_query[rows], k] = carried[rows]
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
     total = int(usable.sum()) * rays + len(sun_query) + len(edge)
-    return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total)
+    return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
+                          sun_throughput)
 
 
 def load_and_run(work: Path, pages: list) -> VertexPassResult:
