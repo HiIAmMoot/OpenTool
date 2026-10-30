@@ -101,7 +101,7 @@ def _unlit_emitters(tags, geometry, textures):
         if (group, path) not in cache:
             radiosity = read_radiosity(tags, group, path)
             shader = shader_texture(tags, group, path)
-            cache[group, path] = (radiosity, shader, textures.index(shader.albedo) if shader.albedo else -1)
+            cache[group, path] = (radiosity, shader, textures.texture_of(shader))
         radiosity, shader, texture = cache[group, path]
         if radiosity.power <= 0:
             continue
@@ -125,7 +125,7 @@ def _unlit_emitters(tags, geometry, textures):
 def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scenery_emission=True):
     textures = TextureSet(tags)
     shaders = [shader_texture(tags, *group.key[:2]) for group in geometry.groups]
-    texture_ids = [textures.index(shader.albedo) if shader.albedo else -1 for shader in shaders]
+    texture_ids = [textures.texture_of(shader) for shader in shaders]
     envs, lm_uvs, tex_uvs, triangles = [], [], [], []
     tri_pages, tri_classes, shadows, emissions, tex_ids, cutouts, tints = [], [], [], [], [], [], []
     ignore_normals = []
@@ -167,7 +167,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     occluders = gather_occluders(scenario, tags, bsp_index)
     occ_shaders = [shader_texture(tags, group, path, (u, v))
                    for group, path, u, v in occluders.shaders]
-    occ_ids = np.array([textures.index(s.albedo) if s.albedo else -1 for s in occ_shaders], np.int32)
+    occ_ids = np.array([textures.texture_of(s) for s in occ_shaders], np.int32)
     occ_radiosity = {}
     occ_emission = []
     for group, path, _, _ in occluders.shaders:

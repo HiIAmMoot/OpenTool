@@ -10,7 +10,8 @@ from conftest import HCEEK_TAGS as TAGS
 from lightmapper.formats.bitmap_decode import UnsupportedBitmap, decode_bitmap, decode_bitmap_alpha
 from lightmapper.formats.scenery import gather_occluders
 from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
-from lightmapper.textures import TextureSet, shader_texture
+from lightmapper import textures as textures_module
+from lightmapper.textures import TextureSet, compose_cutout, shader_texture, ShaderTexture
 
 
 FORMATS = {'A8': 0, 'Y8': 1, 'AY8': 2, 'A8Y8': 3, 'R5G6B5': 6, 'A1R5G5B5': 8, 'A4R4G4B4': 9,
@@ -313,3 +314,90 @@ def test_bloodgulch_scenery_textures():
     assert any(f.cutout and f.casts_shadow for f in found)
     assert all(textures.index(f.albedo) >= 0 for f in found if f.albedo)
     assert all(f.uv_scale[0] > 0 and f.uv_scale[1] > 0 for f in found)
+
+
+def test_compose_same_size_is_base_colour_with_bump_alpha():
+    colour = np.arange(2 * 3 * 4, dtype=np.uint8).reshape(2, 3, 4)
+    alpha = np.uint8([[0, 128, 255], [7, 8, 9]])
+    out = compose_cutout(colour, alpha, 1)
+    np.testing.assert_array_equal(out[..., :3], colour[..., :3])
+    np.testing.assert_array_equal(out[..., 3], alpha)
+
+
+def test_compose_upsamples_the_smaller_map_with_wrapping():
+    colour = np.zeros((1, 2, 4), np.uint8)
+    colour[0, 1, 0] = 200
+    out = compose_cutout(colour, np.full((2, 4), 77, np.uint8), 1)
+    assert out.shape == (2, 4, 4) and out[0, :, 0].tolist() == [50, 50, 150, 150] and (out[..., 3] == 77).all()
+
+
+def test_compose_whole_number_scale_tiles_the_bump():
+    alpha = np.uint8([[0, 255], [255, 0]])
+    out = compose_cutout(np.zeros((4, 4, 4), np.uint8), alpha, 2)
+    assert out.shape == (4, 4, 4)
+    assert all(out[y, x, 3] == alpha[y % 2, x % 2] for y in range(4) for x in range(4))
+
+
+def test_compose_caps_its_size(monkeypatch):
+    monkeypatch.setattr(textures_module, 'MAX_COMPOSED', 4)
+    assert compose_cutout(np.zeros((1, 1, 4), np.uint8), np.zeros((8, 8), np.uint8), 1).shape == (4, 4, 4)
+
+
+def composed_tags(tmp_path):
+    tags = tmp_path / 'tags'
+    tags.mkdir(exist_ok=True)
+    for name, pixels in (('bm', [3, 2, 1, 9]), ('bm2', [6, 5, 4, 9]), ('bm0', [3, 2, 1, 0]), ('bump', [0, 0, 0, 0])):
+        write_tag(bitmap_tag(1, 1, 'A8R8G8B8', bytes(pixels)), tags / f'{name}.bitmap')
+    write_tag(bitmap_tag(2, 2, 'A8R8G8B8', bytes([0, 0, 0, 0] * 4)), tags / 'bump2.bitmap')
+    return tags
+
+
+def test_composed_texture_is_cached_apart_from_its_base(tmp_path):
+    cut = ShaderTexture('bm', (1., 1.), True, True, 'bump', 1.)
+    textures = TextureSet(composed_tags(tmp_path))
+    assert textures.texture_of(cut) == 0 == textures.texture_of(cut)
+    assert len(textures.arrays()) == 1
+    assert textures.index('bm') == 1
+    assert textures.arrays()[0][0, 0].tolist() == [1, 2, 3, 0] and textures.arrays()[1][0, 0, 3] == 9
+
+
+def test_two_bases_sharing_a_bump_get_their_own_composed_textures(tmp_path):
+    textures = TextureSet(composed_tags(tmp_path))
+    first = textures.texture_of(ShaderTexture('bm', (1., 1.), True, True, 'bump', 1.))
+    second = textures.texture_of(ShaderTexture('bm2', (1., 1.), True, True, 'bump', 1.))
+    assert first != second
+    assert textures.arrays()[first][0, 0].tolist() == [1, 2, 3, 0]
+    assert textures.arrays()[second][0, 0].tolist() == [4, 5, 6, 0]
+
+
+def test_scale_two_composes_at_twice_the_bump_size(tmp_path):
+    textures = TextureSet(composed_tags(tmp_path))
+    found = textures.texture_of(ShaderTexture('bm', (1., 1.), True, True, 'bump2', 2.))
+    assert textures.arrays()[found].shape == (4, 4, 4)
+
+
+def test_capped_size_warns_once(tmp_path, monkeypatch, caplog):
+    monkeypatch.setattr(textures_module, 'MAX_COMPOSED', 1)
+    textures = TextureSet(composed_tags(tmp_path))
+    cut = ShaderTexture('bm', (1., 1.), True, True, 'bump2', 1.)
+    assert textures.texture_of(cut) == textures.texture_of(cut)
+    assert textures.arrays()[0].shape == (1, 1, 4)
+    warned = [r for r in caplog.records if 'capped' in r.message]
+    assert len(warned) == 1 and 'bm' in warned[0].message and 'bump2' in warned[0].message
+
+
+@pytest.mark.parametrize('bump,scale', [('bump', 1.5), ('missing', 1.)])
+def test_unusable_bump_is_solid_and_warns_once(tmp_path, caplog, bump, scale):
+    textures = TextureSet(composed_tags(tmp_path))
+    cut = ShaderTexture('bm0', (1., 1.), True, True, bump, scale)
+    found = textures.texture_of(cut)
+    assert textures.texture_of(cut) == found
+    assert textures.arrays()[found].tolist() == [[[1, 2, 3, 255]]] and len(textures.arrays()) == 1
+    warned = [r for r in caplog.records if 'bm0' in r.message and bump in r.message and 'solid' in r.message]
+    assert len(warned) == 1
+
+
+def test_texture_of_without_an_albedo_is_minus_one(tmp_path):
+    textures = TextureSet(composed_tags(tmp_path))
+    assert textures.texture_of(ShaderTexture(None, (1., 1.), False, False)) == -1
+    assert textures.texture_of(ShaderTexture('missing', (1., 1.), True, True, 'bump', 1.)) == -1

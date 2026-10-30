@@ -1179,14 +1179,14 @@ def rewind_room(tags):
     write_tag(bsp, tags / 'room.scenario_structure_bsp')
 
 
-def add_unlit_quad(tags, shader, z=2.):
+def add_unlit_quad(tags, shader, z=2., group='sotr'):
     """A quad above the tiny room's first triangle, facing down, in the final group as shader. The room's own
     triangles are rewound clockwise relative to their +z normals, as Halo's are, so that they face the quad."""
     rewind_room(tags)
     bsp = read_tag(tags / 'room.scenario_structure_bsp')
     final = bsp.root.block('lightmaps')[-1]
     material = child(final, 'materials')
-    material.set_reference('shader', 'sotr', shader)
+    material.set_reference('shader', group, shader)
     env, lm = np.zeros(4, ENV), np.zeros(0, LM)
     env['position'] = [[0, 0, z], [4, 0, z], [4, 4, z], [0, 4, z]]
     env['normal'] = [0, 0, -1]
@@ -1208,7 +1208,7 @@ def add_unlit_quad(tags, shader, z=2.):
     write_tag(bsp, tags / 'room.scenario_structure_bsp')
 
 
-def scene_of(tags):
+def scene_of(tags, with_textures=False):
     from lightmapper.formats.bsp import read_geometry
     from lightmapper.gather import read_radiosity, surface_classes
 
@@ -1216,7 +1216,8 @@ def scene_of(tags):
     geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
     radiosity = [read_radiosity(tags, *g.key[:2]) for g in geometry.groups]
     classes = surface_classes(geometry, 0)
-    return api()._scene(tags, scenario, 0, geometry, [], radiosity, classes)[0]
+    built = api()._scene(tags, scenario, 0, geometry, [], radiosity, classes)
+    return (built[0], built[2]) if with_textures else built[0]
 
 
 def test_scene_takes_emitters_from_the_unlit_group(tiny):
@@ -1558,3 +1559,85 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
         want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1.]])
     if not emit:
         np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
+
+
+def put_cutout_maps(tags):
+    from test_textures import bitmap_tag
+    put(tags, 'bitm', 'base', bitmap_tag(1, 1, 'A8R8G8B8', bytes([30, 20, 10, 255])))
+    put(tags, 'bitm', 'bump', bitmap_tag(1, 1, 'A8R8G8B8', bytes([255, 128, 128, 0])))
+
+
+def test_scene_senv_cuts_by_the_bump_maps_alpha(tiny):
+    from test_scenery import write_model, write_scenery
+    from lightmapper.formats.bitmap import write_bitmap
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import read_radiosity
+
+    tags, _, _ = tiny
+    shader = read_tag(tags / 'wall.shader_environment')
+    shader.root.set('properties.flags', 1)
+    shader.root.set_reference('diffuse.base_map', 'bitm', 'base')
+    shader.root.set_reference('bump.bump_map', 'bitm', 'bump')
+    put(tags, 'senv', 'wall', shader)
+    put_cutout_maps(tags)
+    write_model(tags, 'model', [[(0, [(0, 0, 0), (1, 0, 0), (0, 1, 0)], [0, 1, 2])]], shaders=(('senv', 'wall'),))
+    write_scenery(tags, 'prop', 'model')
+    scenario = read_tag(tags / 'level.scenario')
+    palette = child(scenario.root, 'scenery_palette')
+    palette.set_reference('name', 'scen', 'prop')
+    scenario.root.set_block('scenery_palette', [palette])
+    placement = child(scenario.root, 'scenery')
+    placement.set('bsp_indices', 1)
+    placement.set('placement.position', (10., 0., 0.))
+    scenario.root.set_block('scenery', [placement])
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    material = OutMaterial(0, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids)
+    scene, _, textures = api()._scene(tags, scenario, 0, geometry, [OutPage(8, 8, [material])],
+        [read_radiosity(tags, 'senv', 'wall')], np.array([-1, 2], np.int16))
+    assert scene.tri_cutout.tolist() == [True, True] and scene.occ_tri_cutout.tolist() == [True]
+    cut = textures.arrays()[scene.tri_texture[0]]
+    assert cut[0, 0].tolist() == [10, 20, 30, 0]
+    assert scene.occ_tri_texture.tolist() == [scene.tri_texture[0]]
+
+
+def test_unlit_senv_emitter_takes_the_composed_texture(tiny):
+    tags, _, _ = tiny
+    glow = read_tag(tags / 'wall.shader_environment')
+    glow.root.set('properties.flags', 1)
+    glow.root.set('radiosity.power', 10.)
+    glow.root.set_reference('diffuse.base_map', 'bitm', 'base')
+    glow.root.set_reference('bump.bump_map', 'bitm', 'bump')
+    put(tags, 'senv', 'glow_cut', glow)
+    put_cutout_maps(tags)
+    add_unlit_quad(tags, 'glow_cut', group='senv')
+    scene, textures = scene_of(tags, with_textures=True)
+    assert scene.occ_tri_cutout.tolist() == [True, True]
+    assert all(textures.arrays()[k][0, 0, 3] == 0 for k in scene.occ_tri_texture)
+
+
+def test_senv_bump_hole_lets_the_compiled_cpu_pass_ray_through(tiny):
+    from lightmapper import vertex_cpu
+    from lightmapper.blender_job import write_job
+    from lightmapper.formats.bsp import OutMaterial, OutPage, read_geometry
+    from lightmapper.gather import read_radiosity
+    from test_vertex_cpu import load_cpu_scene
+
+    tags, settings, work = tiny
+    shader = read_tag(tags / 'wall.shader_environment')
+    shader.root.set('properties.flags', 1)
+    shader.root.set_reference('diffuse.base_map', 'bitm', 'base')
+    shader.root.set_reference('bump.bump_map', 'bitm', 'bump')
+    put(tags, 'senv', 'wall', shader)
+    put_cutout_maps(tags)
+    geometry = read_geometry(read_tag(tags / 'room.scenario_structure_bsp'))
+    group = geometry.groups[0]
+    material = OutMaterial(0, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids)
+    scene, _, textures = api()._scene(tags, read_tag(tags / 'level.scenario'), 0, geometry,
+        [OutPage(8, 8, [material])], [read_radiosity(tags, 'senv', 'wall')], np.array([-1, 2], np.int16))
+    write_job(work, scene, [(8, 8)], [], {}, settings, 'all', textures=textures.arrays())
+    np.savez(work / 'pages.npz', page_0=np.zeros((8, 8, 3), np.float32))
+    cs, bvh = load_cpu_scene(work)
+    tri, _ = vertex_cpu._cast(cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order),
+                              np.float32([1, 1, 0.5]), np.float32([0, 0, -1]), False, np.ones(3))
+    assert tri == -1
