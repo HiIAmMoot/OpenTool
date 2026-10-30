@@ -343,6 +343,11 @@ def test_compose_caps_its_size(monkeypatch):
     assert compose_cutout(np.zeros((1, 1, 4), np.uint8), np.zeros((8, 8), np.uint8), 1).shape == (4, 4, 4)
 
 
+def test_compose_cap_does_not_shrink_a_larger_base_map(monkeypatch):
+    monkeypatch.setattr(textures_module, 'MAX_COMPOSED', 2)
+    assert compose_cutout(np.zeros((4, 4, 4), np.uint8), np.zeros((8, 8), np.uint8), 1).shape == (4, 4, 4)
+
+
 def composed_tags(tmp_path):
     tags = tmp_path / 'tags'
     tags.mkdir(exist_ok=True)
@@ -386,15 +391,22 @@ def test_capped_size_warns_once(tmp_path, monkeypatch, caplog):
     assert len(warned) == 1 and 'bm' in warned[0].message and 'bump2' in warned[0].message
 
 
-@pytest.mark.parametrize('bump,scale', [('bump', 1.5), ('missing', 1.)])
-def test_unusable_bump_is_solid_and_warns_once(tmp_path, caplog, bump, scale):
+@pytest.mark.parametrize('bump,scale,why', [
+    ('bump', 1.5, 'scale 1.5 is not a whole number'),
+    ('bump', float('nan'), 'scale nan is not a whole number'),
+    ('bump', float('inf'), 'scale inf is not a whole number'),
+    ('missing', 1., 'cannot be read'),
+])
+def test_unusable_bump_is_solid_and_warns_once(tmp_path, caplog, bump, scale, why):
     textures = TextureSet(composed_tags(tmp_path))
     cut = ShaderTexture('bm0', (1., 1.), True, True, bump, scale)
     found = textures.texture_of(cut)
     assert textures.texture_of(cut) == found
     assert textures.arrays()[found].tolist() == [[[1, 2, 3, 255]]] and len(textures.arrays()) == 1
     warned = [r for r in caplog.records if 'bm0' in r.message and bump in r.message and 'solid' in r.message]
-    assert len(warned) == 1
+    assert len(warned) == 1 and why in warned[0].message
+    if bump == 'missing':
+        assert 'scale' not in warned[0].message
 
 
 def test_texture_of_without_an_albedo_is_minus_one(tmp_path):

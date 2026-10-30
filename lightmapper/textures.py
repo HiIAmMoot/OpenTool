@@ -8,6 +8,7 @@ without an albedo map gets the constant fallback colour from the caller.
 
 from dataclasses import dataclass
 import logging
+import math
 from pathlib import Path
 import struct
 
@@ -84,27 +85,27 @@ def _axis(size: int, out: int, scale: int) -> tuple[np.ndarray, np.ndarray, np.n
     return x0 % size, (x0 + 1) % size, x - x0
 
 
-def _resample(image: np.ndarray, width: int, height: int, scale: int) -> np.ndarray:
+def _resample(image: np.ndarray, out: np.ndarray, scale: int) -> None:
+    height, width = out.shape[:2]
     h, w = image.shape[:2]
     x0, x1, fx = _axis(w, width, scale)
     y0, y1, fy = _axis(h, height, scale)
-    out = np.empty((height, width, image.shape[2]), np.float64)
     for y in range(height):
+        # (a row at a time: a whole float64 copy of a 4096 square is hundreds of MB)
         row = image[y0[y]] * (1 - fy[y]) + image[y1[y]] * fy[y]
-        out[y] = row[x0] * (1 - fx)[:, None] + row[x1] * fx[:, None]
-    return out
+        out[y] = np.rint(row[x0] * (1 - fx)[:, None] + row[x1] * fx[:, None])
 
 
 def compose_cutout(colour: np.ndarray, alpha: np.ndarray, scale: int) -> np.ndarray:
     h, w = colour.shape[:2]
     ha, wa = alpha.shape
-    # (read at call time so a test can patch it)
-    width, height = min(MAX_COMPOSED, max(w, wa * scale)), min(MAX_COMPOSED, max(h, ha * scale))
+    # (not a default argument, so a test can patch it)
+    width, height = max(w, min(MAX_COMPOSED, wa * scale)), max(h, min(MAX_COMPOSED, ha * scale))
     out = np.empty((height, width, 4), np.uint8)
     # the colour is resampled again by each pass when this is larger than the base map; that softening of
     # the bounce albedo is accepted to keep the bump's holes at full detail
-    out[..., :3] = np.rint(_resample(colour[..., :3].astype(np.float64), width, height, 1))
-    out[..., 3] = np.rint(_resample(alpha[..., None].astype(np.float64), width, height, scale))[..., 0]
+    _resample(colour[..., :3], out[..., :3], 1)
+    _resample(alpha[..., None], out[..., 3:], scale)
     return out
 
 
@@ -115,6 +116,7 @@ class TextureSet:
         self._arrays: list[np.ndarray] = []
         self._colours: dict[str, np.ndarray | None] = {}
         self._alphas: dict[str, np.ndarray | None] = {}
+        self._alpha_errors: dict[str, Exception] = {}
         self._composed: dict[tuple[str, str, float], int] = {}
 
     def index(self, bitmap_path: str) -> int:
@@ -142,11 +144,13 @@ class TextureSet:
         if colour is None:
             return -1
         alpha = self._alpha(bump)
-        if alpha is None or scale < 1 or scale != int(scale):
+        # a NaN or infinite scale is truthy, so it reaches here from a corrupt tag
+        whole = math.isfinite(scale) and scale >= 1 and scale == int(scale)
+        if alpha is None or not whole:
             # the game reads an unusable bump as its opaque default, and only a whole-number scale tiles
             # with the base map, so the shader is solid
-            logger.warning('%s: bump map %s is not usable as a cut-out (scale %s); the shader stays solid',
-                           albedo, bump, scale)
+            why = f'bump map cannot be read: {self._alpha_errors[bump]}' if alpha is None else                 f'bump scale {scale} is not a whole number of at least 1'
+            logger.warning('%s: bump map %s is not usable as a cut-out (%s); the shader stays solid', albedo, bump, why)
             alpha, scale = np.full((1, 1), 255, np.uint8), 1
         image = compose_cutout(colour, alpha, int(scale))
         ideal = (max(colour.shape[0], alpha.shape[0] * int(scale)), max(colour.shape[1], alpha.shape[1] * int(scale)))
@@ -171,7 +175,8 @@ class TextureSet:
             file = resolve_reference_path(self.tags_root, 'bitm', bitmap_path)
             try:
                 self._alphas[bitmap_path] = decode_bitmap_alpha(read_tag(file))
-            except (OSError, ValueError, KeyError, struct.error):
+            except (OSError, ValueError, KeyError, struct.error) as error:
+                self._alpha_errors[bitmap_path] = error
                 self._alphas[bitmap_path] = None
         return self._alphas[bitmap_path]
 
