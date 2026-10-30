@@ -2,7 +2,8 @@
 
 The BVH uses balanced median splits along the widest triangle-box centroid
 axis, with at most four triangles per leaf. Intersection arithmetic follows
-Blender 5.2's float32 watertight test, with lowest-index equal-distance hits.
+Blender 5.2's float32 watertight test. Lowest-index equal-distance hits are
+OpenTool's rule; Blender retains its traversal-order hit.
 """
 
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from numba import njit, prange
 import numpy as np
 
 from . import frozen
+from .sun_facing import sun_facing_queries
 from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sphere, sun_rays
 
 
@@ -263,6 +265,8 @@ def _packed(images):
 
 
 def cpu_scene(scene, job, textures, pages, flagged_pages=None):
+    if flagged_pages is not None and len(flagged_pages) != len(pages):
+        raise ValueError('flagged_pages must have one entry per page in pages')
     n_recv_vertices = len(scene['positions'])
     positions = np.concatenate([scene['positions'], scene['occ_positions']]).astype(np.float64)
     n_recv = len(scene['tris'])
@@ -511,6 +515,38 @@ class CpuPassError(RuntimeError):
     pass
 
 
+def _shadow_batches(scene, job, sc, bv, usable=None, n=None, edge=False):
+    prefix = 'edge' if edge else 'query'
+    count = len(scene.get(f'{prefix}_pos', ()))
+    chunk = max(1, CHUNK_RAYS)
+    for k, sun in enumerate(job['suns']):
+        one_job = dict(job, suns=[sun])
+        visible = (sun_facing_queries(scene, [sun])[:, 0]
+                   if not edge and 'query_inverse' in scene else None)
+        for first in range(0, count, chunk):
+            stop = first + chunk
+            local = {f'{prefix}_{key}': scene[f'{prefix}_{key}'][first:stop]
+                     for key in ('pos', 'normal', 'class')}
+            if edge:
+                local['edge_active'] = scene['edge_active'][first:stop, k:k + 1]
+                query, _, origins, dirs = edge_rays(local, one_job)
+                cosine = None
+            else:
+                active = usable[first:stop]
+                ignore = scene.get('query_ignore_normals')
+                if ignore is not None:
+                    local['query_ignore_normals'] = ignore[first:stop]
+                if visible is not None:
+                    active = active & (visible[first:stop] | local.get('query_ignore_normals', False))
+                query, _, origins, dirs, cosine = sun_rays(local, one_job, active, n[first:stop])
+            carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
+            _shadow(sc, bv, origins.astype(np.float32), dirs.astype(np.float32),
+                    np.full(len(origins), RAY_LENGTH), carried, escaped)
+            yield k, query + first, dirs, cosine, carried, escaped
+            # otherwise the suspended generator overlaps this payload with the next batch
+            del query, origins, dirs, cosine, carried, escaped
+
+
 def gather_texels(scene, job, textures, pages):
     count = len(scene.get('texel_pos', ()))
     rgb = np.zeros((count, 3), np.float32)
@@ -527,13 +563,13 @@ def gather_texels(scene, job, textures, pages):
     probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
                  query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
     probe.pop('query_inverse', None)
-    query, sun_index, origins, dirs, _ = sun_rays(probe, job, usable, n)
-    carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
-    _shadow(cs.arrays(), bv, origins.astype(np.float32), dirs.astype(np.float32),
-            np.full(len(origins), RAY_LENGTH), carried, escaped)
-    for k, sun in enumerate(job['suns']):
-        rows = np.flatnonzero((sun_index == k) & escaped)
+    shadow_rays = 0
+    for k, query, dirs, cosine, carried, escaped in _shadow_batches(probe, job, cs.arrays(), bv, usable, n):
+        sun = job['suns'][k]
+        rows = np.flatnonzero(escaped)
         rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
+        shadow_rays += len(query)
+        del query, dirs, cosine, carried, escaped, rows
     counts = texel_ray_counts(scene, job['pages'], max(1, round(job.get('cpu_samples', job['samples']) / 9)),
                               job.get('cpu_texel_samples', job['texel_samples']))
     ids = np.flatnonzero(usable)
@@ -564,7 +600,7 @@ def gather_texels(scene, job, textures, pages):
 
     # original emission reaches the flagged sources before they spend a reflected stage
     rgb += reflection(pages, None, False, True)
-    casts = len(query) + int(counts[ids].sum())
+    casts = shadow_rays + int(counts[ids].sum())
     stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
     for _ in range(max(0, int(job['bounces']))):
         delta = reflection(stable, sources, True, False)
@@ -609,30 +645,27 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
     vector += flat[:, None] * n
     irradiance += flat
     suns = job['suns']
-    sun_query, sun_index, sun_origin, sun_dir, sun_cos = sun_rays(scene, job, usable, n)
-    if len(scene.get('edge_pos', ())):
-        edge, edge_sun, edge_origin, edge_dir = edge_rays(scene, job)
-    else:
-        edge = edge_sun = np.empty(0, np.int64)
-        edge_origin = edge_dir = np.empty((0, 3))
-    origins = np.concatenate([sun_origin, edge_origin]).astype(np.float32)
-    dirs = np.concatenate([sun_dir, edge_dir]).astype(np.float32)
-    carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
-    _shadow(sc, bv, origins, dirs, np.full(len(origins), RAY_LENGTH), carried, escaped)
     sun_lit = np.zeros((queries, len(suns)), bool)
     sun_throughput = (np.zeros((queries, len(suns), 3), np.float32)
                       if ignore_normals.any() and job.get('ignore_normals_mode', 'tool') == 'tool' else None)
-    for k, sun in enumerate(suns):
-        rows = np.flatnonzero((sun_index == k) & escaped[:len(sun_query)])
+    shadow_rays = 0
+    for k, sun_query, sun_dir, sun_cos, carried, escaped in _shadow_batches(scene, job, sc, bv, usable, n):
+        sun = suns[k]
+        rows = np.flatnonzero(escaped)
         strength = ((np.float64(sun['color']) * carried[rows]) @ LUMA) * float(sun['strength'])
         vector[sun_query[rows]] += (strength * sun_cos[rows])[:, None] * sun_dir[rows]
         irradiance[sun_query[rows]] += strength * sun_cos[rows]
         sun_lit[sun_query[rows], k] = True
         if sun_throughput is not None:
             sun_throughput[sun_query[rows], k] = carried[rows]
+        shadow_rays += len(sun_query)
+        del sun_query, sun_dir, sun_cos, carried, escaped, rows, strength
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
-    edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
-    total = texel_rays + int(usable.sum()) * rays + len(sun_query) + len(edge)
+    for k, edge, dirs, cosine, carried, escaped in _shadow_batches(scene, job, sc, bv, edge=True):
+        edge_sun_lit[edge, k] = escaped
+        shadow_rays += len(edge)
+        del edge, dirs, cosine, carried, escaped
+    total = texel_rays + int(usable.sum()) * rays + shadow_rays
     return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
                           sun_throughput, texel_rgb)
 

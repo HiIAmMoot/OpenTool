@@ -330,7 +330,8 @@ def test_probes_match_blender(tmp_path, case):
     probes = random_probes(scene, 2000 if case == 'textured_room' else 500)
     blender, ours = blender_and_numba_probes(tmp_path, probes, **scene)
     # a ray gathering light passes clear panes and emitters seen from behind, so those two scenes only miss
-    assert (blender['tri'] >= 0).any() or case in ('glass_tint_half', 'emit_only_back')
+    assert (blender['tri'] >= 0).any() or case in ('glass_tint_half', 'emit_only_back'), (
+        f'{case}: zero probe hits; only clear panes and back-facing emitters should all miss')
     np.testing.assert_array_equal(ours['tri'], blender['tri'])
     np.testing.assert_allclose(ours['uv'], blender['uv'], rtol=1e-5, atol=1e-6, equal_nan=True)
     np.testing.assert_allclose(ours['radiance'], blender['radiance'], rtol=1e-4, atol=1e-6, equal_nan=True)
@@ -377,7 +378,8 @@ def test_zero_area_triangle_uses_its_centre():
     for point in ([np.nan, 0, 0], [np.inf, 0, 0]):
         assert vertex_cpu._barycentric(a, b, c, np.float64(point)) == pytest.approx((1 / 3, 1 / 3, 1 / 3))
     assert vertex_cpu._barycentric(a, b, c, np.float64([1, 1, 0])) == (1.0, 0.0, 0.0)
-    assert vertex_cpu._barycentric(*np.float64([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.25, 0.25, 0]]))         == pytest.approx((0.5, 0.25, 0.25))
+    assert vertex_cpu._barycentric(
+        *np.float64([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0.25, 0.25, 0]])) == pytest.approx((0.5, 0.25, 0.25))
 
 
 def saved_pages(work):
@@ -645,6 +647,100 @@ def test_tool_mode_returns_empty_texel_rgb(tmp_path):
     pages = write_bare_scene(tmp_path)
     result = vertex_cpu.load_and_run(tmp_path, pages)
     assert result.texel_rgb.shape == (0, 3) and result.texel_rgb.dtype == np.float32
+
+
+@pytest.mark.parametrize('mode', ['enhanced', 'tool'])
+def test_sun_and_edge_generation_is_bounded_and_bit_identical(tmp_path, monkeypatch, mode):
+    pages = write_bare_scene(tmp_path, triangles=False)
+    with np.load(tmp_path / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    count = 11
+    scene.update(query_pos=np.zeros((count, 3), np.float32),
+                 query_normal=np.tile(np.float32(UP), (count, 1)), query_class=np.zeros(count, np.int16),
+                 query_ignore_normals=np.arange(count) % 2 == 0,
+                 edge_pos=np.zeros((count, 3), np.float32), edge_normal=np.tile(np.float32(UP), (count, 1)),
+                 edge_class=np.zeros(count, np.int16), edge_active=np.ones((count, 3), bool))
+    if mode == 'enhanced':
+        scene.update(texel_pos=scene['query_pos'], texel_normal=scene['query_normal'],
+                     texel_class=scene['query_class'], texel_page=np.zeros(count, np.int16),
+                     texel_xy=np.zeros((count, 2), np.int32))
+    job = json.loads((tmp_path / 'job.json').read_text())
+    job.update(ignore_normals_mode=mode, cpu_vertex_rays=1, cpu_samples=9, cpu_texel_samples=1,
+               bounces=0, suns=[dict(direction=UP, classes=[0], color=[1., .7, .3], strength=s)
+                               for s in (1., .1234567, .7654321)])
+    def unbatched(scene, job, sc, bv, usable=None, n=None, edge=False):
+        if edge:
+            query, index, origins, dirs = vertex_cpu.edge_rays(scene, job)
+            cosine = None
+        else:
+            query, index, origins, dirs, cosine = vertex_cpu.sun_rays(scene, job, usable, n)
+        carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
+        vertex_cpu._shadow(sc, bv, origins.astype(np.float32), dirs.astype(np.float32),
+                           np.full(len(origins), vertex_cpu.RAY_LENGTH), carried, escaped)
+        for k in range(len(job['suns'])):
+            rows = np.flatnonzero(index == k)
+            yield k, query[rows], dirs[rows], None if edge else cosine[rows], carried[rows], escaped[rows]
+
+    with monkeypatch.context() as oracle:
+        oracle.setattr(vertex_cpu, '_shadow_batches', unbatched)
+        whole = vertex_cpu.run_vertex_pass(scene, job, [], pages)
+    batches = {'sun': [], 'edge': [], 'shadow': []}
+
+    def record(kind, fn):
+        def call(*args):
+            count = len(args[2]) if kind == 'shadow' else len(args[0]['query_pos' if kind == 'sun' else 'edge_pos'])
+            batches[kind].append(count)
+            assert count <= 4, f'{kind} generated {count} rays before batching'
+            if kind != 'shadow':
+                assert len(args[1]['suns']) == 1, 'batch before expanding query x sun'
+            return fn(*args)
+        return call
+
+    monkeypatch.setattr(vertex_cpu, 'CHUNK_RAYS', 4)
+    for kind, name in [('sun', 'sun_rays'), ('edge', 'edge_rays'), ('shadow', '_shadow')]:
+        monkeypatch.setattr(vertex_cpu, name, record(kind, getattr(vertex_cpu, name)))
+    split = vertex_cpu.run_vertex_pass(scene, job, [], pages)
+    assert all(len(batches[kind]) > 3 for kind in batches)
+    for field in ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit', 'texel_rgb', 'sun_throughput'):
+        want, got = getattr(whole, field), getattr(split, field)
+        assert got is None if want is None else np.array_equal(got, want), field
+    assert split.rays == whole.rays
+    assert split.sun_lit.all() and split.edge_sun_lit.all()
+
+
+@pytest.mark.parametrize('length', [0, 3])
+def test_cpu_scene_rejects_mismatched_flagged_pages(tmp_path, length):
+    pages = write_bare_scene(tmp_path)
+    with np.load(tmp_path / 'scene.npz') as data:
+        scene = {key: data[key] for key in data.files}
+    job = json.loads((tmp_path / 'job.json').read_text())
+    with pytest.raises(ValueError, match='flagged_pages.*pages'):
+        vertex_cpu.cpu_scene(scene, job, [], pages, [None] * length)
+
+
+def test_shadow_generation_at_the_largest_enhanced_page_size(monkeypatch):
+    count = 1024 * 1024 * 9
+    scene = dict(query_pos=np.broadcast_to(np.float32([0, 0, 0]), (count, 3)),
+                 query_normal=np.broadcast_to(np.float32(UP), (count, 3)),
+                 query_class=np.broadcast_to(np.int16(0), (count,)),
+                 query_ignore_normals=np.broadcast_to(True, (count,)))
+    job = dict(suns=[dict(direction=UP, classes=[0], color=[1, 1, 1], strength=1)] * 16)
+
+    def clear(sc, bv, origins, dirs, limits, carried, escaped):
+        carried[:] = 1
+        escaped[:] = True
+
+    monkeypatch.setattr(vertex_cpu, '_shadow', clear)
+    usable = np.broadcast_to(True, (count,))
+    total, batches = 0, 0
+    for k, query, dirs, cosine, carried, escaped in vertex_cpu._shadow_batches(
+            scene, job, (), (), usable, scene['query_normal']):
+        assert len(query) <= vertex_cpu.CHUNK_RAYS
+        assert len(query) == len(dirs) == len(carried) == len(escaped)
+        total += len(query)
+        batches += 1
+        del query, dirs, cosine, carried, escaped
+    assert total == 150994944 and batches == 80
 
 
 @pytest.mark.blender
