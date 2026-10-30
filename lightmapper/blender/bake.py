@@ -416,6 +416,7 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
                           local, materials, [distinct.index(p) for p in tri_props], casts,
                           scene_data['normals'][used])
         obj['sun_facing'] = key[4:].tolist()
+        obj['flagged'] = bool(key[3])
         receivers.append((obj, page, cls))
 
     occluders = []
@@ -427,7 +428,8 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
                   scene_data['occ_tri_casts_shadow'] | otinted], axis=1).astype(np.float64),
         scene_data['occ_tri_emission'].astype(np.float64),
         emit_only_of(scene_data)[:, None].astype(np.float64),
-        np.where(otinted[:, None], scene_data['occ_tri_tint'], 1).astype(np.float64)], axis=1)
+        np.where(otinted[:, None], scene_data['occ_tri_tint'], 1).astype(np.float64),
+        lamp_owner_of(scene_data, job)[:, None].astype(np.float64)], axis=1)
     for key in np.unique(okeys, axis=0) if len(occ_tris) else []:
         tex, cut, casts = int(key[0]), bool(key[1]), bool(key[2])
         emit, tint = tuple(float(c) for c in key[3:6]), tuple(float(c) for c in key[7:10])
@@ -436,11 +438,20 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
         material = make_material(f'occ_{tex}_{int(cut)}', textures[tex] if tex >= 0 else None, cut,
                                   emit, job, None, tint if tint != (1.0, 1.0, 1.0) else (),
                                   emit_only=bool(key[6]))
-        occluders.append(make_object(f'occ_{tex}_{int(cut)}_{int(casts)}',
-                                     scene_data['occ_positions'][used],
-                                     {UV_TEXTURE: flip_v(scene_data['occ_uv'][used])},
-                                     local.reshape(-1, 3), [material], np.zeros(len(picked), np.int32), casts))
+        owner = int(key[10])
+        occ = make_object(f'occ_{tex}_{int(cut)}_{int(casts)}' + (f'_owner{owner}' if owner >= 0 else ''),
+                          scene_data['occ_positions'][used],
+                          {UV_TEXTURE: flip_v(scene_data['occ_uv'][used])},
+                          local.reshape(-1, 3), [material], np.zeros(len(picked), np.int32), casts)
+        occ['owner'] = owner
+        occluders.append(occ)
     return receivers, occluders
+
+
+def lamp_owner_of(scene_data, job):
+    # only a placement that carries a lamp gets objects of its own, so a map without lamps groups exactly as before
+    owner = np.asarray(scene_data.get('occ_tri_owner', np.full(len(scene_data['occ_tris']), -1)))
+    return np.where(np.isin(owner, [lamp['owner'] for lamp in job['lights']]), owner, -1)
 
 
 def emit_only_of(scene_data):
@@ -448,8 +459,8 @@ def emit_only_of(scene_data):
     return np.asarray(scene_data['occ_tri_emit_only'], np.bool_)
 
 
-# Cycles keeps at most 64 light-linking sets and past that warns on every link and bakes a hundred
-# times slower, so more distinct receiver sets than this is refused rather than linked wrongly
+# Cycles keeps 63 non-default membership patterns per side, light and shadow counted apart, and past that warns on
+# every link and bakes a hundred times slower, so more distinct sets than this is refused rather than linked wrongly
 MAX_LINK_SETS = 63
 
 
@@ -476,6 +487,41 @@ def add_suns(job, receivers, occluders):
             linked.objects.link(occ)
         for n in shining:
             add_sun(n, suns[n], linked)
+
+
+def link_patterns(collections, objects):
+    """How many distinct non-default membership patterns the objects have across the collections."""
+    members = [{o.name for o in c.objects} for c in collections]
+    patterns = {tuple(o.name in m for m in members) for o in objects}
+    return len(patterns - {(False,) * len(collections)})
+
+
+def add_lamps(job, receivers, occluders, batch):
+    lamps = [(n, lamp) for n, lamp in enumerate(job['lights']) if lamp['batch'] == batch]
+    if not lamps:
+        return
+    objects = [recv for recv, _, _ in receivers] + list(occluders)
+    shared = bpy.data.collections.new('lamp_receivers')
+    # a flagged receiver is lit by the vertex pass's lamp rays, never by Cycles
+    for obj in [recv for recv, _, _ in receivers if not recv['flagged']] + list(occluders):
+        shared.objects.link(obj)
+    blockers = {}
+    for owner in dict.fromkeys(lamp['owner'] for _, lamp in lamps):
+        blocking = bpy.data.collections.new(f'lamp_blockers_{owner}')
+        for obj in objects:
+            if obj.get('owner', -1) != owner:
+                blocking.objects.link(obj)
+        blockers[owner] = blocking
+    sun_sets = [c for c in bpy.data.collections if c.name.startswith('sun_receivers_')]
+    light_count = link_patterns(sun_sets + [shared], objects)
+    shadow_count = link_patterns(list(blockers.values()), objects)
+    if max(light_count, shadow_count) > MAX_LINK_SETS:
+        raise RuntimeError(f'{light_count} light and {shadow_count} shadow link patterns exceed the '
+                           f'{MAX_LINK_SETS} Cycles supports per side')
+    for n, lamp in lamps:
+        obj = make_lamp(f'lamp_{n}', lamp)
+        obj.light_linking.receiver_collection = shared
+        obj.light_linking.blocker_collection = blockers[lamp['owner']]
 
 
 def add_sun(n, sun, receiver_collection):
@@ -1243,9 +1289,7 @@ def main():
                     glow_images.append(image)
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)
         add_suns(job, receivers, occluders)
-        # (unlinked: every lamp shines on everything until the linking pass replaces this)
-        for n, lamp in enumerate(job['lights']):
-            make_lamp(f'lamp_{n}', lamp)
+        add_lamps(job, receivers, occluders, job.get('lamp_batch', 0))
         out['seconds_scene'] = np.float64(time.perf_counter() - scene_started)
         diffuse_pages = []
         for i, (w, h) in enumerate(job['pages']):

@@ -922,3 +922,124 @@ def test_spot_lamp_follows_tools_cosine_ramp(tmp_path, axis):
     expected = cosine * ramp / (np.pi * distance ** 2)
     assert np.median(page[band] / expected[band]) == pytest.approx(1, rel=0.02)
     assert page[angle > cutoff + margin].max() < 2e-4
+
+
+def owned_scene(receivers, occluders, owners):
+    scene = build(receivers, occluders)
+    return replace(scene, occ_tri_owner=np.repeat(np.int32(owners), 2))
+
+
+def box_faces(low, high):
+    (x0, y0, z0), (x1, y1, z1) = low, high
+    return [floor(x0, x1, y0, y1, z0), floor(x0, x1, y0, y1, z1),
+            quad([(x0, y0, z0), (x1, y0, z0), (x1, y0, z1), (x0, y0, z1)], (0, -1, 0)),
+            quad([(x0, y1, z0), (x1, y1, z0), (x1, y1, z1), (x0, y1, z1)], (0, 1, 0)),
+            quad([(x0, y0, z0), (x0, y1, z0), (x0, y1, z1), (x0, y0, z1)], (-1, 0, 0)),
+            quad([(x1, y0, z0), (x1, y1, z0), (x1, y1, z1), (x1, y0, z1)], (1, 0, 0))]
+
+
+LAMP_SETTINGS = dict(samples=256, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, albedo_scale=1.0,
+                     albedo_fallback=0.5, w_light=1.0, vertex_rays=1, device='cpu')
+
+
+def bake_owned(tmp_path, receivers, occluders, owners, lights):
+    s = Settings(**LAMP_SETTINGS)
+    write_job(tmp_path, owned_scene(receivers, occluders, owners), [(LAMP_PAGE, LAMP_PAGE)], [], {}, s, 'all',
+              lights=lights)
+    return run_blender(tmp_path, s)
+
+
+def run_lamp_objects_driver(tmp_path, blender_exe, receivers, occluders, owners, lights, edit_job=None):
+    s = Settings(samples=8, vertex_rays=1)
+    write_job(tmp_path, owned_scene(receivers, occluders, owners), [(16, 16)], [], {}, s, 'all', lights=lights)
+    if edit_job:
+        job = json.loads((tmp_path / 'job.json').read_text())
+        edit_job(job)
+        (tmp_path / 'job.json').write_text(json.dumps(job))
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('lamp_objects_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return json.loads((tmp_path / 'lamp_objects.json').read_text())
+
+
+def walls(count):
+    # one small wall per placement, all alike, so only the owner tells them apart
+    return [dict(quad=wall_x(0.1 + 0.1 * n, 0, 1, 0, 1)) for n in range(count)]
+
+
+@pytest.mark.blender
+def test_owner_placement_gets_its_own_objects(tmp_path, blender_exe):
+    def occluder_names(name, lights):
+        out = run_lamp_objects_driver(tmp_path / name, blender_exe, [full_quad()], walls(2), [0, 1], lights)
+        return [o['name'] for o in out['objects'] if o['name'].startswith('occ_')]
+    assert len(occluder_names('lit', [lamp_light((1, 1, 1))])) == 2
+    assert len(occluder_names('dark', [])) == 1
+
+
+@pytest.mark.blender
+def test_lamps_on_one_placement_share_a_blocker_set(tmp_path, blender_exe):
+    lights = [lamp_light((1, 1, 1)), lamp_light((1, 2, 1)), replace(lamp_light((1, 3, 1)), owner=1)]
+    out = run_lamp_objects_driver(tmp_path, blender_exe, [full_quad()], walls(2), [0, 1], lights)
+    lamps = {lamp['name']: lamp for lamp in out['lamps']}
+    assert lamps['lamp_0']['blockers'] == lamps['lamp_1']['blockers'] != lamps['lamp_2']['blockers']
+    assert len({lamp['receivers'] for lamp in lamps.values()}) == 1
+    blocked = {o['owner']: [c for c in o['collections'] if c.startswith('lamp_blockers')]
+               for o in out['objects'] if o['name'].startswith('occ_')}
+    assert blocked[0] == [lamps['lamp_2']['blockers']] and blocked[1] == [lamps['lamp_0']['blockers']]
+
+
+@pytest.mark.blender
+def test_cycles_blocker_set_excludes_only_the_owner(tmp_path):
+    box = [dict(quad=q) for q in box_faces((1, 1, 1), (3, 3, 3))]
+    wall = [dict(quad=quad([(3.5, 0, 0), (3.5, LAMP_SIDE, 0), (3.5, LAMP_SIDE, 4), (3.5, 0, 4)], (1, 0, 0)))]
+    result = bake_owned(tmp_path, [dict(quad=floor(0, LAMP_SIDE, 0, LAMP_SIDE))], box + wall,
+                        [0] * 6 + [1], [lamp_light((2, 2, 2))])
+    page = result.pages[0][..., 0]
+    centres = (np.arange(LAMP_PAGE) + 0.5) * TEXEL
+    lit, shadowed = page[:, centres < 3.0], page[:, centres > 4.5]
+    assert lit.mean() > 0.01
+    assert shadowed.mean() < 0.05 * lit.mean()
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_flagged_receivers_are_not_lit_by_cycles_lamps(tmp_path, mode):
+    receivers = [full_quad(ignore_normals=True), dict(quad=floor(10, 14, 0, 4), page=1)]
+    s = Settings(**{**LAMP_SETTINGS, 'samples': 64, 'ignore_normals_mode': mode})
+    write_job(tmp_path, build(receivers), [(16, 16), (16, 16)], [], {}, s, 'all',
+              lights=[lamp_light((2, 2, 2)), lamp_light((12, 2, 2))])
+    result = run_blender(tmp_path, s)
+    assert result.pages[0][2:-2, 2:-2].max() < 1e-6
+    assert result.pages[1][2:-2, 2:-2].mean() > 0.01
+
+
+@pytest.mark.blender
+def test_tinted_pane_dims_a_cycles_lamp(tmp_path):
+    pane = dict(quad=floor(-1, LAMP_SIDE + 1, -1, LAMP_SIDE + 1, z=2.0), casts=False, tint=(0.5, 1, 1))
+    result = bake_owned(tmp_path, [dict(quad=floor(0, LAMP_SIDE, 0, LAMP_SIDE))], [pane], [-1],
+                        [lamp_light((4, 4, 4))])
+    r, g, _ = result.pages[0][8:24, 8:24].mean(axis=(0, 1))
+    assert r / g == pytest.approx(0.5, rel=0.05)
+
+
+@pytest.mark.blender
+def test_link_budget_guard(tmp_path, blender_exe):
+    def lamps(count):
+        return [replace(lamp_light((1 + 0.1 * (n % 5), 1, 1)), owner=n) for n in range(count)]
+    receivers = [dict(quad=floor(0, 4, 0, 4), cls=n, page=n) for n in range(4)]
+    suns = [sun(classes=(n,)) for n in range(4)]
+    s = Settings(samples=4, bounces=1, w_sun=1.0, w_light=1.0, vertex_rays=1, device='cpu')
+    scene = replace(build(receivers, walls(62)), occ_tri_owner=np.repeat(np.arange(62, dtype=np.int32), 2))
+    write_job(tmp_path / 'fits', scene, [(8, 8)] * 4, suns, {}, s, 'all', lights=lamps(62))
+    run_blender(tmp_path / 'fits', s)
+    assert 'light linking sets' not in (tmp_path / 'fits' / 'blender.log').read_text()
+
+    def one_batch(job):
+        for lamp in job['lights']:
+            lamp['batch'] = 0
+    out = run_lamp_objects_driver(tmp_path / 'over', blender_exe, [full_quad()], walls(63), list(range(63)),
+                                  lamps(63), edit_job=one_batch)
+    assert '64 shadow' in out['error']
