@@ -63,10 +63,8 @@ def test_stage_rows_while_looking():
 
 
 def test_stage_rows_everything_on_the_gpu():
-    assert stage_rows('auto', [RTX], None) == [
-        ('Page bake', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU'),
-        ('Vertex pass', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU'),
-        ('Denoise', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU')]
+    # (the GPU line above the rows already names the card)
+    assert stage_rows('auto', [RTX], None) == [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', '')]
 
 
 def test_stage_rows_amd_denoises_on_the_gpu_too():
@@ -96,7 +94,7 @@ def test_stage_rows_when_the_bake_would_stop():
 def test_stage_rows_used_reads_the_summary():
     assert stage_rows_used({'page_bake': 'OPTIX', 'vertex_pass': 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)',
                             'denoise': 'CUDA'}) == [
-        ('Page bake', 'GPU', 'OPTIX'), ('Vertex pass', 'GPU', 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)'),
+        ('Page bake', 'GPU', 'OPTIX'), ('Vertex pass', 'GPU', ''),
         ('Denoise', 'GPU', 'CUDA')]
     assert stage_rows_used({'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off'}) == [
         ('Page bake', 'CPU', ''), ('Vertex pass', 'CPU', ''), ('Denoise', 'Off', '')]

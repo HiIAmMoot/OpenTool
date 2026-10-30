@@ -40,8 +40,8 @@ def stage_rows(setting, adapters, reason):
     if choice.setting == 'cpu':
         return [(stage, 'CPU', '') for stage in stages]
     if choice.adapter:
-        return [('Page bake', 'GPU', choice.adapter.name), ('Vertex pass', 'GPU', choice.adapter.name),
-                ('Denoise', 'CPU' if choice.oidn == 'CPU' else 'GPU', choice.adapter.name)]
+        return [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''),
+                ('Denoise', 'CPU' if choice.oidn == 'CPU' else 'GPU', '')]
     return [('Page bake', 'GPU', "Cycles picks a GPU when the bake starts, and falls back to the CPU without one"),
             ('Vertex pass', 'CPU', 'no GPU with ray queries'), ('Denoise', 'CPU', '')]
 
@@ -51,7 +51,7 @@ def stage_rows_used(used):
     def state(name, cpu):
         return 'CPU' if name == cpu else 'Off' if name == 'off' else 'GPU'
     return [('Page bake', state(used['page_bake'], 'CPU'), '' if used['page_bake'] == 'CPU' else used['page_bake']),
-            ('Vertex pass', state(used['vertex_pass'], 'cpu'), '' if used['vertex_pass'] == 'cpu' else used['vertex_pass']),
+            ('Vertex pass', state(used['vertex_pass'], 'cpu'), ''),
             ('Denoise', state(used['denoise'], 'CPU'), '' if used['denoise'] in ('CPU', 'off') else used['denoise'])]
 
 
