@@ -31,6 +31,8 @@ RAYS_PER_DISPATCH = 66600960
 # a chunk's luminances sit in a device buffer, a float32 readback and a float64 copy (16 bytes each), so this keeps a
 # chunk near 270 MB on a GPU with little memory, where the dispatch cap alone would allow 66.6M luminances
 MAX_LUMINANCES_PER_CHUNK = 16777216
+LAMP_RAY_CHUNK = 2 ** 21
+SKIP_LIMIT = 256
 SHADERS = Path(__file__).with_name('shaders')
 
 
@@ -44,6 +46,7 @@ class VertexPassResult:
     rays: int
     sun_throughput: np.ndarray | None = None
     texel_rgb: np.ndarray | None = None
+    light_flat: np.ndarray | None = None
 
 
 def radical_inverse(i):
@@ -134,6 +137,53 @@ def sun_rays(scene, job, usable, n):
     direction = np.concatenate(direction + [np.empty((0, 3))])
     return (query, sun, pos[query] + RAY_EPSILON * direction, direction,
             np.concatenate(cosine + [np.empty(0)]))
+
+
+@dataclass
+class LampRays:
+    point: np.ndarray
+    light: np.ndarray
+    origin: np.ndarray
+    direction: np.ndarray
+    limit: np.ndarray
+    skip: np.ndarray
+    factor: np.ndarray
+
+
+def _lamp_factor(light, d, to_light, normals, flagged):
+    cosine = np.where(flagged, 1.0, np.einsum('ij,ij->i', normals, to_light))
+    if light['kind'] != 3:
+        return cosine / (d * d)
+    s = -(to_light @ _unit(light['axis']))
+    cutoff, falloff = float(light['cos_cutoff']), float(light['cos_falloff'])
+    # the cutoff test comes first, as in lights.ramp: a falloff wider than the cutoff leaves a step at the cutoff
+    width = np.where(falloff > cutoff, falloff - cutoff, 1.0)
+    ramp = np.where(s <= cutoff, 0.0, np.where(s >= falloff, 1.0, (s - cutoff) / width))
+    return cosine * ramp / (d * d)
+
+
+def iter_lamp_rays(points, normals, flagged, usable, lights, chunk=LAMP_RAY_CHUNK):
+    """The shadow rays of every lamp to every point it lights, ordered by light then point, in blocks of at most chunk rows."""
+    points, normals = np.asarray(points, np.float64), np.asarray(normals, np.float64)
+    flagged, usable = np.asarray(flagged, bool), np.asarray(usable, bool)
+    for k, light in enumerate(lights):
+        position = np.float64(light['position'])
+        for start in range(0, len(points), chunk):
+            rows = np.arange(start, min(start + chunk, len(points)))
+            offset = position - points[rows]
+            d = np.linalg.norm(offset, axis=1)
+            near = (d >= 1e-4) & (d < float(light['reach'])) & usable[rows]
+            rows, offset, d = rows[near], offset[near], d[near]
+            direction = offset / d[:, None]
+            factor = _lamp_factor(light, d, direction, normals[rows], flagged[rows])
+            lit = factor > 0
+            rows, direction, d, factor = rows[lit], direction[lit], d[lit], factor[lit]
+            if not len(rows):
+                continue
+            yield LampRays(rows.astype(np.int64), np.full(len(rows), k, np.int64),
+                           points[rows] + RAY_EPSILON * direction, direction,
+                           np.maximum(0.0, d - 2 * RAY_EPSILON), np.full(len(rows), int(light['owner']), np.int64),
+                           factor)
 
 
 def edge_rays(scene, job):
