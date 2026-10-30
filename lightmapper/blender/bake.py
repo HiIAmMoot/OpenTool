@@ -101,6 +101,10 @@ def setup_scene(job):
     cycles.max_bounces = cycles.diffuse_bounces = job['bounces']
     cycles.glossy_bounces = cycles.transmission_bounces = cycles.volume_bounces = 0
     cycles.use_denoising = False
+    # (the factory clamp of 10 clips bright bounce near emitters and lamps, and would make summed lamp batches differ from one bake)
+    cycles.sample_clamp_direct = 0
+    # test_clamp_indirect is a test-only override, never written by write_job
+    cycles.sample_clamp_indirect = job.get('test_clamp_indirect', 0)
     world = bpy.data.worlds.new('world')
     world.use_nodes = True
     background = world.node_tree.nodes['Background']

@@ -828,3 +828,43 @@ def test_page_buffer_is_refilled_before_every_bake(tmp_path, blender_exe):
         rgb, written = reads[f'read_{n}'], reads[f'set_{n}']
         np.testing.assert_array_equal(rgb[written], n + 1)
         np.testing.assert_array_equal(rgb[~written], -1)  # not the previous bake's value
+
+
+def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None):
+    s = Settings(samples=8, vertex_rays=1)
+    write_job(tmp_path, build([full_quad()]), [(16, 16)], [], {}, s)
+    if clamp_indirect is not None:
+        job = json.loads((tmp_path / 'job.json').read_text())
+        job['test_clamp_indirect'] = clamp_indirect
+        (tmp_path / 'job.json').write_text(json.dumps(job))
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('scene_settings_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return json.loads((tmp_path / 'clamps.json').read_text())
+
+
+@pytest.mark.blender
+def test_cycles_clamps_are_off(tmp_path, blender_exe):
+    assert run_scene_settings_driver(tmp_path, blender_exe) == {
+        'sample_clamp_direct': 0.0, 'sample_clamp_indirect': 0.0}
+
+
+@pytest.mark.blender
+def test_bright_bounce_is_not_clamped(tmp_path, blender_exe):
+    # the floor sees only the wall's bounce of the patch: the patch faces the wall, away from the floor
+    def floor_mean(name, clamp_indirect=None):
+        root = tmp_path / name
+        wall = dict(quad=wall_x(0, 0, 4, 0, 4), page=1)
+        patch = dict(quad=quad([(0.1, 0, 0), (0.1, 0, 4), (0.1, 4, 4), (0.1, 4, 0)], (-1, 0, 0)),
+                     casts=False, emission=(400.0, 400.0, 400.0))
+        s = Settings(samples=64, bounces=1, vertex_rays=1)
+        write_job(root, build([full_quad(page=0), wall], [patch]), [(16, 16), (16, 16)], [], {}, s)
+        if clamp_indirect is not None:
+            job = json.loads((root / 'job.json').read_text())
+            job['test_clamp_indirect'] = clamp_indirect
+            (root / 'job.json').write_text(json.dumps(job))
+        return run_blender(root, s).pages[0].mean()
+    assert floor_mean('off') > 1.2 * floor_mean('clamped', clamp_indirect=10)
