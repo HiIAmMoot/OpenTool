@@ -4,6 +4,8 @@ from dataclasses import replace
 import importlib.util
 import json
 import struct
+import subprocess
+import sys
 import time
 
 import numpy as np
@@ -15,12 +17,20 @@ from lightmapper.formats.vertices import ENV, LM, compress, pack_uncompressed, u
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
 from lightmapper.validate import validate_bsp
-from lightmapper import gpu, vertex_cpu, vertex_gpu, blender_job, memory
+from lightmapper import gpu, cpu_vertex_job as vertex_cpu, vertex_gpu, blender_job, memory
 from test_blender_job import fake
 
 
 NV = gpu.Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', gpu.NVIDIA, (1,), 'vulkan', True)
 GPU_CHOICE = gpu.choose('auto', [NV])
+
+
+@pytest.mark.parametrize('module', ['lightmapper.pipeline', 'opentool.runner'])
+def test_parent_import_does_not_load_compiled_kernels(module):
+    code = (f'import importlib, sys; importlib.import_module({module!r}); '
+            'assert "lightmapper.vertex_cpu" not in sys.modules')
+    done = subprocess.run([sys.executable, '-c', code], capture_output=True, timeout=60)
+    assert done.returncode == 0, done.stderr.decode(errors='replace')
 
 
 def child(parent, name):

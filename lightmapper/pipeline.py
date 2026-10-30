@@ -19,7 +19,7 @@ from time import perf_counter
 
 import numpy as np
 
-from . import gpu, memory, vertex_cpu, vertex_gpu
+from . import cpu_vertex_job, gpu, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
@@ -328,8 +328,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         if s.cpu_vertex_backend == 'blender':
             return run_blender_vertex_only(work, s, result.diffuse_pages)
         try:
-            vp, info = vertex_cpu.run_in_child(work, result.diffuse_pages, s.timeout_s)
-        except vertex_cpu.CpuPassError as error:
+            vp, info = cpu_vertex_job.run_in_child(work, result.diffuse_pages, s.timeout_s)
+        except cpu_vertex_job.CpuPassError as error:
             warning = f"compiled CPU vertex pass failed ({error}); falling back to Blender's"
             logger.warning('%s', warning)
             warnings.append(warning)
