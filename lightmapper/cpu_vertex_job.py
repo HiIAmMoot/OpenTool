@@ -39,7 +39,9 @@ def run_in_child(work: Path, pages: list[np.ndarray], timeout: float | None) -> 
                                       np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
                                       int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32)
                                        if 'vertex_sun_throughput' in data.files else None,
-                                      np.array(data['texel_rgb'], np.float32))
+                                      np.array(data['texel_rgb'], np.float32),
+                                      np.array(data['vertex_light_flat'], np.float32)
+                                       if 'vertex_light_flat' in data.files else None)
             timing = {'compile': float(data['seconds_compile']), 'trace': float(data['seconds_trace']),
                       'threading_layer': str(data['threading_layer']), 'threads': int(data['threads'])}
         job = json.loads((work / 'job.json').read_text())
@@ -54,6 +56,8 @@ def run_in_child(work: Path, pages: list[np.ndarray], timeout: float | None) -> 
                 or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)
                 or (result.sun_throughput is not None) != bool(needs_throughput)
                 or (result.sun_throughput is not None and result.sun_throughput.shape != (q, suns, 3))
+                or (result.light_flat is not None
+                    and (not needs_throughput or result.light_flat.shape != (q, 3)))
                 or result.texel_rgb.shape != (texels, 3)):
             raise ValueError('short vertex arrays')
         return result, timing

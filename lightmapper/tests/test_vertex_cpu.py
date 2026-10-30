@@ -10,9 +10,10 @@ import numpy as np
 import numba
 import pytest
 
-from lightmapper import entry, frozen, vertex_cpu
+from lightmapper import entry, frozen, vertex_cpu, vertex_gpu
+from lightmapper.formats.lights import SceneLight, ramp
 from lightmapper.blender_job import write_job
-from test_blender_bake import UP, build, floor, full_quad, sun
+from test_blender_bake import UP, build, floor, full_quad, quad, sun, wall_x
 from test_vertex_gpu import CASES, edge_receivers, textured_room, write_bare_scene
 from test_vertex_pass import (S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene, roof,
                               run_driver, twin_scene, unpaired_back_face_scene, wall_facing_minus_x,
@@ -1071,3 +1072,236 @@ def test_child_warm_up_compiles_every_kernel_on_one_triangle(monkeypatch):
     vertex_cpu.warm_up()
     assert seen and all(shape == (1, 3, 3) for shape in seen)
     assert not [kernel.py_func.__name__ for kernel in kernels if not kernel.nopython_signatures]
+
+
+# ---------- scenery lights (the lamp_case scenes are shared with the GPU and Blender passes' lamp tests)
+
+PI = np.pi
+FLOOR = floor(-20, 20, -20, 20)
+# off-centre corners keep a ray through the origin from running along a quad's diagonal
+ROOF = floor(-3, 4, -3.5, 3, z=1)
+
+
+def lamp(position, rgb=(PI, PI, PI), kind=2, axis=(0, 0, -1), reach=1e4, cos_cutoff=-1.0, cos_falloff=-1.0, owner=-1):
+    return SceneLight(np.float64(position), np.float64(axis), np.float64(rgb), kind, np.float32(reach),
+                      np.float32(cos_cutoff), np.float32(cos_falloff), owner, 'lamp')
+
+
+def lamp_case(name, **extra):
+    """The scenes of the lamp tests, as the keywords of write_lamp_case: occluders are (quad, owner, extras) and
+    queries (position, normal, ignore_normals)."""
+    light = lamp((0, 0, 2))
+    box = [floor(-.5, .7, -.4, .5, z=1.5), floor(-.5, .7, -.4, .5, z=2.5, up=False),
+           quad([(-.5, -.4, 1.5), (.7, -.4, 1.5), (.7, -.4, 2.5), (-.5, -.4, 2.5)], (0, -1, 0)),
+           quad([(-.5, .5, 1.5), (-.5, .5, 2.5), (.7, .5, 2.5), (.7, .5, 1.5)], (0, 1, 0)),
+           wall_x(-.5, -.4, .5, 1.5, 2.5), wall_x(.7, -.4, .5, 1.5, 2.5)]
+    cases = {
+        'plane': dict(queries=[((x, 0, 0), UP, False) for x in (0, 1, 3)], lights=[light]),
+        'wall': dict(occluders=[(ROOF, -1, {})], queries=[((0, 0, 0), UP, False)], lights=[light]),
+        'glass': dict(occluders=[(ROOF, -1, dict(casts=False, tint=(1, 0, .5)))],
+                      queries=[((0, 0, 0), UP, False)], lights=[light]),
+        'cutout': dict(occluders=[(ROOF, -1, dict(cutout=True, texture=0))], queries=[((0, 0, 0), UP, False)],
+                       lights=[light]),
+        'own_box': dict(occluders=[(q, 4, {}) for q in box], queries=[((0, 0, 0), UP, False)],
+                        lights=[lamp((0, 0, 2), owner=4)]),
+        'flagged': dict(queries=[((0, 0, 0), UP, True), ((0, 0, 0), (0, 0, -1), True), ((0, 0, 0), (0, 0, -1), False)],
+                        lights=[light]),
+        'spot': dict(queries=[((np.tan(a), 0, 0), UP, False) for a in np.arccos([1.0, .9, .75, .55, .4])],
+                     lights=[lamp((0, 0, 1), kind=3, cos_cutoff=.5, cos_falloff=.8)]),
+        'light_on_a_wall': dict(occluders=[(wall_x(2, -3, 3, -1, 3.5), 3, {})], queries=[((0, 0, 0), UP, False)],
+                                lights=[lamp((2.01, 0, 1), owner=3)]),
+    }
+    return {**cases[name], **extra}
+
+
+def write_lamp_case(work, receivers=(FLOOR,), occluders=(), queries=(), lights=(), mode='tool', textures=None,
+                    bounces=1, albedo_fallback=0.0, flagged_receivers=(), pages=1):
+    """Writes the job and the pages, and returns the pages. The receivers listed by index are ignore-normals ones."""
+    scene = build([dict(quad=r, ignore_normals=i in flagged_receivers, page=min(i, pages - 1))
+                   for i, r in enumerate(receivers)],
+                  [dict(quad=q, **extras) for q, _, extras in occluders])
+    scene = dataclasses.replace(
+        scene, occ_tri_owner=np.repeat(np.int32([owner for _, owner, _ in occluders]), 2),
+        query_pos=np.float32([q[0] for q in queries]).reshape(-1, 3),
+        query_normal=np.float32([q[1] for q in queries]).reshape(-1, 3), query_class=np.zeros(len(queries), np.int16),
+        query_ignore_normals=np.bool_([q[2] for q in queries]))
+    settings = dataclasses.replace(S, vertex_rays=1, albedo_fallback=albedo_fallback, ignore_normals_mode=mode,
+                                   bounces=bounces, w_light=1.0, samples=9 * 256, texel_samples=256)
+    sizes = [(16, 16)] * pages
+    write_job(work, scene, sizes, [], {}, settings, 'all', textures=textures, lights=list(lights))
+    result = [np.zeros((h, w, 3), np.float32) for w, h in sizes]
+    np.savez(Path(work) / 'pages.npz', **{f'page_{i}': p for i, p in enumerate(result)})
+    return result
+
+
+def run_lamp_case(work, name, **extra):
+    case = lamp_case(name, **extra)
+    textures = case.pop('textures', None)
+    pages = write_lamp_case(work, textures=textures, **case)
+    return vertex_cpu.load_and_run(work, pages)
+
+
+def test_point_light_on_a_plane_gives_cosine_over_distance_squared(tmp_path):
+    result = run_lamp_case(tmp_path, 'plane')
+    want = np.float64([PI * 2 / (4 + x ** 2) ** 1.5 for x in (0, 1, 3)])
+    np.testing.assert_allclose(result.irradiance, want, rtol=1e-5)
+    toward = np.float64([[0, 0, 2], [-1, 0, 2], [-3, 0, 2]])
+    toward /= np.linalg.norm(toward, axis=1)[:, None]
+    np.testing.assert_allclose(result.vector, want[:, None] * toward, rtol=1e-4, atol=1e-7)
+
+
+def test_spot_light_lights_only_its_cone_with_tools_ramp(tmp_path):
+    result = run_lamp_case(tmp_path, 'spot')
+    cosines = np.float64([1.0, .9, .75, .55, .4])
+    # a height of 1 makes 1 / d^2 the cosine squared
+    want = PI * cosines ** 3 * np.float64([ramp(c, .5, .8) for c in cosines])
+    np.testing.assert_allclose(result.irradiance, want, rtol=1e-4, atol=1e-7)
+    assert result.irradiance[-1] == 0 and result.irradiance[-2] > 0
+
+
+def test_flagged_receiver_takes_a_light_without_the_cosine_from_either_side(tmp_path):
+    result = run_lamp_case(tmp_path, 'flagged')
+    np.testing.assert_allclose(result.irradiance, [PI / 4, PI / 4, 0], atol=1e-6)
+
+
+def test_point_light_is_shadowed_by_a_wall(tmp_path):
+    assert run_lamp_case(tmp_path / 'wall', 'wall').irradiance[0] == 0
+    assert run_lamp_case(tmp_path / 'open', 'plane').irradiance[0] > 0
+
+
+def test_point_light_takes_the_glass_tint(tmp_path):
+    result = run_lamp_case(tmp_path, 'glass')
+    assert result.irradiance[0] == pytest.approx(PI / 4 * (np.float64([1, 0, .5]) @ vertex_cpu.LUMA), rel=1e-5)
+
+
+@pytest.mark.parametrize('alpha,lit', [(0, True), (255, False)])
+def test_cutout_hole_lets_lamp_light_through(tmp_path, alpha, lit):
+    result = run_lamp_case(tmp_path, 'cutout', textures=[np.full((1, 1, 4), alpha, np.uint8)])
+    assert (result.irradiance[0] > 0) == lit
+
+
+def test_the_lamps_own_placement_does_not_block_it(tmp_path):
+    assert run_lamp_case(tmp_path / 'own', 'own_box').irradiance[0] == pytest.approx(PI / 4, rel=1e-5)
+    other = lamp_case('own_box')
+    other['occluders'] = [(q, 5, extras) for q, _, extras in other['occluders']]
+    pages = write_lamp_case(tmp_path / 'other', **other)
+    assert vertex_cpu.load_and_run(tmp_path / 'other', pages).irradiance[0] == 0
+
+
+def test_light_on_a_wall_is_not_put_out_by_the_wall(tmp_path):
+    assert run_lamp_case(tmp_path / 'own', 'light_on_a_wall').irradiance[0] > 0
+    pages = write_lamp_case(tmp_path / 'other', **lamp_case('light_on_a_wall', lights=[lamp((2.01, 0, 1), owner=4)]))
+    assert vertex_cpu.load_and_run(tmp_path / 'other', pages).irradiance[0] == 0
+
+
+@pytest.mark.parametrize('stack,lit', [(255, False), (300, True)])
+def test_owner_skips_stop_at_the_skip_limit(tmp_path, stack, lit):
+    # owner panes 0.002 apart with someone else's roof above them: the 256th skip ends the ray as a miss
+    panes = [(floor(-1, 1, -1, 1, z=.1 + .002 * k), 0, {}) for k in range(stack)]
+    pages = write_lamp_case(tmp_path, occluders=panes + [(floor(-1, 1, -1, 1, z=1.0), 1, {})],
+                            queries=[((.3, .2, 0), UP, False)], lights=[lamp((.3, .2, 2), owner=0)])
+    assert (vertex_cpu.load_and_run(tmp_path, pages).irradiance[0] > 0) == lit
+
+
+def test_light_throughput_is_returned_for_flagged_queries(tmp_path):
+    result = run_lamp_case(tmp_path / 'tool', 'glass', queries=[((0, 0, 0), UP, True), ((1, 0, 0), UP, False)])
+    assert result.light_flat.shape == (2, 3) and result.light_flat.dtype == np.float32
+    np.testing.assert_allclose(result.light_flat[0], np.float64([1, 0, .5]) / 4, rtol=1e-5)
+    np.testing.assert_array_equal(result.light_flat[1], 0)
+    assert run_lamp_case(tmp_path / 'ordinary', 'plane').light_flat is None
+    pages = write_lamp_case(tmp_path / 'enhanced', mode='enhanced', **lamp_case('flagged'))
+    assert vertex_cpu.load_and_run(tmp_path / 'enhanced', pages).light_flat is None
+
+
+def test_enhanced_texel_gather_includes_lamps(tmp_path):
+    # the lamp reaches only the upper sheet, which passes it on to the sheet below
+    sheets = [floor(-20, 20, -20, 20, z=0), floor(-20, 20, -20, 20, z=-1)]
+    kwargs = dict(receivers=sheets, flagged_receivers=(0, 1), pages=2, mode='enhanced', albedo_fallback=.5,
+                  queries=[((0, 0, 0), (0, 0, 0), False)])
+    lit = write_lamp_case(tmp_path / 'lit', lights=[lamp((0, 0, 2))], **kwargs)
+    result = vertex_cpu.load_and_run(tmp_path / 'lit', lit)
+    unlit = vertex_cpu.load_and_run(tmp_path / 'dark', write_lamp_case(tmp_path / 'dark', **kwargs))
+    with np.load(tmp_path / 'lit' / 'scene.npz') as data:
+        pos, page = data['texel_pos'].astype(np.float64), data['texel_page']
+    d = np.linalg.norm(pos[page == 0] - [0, 0, 2], axis=1)
+    np.testing.assert_allclose(result.texel_rgb[page == 0], np.tile(1 / d ** 2, (3, 1)).T, rtol=1e-4)
+    assert result.texel_rgb[page == 1].max() > 0
+    assert unlit.texel_rgb.max() == 0
+
+
+def test_lamp_results_do_not_depend_on_thread_count_or_chunk(tmp_path, monkeypatch):
+    rng = np.random.default_rng(5)
+    queries = [((x, y, 0), UP, i % 3 == 0) for i, (x, y) in enumerate(rng.uniform(-4, 4, (40, 2)))]
+    lights = [lamp(rng.uniform(-3, 3, 3) + [0, 0, 2], owner=k) for k in range(4)]
+    panes = [(floor(-1, 1, -1, 1, z=1), 9, dict(casts=False, tint=(.5, .7, .9)))]
+    pages = write_lamp_case(tmp_path, occluders=panes, queries=queries, lights=lights)
+    default = numba.get_num_threads()
+    try:
+        numba.set_num_threads(1)
+        one = vertex_cpu.load_and_run(tmp_path, pages)
+        numba.set_num_threads(default)
+        many = vertex_cpu.load_and_run(tmp_path, pages)
+        monkeypatch.setattr(vertex_cpu, 'CHUNK_RAYS', 7)
+        split = vertex_cpu.load_and_run(tmp_path, pages)
+    finally:
+        numba.set_num_threads(default)
+    assert one.irradiance.max() > 0 and one.light_flat.max() > 0
+    for other in (many, split):
+        for field in ('vector', 'irradiance', 'light_flat'):
+            assert np.array_equal(getattr(one, field), getattr(other, field)), field
+        assert one.rays == other.rays
+
+
+def test_skip_minus_one_leaves_every_cast_as_it_was(tmp_path):
+    # receivers carry owner -1, so only the skip >= 0 guard keeps a skip of -1 from passing through every receiver
+    write_lamp_case(tmp_path, occluders=[(floor(-2, 2, -2, 2, z=1), 2, {})], queries=[((0, 0, 0), UP, False)])
+    cs, bvh = load_cpu_scene(tmp_path)
+    bv = (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order)
+    rng = np.random.default_rng(1)
+    dirs = rng.normal(size=(300, 3)).astype(np.float32)
+    origins = np.float32(rng.uniform(-1, 1, (300, 3)))
+    limits = np.full(300, vertex_cpu.RAY_LENGTH)
+
+    def escapes(skips):
+        carried, escaped = np.empty((300, 3)), np.empty(300, bool)
+        vertex_cpu._shadow(cs.arrays(), bv, origins, dirs, limits, carried, escaped, skips)
+        return escaped
+
+    plain = escapes(None)
+    np.testing.assert_array_equal(escapes(np.full(300, -1, np.int64)), plain)
+    np.testing.assert_array_equal(escapes(np.full(300, 7, np.int64)), plain)
+    assert plain.any() and not plain.all()
+    assert escapes(np.full(300, 2, np.int64)).sum() > plain.sum()
+
+
+def test_skip_limit_copy_equals_vertex_gpu():
+    assert vertex_cpu.SKIP_LIMIT == vertex_gpu.SKIP_LIMIT
+
+
+def test_cpu_child_returns_the_lamp_throughput(tmp_path):
+    pages = write_lamp_case(tmp_path, **lamp_case('glass', queries=[((0, 0, 0), UP, True), ((1, 0, 0), UP, False)]))
+    expected = vertex_cpu.load_and_run(tmp_path, pages)
+    result, _ = vertex_cpu.run_in_child(tmp_path, pages, 300)
+    assert np.array_equal(result.light_flat, expected.light_flat) and result.light_flat[0].any()
+    assert np.array_equal(result.irradiance, expected.irradiance)
+
+
+def test_cpu_child_refuses_light_throughput_of_the_wrong_shape_or_without_flagged_queries(tmp_path, monkeypatch):
+    np.savez(tmp_path / 'scene.npz', query_pos=np.zeros((2, 3)), edge_pos=np.zeros((0, 3)),
+             query_ignore_normals=np.array([True, False]))
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}], 'ignore_normals_mode': 'tool'}))
+    arrays = dict(vector=np.zeros((2, 3)), irradiance=np.zeros(2), sun_lit=np.zeros((2, 1), bool),
+                  edge_sun_lit=np.zeros((0, 1), bool), texel_rgb=np.zeros((0, 3)), rays=np.int64(0),
+                  vertex_sun_throughput=np.zeros((2, 1, 3)), seconds_compile=0., seconds_trace=0.,
+                  threading_layer='workqueue', threads=np.int64(1))
+
+    def child(*args, **kwargs):
+        np.savez(tmp_path / 'cpu_out.npz', **arrays)
+        return subprocess.CompletedProcess(args[0], 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', child)
+    arrays['vertex_light_flat'] = np.zeros((2, 3))
+    assert vertex_cpu.run_in_child(tmp_path, [], 60)[0].light_flat.shape == (2, 3)
+    arrays['vertex_light_flat'] = np.zeros((1, 3))
+    with pytest.raises(vertex_cpu.CpuPassError, match='short vertex arrays'):
+        vertex_cpu.run_in_child(tmp_path, [], 60)

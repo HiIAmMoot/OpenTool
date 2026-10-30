@@ -18,13 +18,15 @@ import numpy as np
 
 from .cpu_vertex_job import CpuPassError, run_in_child
 from .sun_facing import sun_facing_queries
-from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sphere, sun_rays
+from .vertex_gpu import (VertexPassResult, ambient_table, edge_rays, hemisphere, iter_lamp_rays, query_frames, sphere,
+                         sun_rays)
 
 
 # copies keep numba's source-file cache sensitive to changes in ray constants; a test holds them equal to bake.py
 RAY_LENGTH = 1e5
 RAY_EPSILON = 1e-3
 PASS_LIMIT = 8
+SKIP_LIMIT = 256
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
 SEED_SPIN = 0.7548776662466927
@@ -241,6 +243,7 @@ class CpuScene:
     albedo_scale: float
     albedo_fallback: float
     n_recv: int
+    owner: np.ndarray
 
     def arrays(self):
         # one tuple, in field order, is what the compiled kernels take
@@ -306,7 +309,8 @@ def cpu_scene(scene, job, textures, pages, flagged_pages=None):
         flagged_texels=np.concatenate(flagged_parts) if flagged_parts else np.empty((0, 3), np.float64),
         has_flagged=bool(flagged_pages is not None and has_two_sided),
         ambient=ambient_table(job, scene['query_class'], class_of),
-        albedo_scale=float(job['albedo_scale']), albedo_fallback=float(job['albedo_fallback']), n_recv=n_recv)
+        albedo_scale=float(job['albedo_scale']), albedo_fallback=float(job['albedo_fallback']), n_recv=n_recv,
+        owner=np.concatenate([np.full(n_recv, -1), scene.get('occ_tri_owner', np.full(n_occ, -1))]).astype(np.int64))
 
 
 @njit(cache=True)
@@ -364,16 +368,18 @@ def _faces(normal, heading):
 
 
 @njit(cache=True)
-def _cast(sc, bv, o32, d32, shadow, carried, limit=RAY_LENGTH):
+def _cast(sc, bv, o32, d32, shadow, carried, limit=RAY_LENGTH, skip=-1):
     (corners, corners32, tris, tex_uv, lm_uv, normals, twin, casts, cutout, glows, two_sided, has_two_sided,
      texture_of, page_of, class_of, tint, emission, texture_table, texture_texels, page_table, page_texels,
-     flagged_table, flagged_texels, has_flagged, ambient, albedo_scale, albedo_fallback, n_recv) = sc
+     flagged_table, flagged_texels, has_flagged, ambient, albedo_scale, albedo_fallback, n_recv, owner) = sc
     lo, hi, first, count, order = bv
     start = o32.copy()
     heading = d32.astype(np.float64)
     step = d32 * np.float32(RAY_EPSILON)
     remaining = limit
-    for _ in range(PASS_LIMIT + 1):
+    passes = 0
+    skips = 0
+    while passes <= PASS_LIMIT:
         index, distance = _closest_hit(lo, hi, first, count, order, corners32, start, d32, np.float32(remaining))
         if index < 0:
             break
@@ -381,6 +387,16 @@ def _cast(sc, bv, o32, d32, shadow, carried, limit=RAY_LENGTH):
         location = np.empty(3, np.float32)
         for axis in range(3):
             location[axis] = start[axis] + unit[axis] * distance
+        if skip >= 0 and owner[index] == skip:
+            # a lamp's own placement never blocks it; the cap ends a stack of owner triangles as a miss instead of
+            # walking the ray through it one RAY_EPSILON at a time
+            skips += 1
+            if skips >= SKIP_LIMIT:
+                break
+            start = location + step
+            remaining -= np.float64(distance) + RAY_EPSILON
+            continue
+        passes += 1
         partner = twin[index]
         if partner >= 0 and not _faces(normals[index], heading) and _faces(normals[partner], heading):
             # the hit point stays put; interpolation recomputes weights in the facing twin's corner order
@@ -406,7 +422,7 @@ def _cast(sc, bv, o32, d32, shadow, carried, limit=RAY_LENGTH):
 def _shade_rgb(sc, tri, hit32, dir64, cls, with_ambient, with_pages, with_emission):
     (corners, corners32, tris, tex_uv, lm_uv, normals, twin, casts, cutout, glows, two_sided, has_two_sided,
      texture_of, page_of, class_of, tint, emission, texture_table, texture_texels, page_table, page_texels,
-     flagged_table, flagged_texels, has_flagged, ambient, albedo_scale, albedo_fallback, n_recv) = sc
+     flagged_table, flagged_texels, has_flagged, ambient, albedo_scale, albedo_fallback, n_recv, owner) = sc
     point = hit32.astype(np.float64)
     albedo = np.full(3, albedo_fallback)
     k = texture_of[tri]
@@ -501,10 +517,11 @@ def _gather(sc, bv, origins32, dirs32, dirs64, cls, active, rgb,
 
 
 @njit(parallel=True, cache=True)
-def _shadow(sc, bv, origins32, dirs32, limits, carried, escaped):
+def _shadow(sc, bv, origins32, dirs32, limits, carried, escaped, skips=None):
     for ray in prange(len(origins32)):
         throughput = np.ones(3)
-        tri, _ = _cast(sc, bv, origins32[ray], dirs32[ray], True, throughput, limits[ray])
+        skip = -1 if skips is None else skips[ray]
+        tri, _ = _cast(sc, bv, origins32[ray], dirs32[ray], True, throughput, limits[ray], skip)
         carried[ray] = throughput
         escaped[ray] = tri < 0
 
@@ -541,6 +558,15 @@ def _shadow_batches(scene, job, sc, bv, usable=None, n=None, edge=False):
             del query, origins, dirs, cosine, carried, escaped
 
 
+def _lamp_batches(sc, bv, points, normals, flagged, usable, lights):
+    """(rays, carried tint, escaped) of every lamp ray in blocks of at most CHUNK_RAYS rows, ordered by light then point."""
+    for rays in iter_lamp_rays(points, normals, flagged, usable, lights, max(1, CHUNK_RAYS)):
+        carried, escaped = np.empty((len(rays.point), 3)), np.empty(len(rays.point), bool)
+        _shadow(sc, bv, rays.origin.astype(np.float32), rays.direction.astype(np.float32), rays.limit, carried,
+                escaped, rays.skip)
+        yield rays, carried, escaped
+
+
 def gather_texels(scene, job, textures, pages):
     count = len(scene.get('texel_pos', ()))
     rgb = np.zeros((count, 3), np.float32)
@@ -564,6 +590,13 @@ def gather_texels(scene, job, textures, pages):
         rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
         shadow_rays += len(query)
         del query, dirs, cosine, carried, escaped, rows
+    lights = job.get('lights') or []
+    for lamp, carried, escaped in _lamp_batches(cs.arrays(), bv, pos, n, np.ones(count, bool), usable, lights):
+        rows = np.flatnonzero(escaped)
+        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3)
+        rgb[lamp.point[rows]] += strength * carried[rows] * lamp.factor[rows, None] / np.pi
+        shadow_rays += int((lamp.limit > 0).sum())
+        del lamp, carried, escaped, rows, strength
     counts = texel_ray_counts(scene, job['pages'], max(1, round(job.get('cpu_samples', job['samples']) / 9)),
                               job.get('cpu_texel_samples', job['texel_samples']))
     ids = np.flatnonzero(usable)
@@ -654,6 +687,20 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
             sun_throughput[sun_query[rows], k] = carried[rows]
         shadow_rays += len(sun_query)
         del sun_query, sun_dir, sun_cos, carried, escaped, rows, strength
+    lights = job.get('lights') or []
+    light_flat = np.zeros((queries, 3)) if sun_throughput is not None else None
+    for lamp, carried, escaped in _lamp_batches(sc, bv, pos, n, ignore_normals, usable, lights):
+        rows = np.flatnonzero(escaped)
+        point = lamp.point[rows]
+        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3) * carried[rows]
+        weight = (strength @ LUMA) * lamp.factor[rows]
+        vector[point] += weight[:, None] * lamp.direction[rows]
+        irradiance[point] += weight
+        if light_flat is not None:
+            flagged_rows = ignore_normals[point]
+            light_flat[point[flagged_rows]] += (strength * lamp.factor[rows, None] / np.pi)[flagged_rows]
+        shadow_rays += int((lamp.limit > 0).sum())
+        del lamp, carried, escaped, rows, point, strength, weight
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     for k, edge, dirs, cosine, carried, escaped in _shadow_batches(scene, job, sc, bv, edge=True):
         edge_sun_lit[edge, k] = escaped
@@ -661,7 +708,8 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
         del edge, dirs, cosine, carried, escaped
     total = texel_rays + int(usable.sum()) * rays + shadow_rays
     return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
-                          sun_throughput, texel_rgb)
+                          sun_throughput, texel_rgb,
+                          None if light_flat is None else light_flat.astype(np.float32))
 
 
 def load_and_run(work: Path, pages: list) -> VertexPassResult:
@@ -686,10 +734,15 @@ def warm_up():
         'occ_uv': np.empty((0, 2), np.float32), 'occ_tri_texture': np.empty(0, np.int32),
         'occ_tri_casts_shadow': np.empty(0, bool), 'occ_tri_cutout': np.empty(0, bool),
         'occ_tri_emission': np.empty((0, 3), np.float32), 'occ_tri_tint': np.empty((0, 3), np.float32),
+        'occ_tri_owner': np.empty(0, np.int32),
         'query_pos': np.float32([[.25, .25, 1]]), 'query_normal': np.float32([[0, 0, -1]]),
         'query_class': np.int16([0]),
     }
-    job = {'vertex_rays': 1, 'suns': [], 'ambient': {}, 'albedo_scale': 1., 'albedo_fallback': .5}
+    # a sun and a lamp, so the shadow kernel compiles both with and without the lamps' skip array
+    sun = {'direction': [0, 0, -1], 'angle': .01, 'color': [1, 1, 1], 'strength': 1., 'classes': [0]}
+    lamp = {'position': [.25, .25, .5], 'axis': [0, 0, 1], 'strength': [1, 1, 1], 'kind': 2, 'reach': 10.,
+            'cos_cutoff': -1., 'cos_falloff': -1., 'owner': 0, 'batch': 0}
+    job = {'vertex_rays': 1, 'suns': [sun], 'lights': [lamp], 'ambient': {}, 'albedo_scale': 1., 'albedo_fallback': .5}
     pages = [np.zeros((1, 1, 3), np.float32)]
     run_vertex_pass(scene, job, [], pages)
     cs = cpu_scene(scene, job, [], pages)
@@ -740,6 +793,8 @@ def child_main(argv: list[str]) -> int:
     result = load_and_run(work, pages)
     seconds_trace = perf_counter() - started
     throughput = {'vertex_sun_throughput': result.sun_throughput} if result.sun_throughput is not None else {}
+    if result.light_flat is not None:
+        throughput['vertex_light_flat'] = result.light_flat
     np.savez(work / 'cpu_out.npz', vector=result.vector, irradiance=result.irradiance,
              sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays),
              texel_rgb=result.texel_rgb, **throughput, seconds_compile=np.float64(seconds_compile),
