@@ -56,20 +56,30 @@ def test_largest_supported_page_set_uses_the_fitted_model():
     assert memory.bake_bytes(SceneCounts(400_000, 900_000), [(4096, 4096)] * 127) == 203_260_240_296
 
 
-def test_refuses_when_the_estimate_exceeds_free_memory(counts, pages):
+def test_largest_supported_page_set_warns_without_refusing():
+    result = memory.check_bake_memory(SceneCounts(400_000, 900_000), [(4096, 4096)] * 127,
+                                      4096, free=203_260_240_295)
+    assert result.estimate == 203_260_240_296
+    assert not result.fits
+    assert result.message == (
+        'This bake needs about 203 GB of free memory (largest page 4096 x 4096 at Max resolution 4096); '
+        'this computer has 203 GB free. Try Max resolution 2048, or close other programs. '
+        'If the level then needs too many pages or still does not fit, lower the texel density a little.')
+
+
+def test_warns_when_the_estimate_exceeds_free_memory(counts, pages):
     need = memory.bake_bytes(counts, pages)
     assert memory.check_bake_memory(counts, pages, 4096, free=need) == memory.MemoryCheck(need, need)
-    with pytest.raises(memory.BakeMemoryError) as caught:
-        memory.check_bake_memory(counts, pages, 4096, free=need - 1)
-    assert caught.value.estimate == need
-    assert caught.value.free == need - 1
+    result = memory.check_bake_memory(counts, pages, 4096, free=need - 1)
+    assert not result.fits
+    assert result.estimate == need
+    assert result.free == need - 1
+    assert result.message.startswith('This bake needs about ')
 
 
 def test_message_names_the_need_the_free_memory_and_a_fitting_max_resolution(counts, pages, message_model):
-    with pytest.raises(memory.BakeMemoryError) as caught:
-        memory.check_bake_memory(counts, pages, 4096, free=9_800_000_000)
-    error = caught.value
-    assert str(error) == ('This bake needs about 151 GB of free memory (largest page 4096 x 4096 at Max '
+    result = memory.check_bake_memory(counts, pages, 4096, free=9_800_000_000)
+    assert result.message == ('This bake needs about 151 GB of free memory (largest page 4096 x 4096 at Max '
                           'resolution 4096); this computer has 9.8 GB free. Try Max resolution 1024, or close '
                           'other programs. If the level then needs too many pages or still does not fit, lower '
                           'the texel density a little.')
@@ -88,10 +98,8 @@ def test_suggestion_counts_the_scene_and_margin(monkeypatch, message_model):
 
 
 def test_suggests_texel_density_when_no_choice_fits(counts, pages, message_model):
-    with pytest.raises(memory.BakeMemoryError) as caught:
-        memory.check_bake_memory(counts, pages, 4096, free=500_000_000)
-    error = caught.value
-    assert str(error).endswith('this computer has 0.5 GB free. Try a lower texel density, or close other programs.')
+    result = memory.check_bake_memory(counts, pages, 4096, free=500_000_000)
+    assert result.message.endswith('this computer has 0.5 GB free. Try a lower texel density, or close other programs.')
 
 
 def test_suggestion_is_worded_as_try(counts, pages, message_model):
@@ -131,9 +139,9 @@ def test_unknown_free_memory_does_not_refuse(counts, pages, caplog):
 
 def test_free_memory_is_read_when_not_given(counts, pages, monkeypatch):
     monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 1)
-    with pytest.raises(memory.BakeMemoryError) as caught:
-        memory.check_bake_memory(counts, pages, 4096)
-    assert caught.value.free == 1
+    result = memory.check_bake_memory(counts, pages, 4096)
+    assert result.free == 1
+    assert not result.fits
 
 
 def test_free_memory_failure_reads_as_unknown(monkeypatch):
@@ -177,19 +185,16 @@ def test_scene_counts_are_frozen(counts):
         counts.vertices = 0
 
 
-def test_bake_memory_error_carries_its_message_estimate_and_free():
-    error = memory.BakeMemoryError('This bake needs ...', 1, 2)
-    assert str(error) == 'This bake needs ...'
-    assert error.estimate == 1
-    assert error.free == 2
+def test_fitting_bake_has_no_warning(counts, pages):
+    result = memory.check_bake_memory(counts, pages, 4096, free=64 * memory.GB)
+    assert result.fits
+    assert result.message == ''
 
 
-def test_bake_memory_error_is_a_bake_error():
-    from lightmapper import pipeline
-    from lightmapper.errors import BakeError
-
-    assert issubclass(memory.BakeMemoryError, pipeline.BakeError)
-    assert pipeline.BakeError is BakeError
+def test_unknown_free_memory_has_no_fit_warning(counts, pages):
+    result = memory.check_bake_memory(counts, pages, 4096, free=None)
+    assert result.fits
+    assert result.message == ''
 
 
 @pytest.fixture
@@ -216,12 +221,12 @@ def test_empty_pages_memory_message(empty_pages_model, free, free_text):
         + '. Try a lower texel density, or close other programs.')
 
 
-def test_empty_pages_memory_guard_accepts_or_refuses_scene_cost(empty_pages_model):
+def test_empty_pages_memory_guard_accepts_or_warns_about_scene_cost(empty_pages_model):
     assert memory.check_bake_memory(empty_pages_model, [], 1024, free=88) == memory.MemoryCheck(88, 88)
     assert memory.check_bake_memory(empty_pages_model, [], 1024, free=None) == memory.MemoryCheck(88, None)
-    with pytest.raises(memory.BakeMemoryError) as caught:
-        memory.check_bake_memory(empty_pages_model, [], 1024, free=87)
-    assert (caught.value.estimate, caught.value.free) == (88, 87)
-    assert str(caught.value) == (
+    result = memory.check_bake_memory(empty_pages_model, [], 1024, free=87)
+    assert not result.fits
+    assert (result.estimate, result.free) == (88, 87)
+    assert result.message == (
         'This bake needs about 0.0 GB of free memory; this computer has 0.0 GB free. '
         'Try a lower texel density, or close other programs.')

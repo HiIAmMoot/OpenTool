@@ -85,7 +85,7 @@ def tiny(tmp_path, monkeypatch):
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
 
 
-def test_memory_guard_refuses_before_blender_starts(tiny, monkeypatch):
+def test_memory_guard_warns_and_starts_blender(tiny, monkeypatch, caplog):
     tags, settings, work = tiny
     calls = []
     blender = api().run_blender
@@ -96,9 +96,13 @@ def test_memory_guard_refuses_before_blender_starts(tiny, monkeypatch):
         return blender(*args)
 
     monkeypatch.setattr(api(), 'run_blender', record)
-    with pytest.raises(memory.BakeMemoryError):
-        api().bake(tags, 'level', 'room', settings, work=work)
-    assert calls == [] and not (work / 'job.json').exists()
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert len(calls) == 1 and (work / 'job.json').exists()
+    summary = json.loads((work / 'summary.json').read_text())
+    message = memory.out_of_memory_message(memory.SceneCounts(2, 6), summary['sizes'], settings.page_max, 1)
+    assert message in summary['warnings']
+    assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert 'needs about 0.0 GB' in message and 'has 0.0 GB free' in message
 
 
 def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
@@ -220,7 +224,7 @@ def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     pages = summary['sizes']
     message = memory.out_of_memory_message(counts, pages, settings.page_max, 1)
     assert message in summary['warnings']
-    assert f'{message}; dry run continues for timing only' in caplog.text
+    assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
     assert summary['memory'] == {'estimate_gb': round(memory.bake_bytes(counts, pages) / memory.GB, 2),
                                  'free_gb': round(1 / memory.GB, 2)}
     assert out.work == work

@@ -431,7 +431,7 @@ class App:
     def _update_bake_state(self):
         valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
         valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
-                 and not self.busy and self.estimate_state in ('idle', 'fits', 'error'))
+                 and not self.busy and self.estimate_state in ('idle', 'fits', 'warning', 'error'))
         self.bake_button.configure(state='normal' if valid else 'disabled')
 
     def _update_new_names_hint(self):
@@ -606,13 +606,12 @@ class App:
                     self._start_estimate()
                     continue
                 try:
-                    text, allowed = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
+                    text, state = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
                 except Exception as exc:
                     result = exc
-                    text, allowed = errors.explain(exc), True
+                    text, state = errors.explain(exc), 'error'
                 self.memory_label.configure(text=text)
-                self.estimate_state = ('refused' if not allowed else
-                                       'error' if isinstance(result, BaseException) else 'fits')
+                self.estimate_state = state
                 if isinstance(result, BaseException):
                     self._write_exception(result)
                 self._update_bake_state()
@@ -717,6 +716,12 @@ class App:
         except ValueError as exc:
             self.stage_label.configure(text=str(exc), foreground='red')
             return
+        if self.estimate_state == 'warning':
+            message = self.memory_label['text'].removesuffix(estimate_module.RISK_SUFFIX)
+            if not messagebox.askyesno(
+                    'Not enough memory',
+                    message + '\n\nBake anyway? Blender may run out of memory and stop.'):
+                return
         if not request.new_names:
             tail = ('Backups go in a backups folder next to them.' if request.backups
                     else 'No backups are kept.')

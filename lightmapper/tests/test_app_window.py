@@ -1193,14 +1193,63 @@ def test_incomplete_form_starts_no_estimate(app_with_fake, tiny, monkeypatch):
     assert fake.calls[0].bsp == 'other'
 
 
-def test_bake_disabled_when_the_level_will_not_fit(ready_app_with_fake, monkeypatch):
+def test_bake_enabled_with_warning_when_the_level_may_not_fit(ready_app_with_fake, monkeypatch):
     app, fake = ready_app_with_fake
     monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: 1)
     app.advanced_vars['page_max'].set('1024')
     finish_estimate(app, fake)
-    assert app.memory_label['text'] == out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, 1024, 1)
-    assert app.estimate_state == 'refused'
-    assert str(app.bake_button['state']) == 'disabled'
+    assert app.memory_label['text'] == (out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, 1024, 1)
+                                        + ' You can still bake, at your own risk.')
+    assert app.estimate_state == 'warning'
+    assert str(app.bake_button['state']) == 'normal'
+
+
+@pytest.mark.parametrize('answer', [False, True])
+@pytest.mark.parametrize('new_names', [False, True])
+def test_memory_warning_asks_before_baking(ready_app, monkeypatch, answer, new_names):
+    app = ready_app
+    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: 1)
+    inputs = app.estimate_inputs()
+    app.events.put(('estimate', app.generation, inputs, ESTIMATE_FITS))
+    app._drain()
+    app.new_names_var.set(new_names)
+    message = out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, inputs.page_max, 1)
+    asked, started = [], []
+
+    def ask(*args):
+        asked.append(args)
+        return answer
+
+    def bake(req, emit):
+        started.append(req)
+        emit(('done', OUTCOME_DONE))
+
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', ask)
+    app._run_bake = bake
+    app.start_bake()
+    assert asked[:1] == [('Not enough memory', message + '\n\nBake anyway? Blender may run out of memory and stop.')]
+    if answer:
+        pump_app(app, lambda: not app.busy)
+        assert len(started) == 1
+        assert [q[0] for q in asked] == (['Not enough memory'] if new_names else
+                                       ['Not enough memory', 'Replace your tags?'])
+    else:
+        assert not app.busy and started == []
+        assert len(asked) == 1
+
+
+def test_fitting_bake_does_not_ask_memory_question(ready_app, monkeypatch):
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: pytest.fail('asked'))
+    started = []
+
+    def bake(req, emit):
+        started.append(req)
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = bake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: not ready_app.busy)
+    assert len(started) == 1
 
 
 def check_estimate_error(ready_app_with_fake, exc, state, button):

@@ -8,6 +8,9 @@ from lightmapper.settings import Settings
 from . import errors, runner
 
 
+RISK_SUFFIX = ' You can still bake, at your own risk.'
+
+
 @dataclass(frozen=True)
 class EstimateInputs:
     tags: Path
@@ -26,13 +29,13 @@ def run_estimate(inputs: EstimateInputs) -> SceneEstimate:
 
 
 def describe(result: SceneEstimate | BaseException, page_max: int,
-             free: int | None) -> tuple[str, bool]:
+             free: int | None) -> tuple[str, str]:
     if isinstance(result, BaseException):
-        return errors.explain(result), not isinstance(result, CapError)
+        return errors.explain(result), 'refused' if isinstance(result, CapError) else 'error'
     need = memory.bake_bytes(result.counts, result.pages)
     if free is not None and need > free:
-        return memory.out_of_memory_message(result.counts, result.pages, page_max, free), False
+        return memory.out_of_memory_message(result.counts, result.pages, page_max, free) + RISK_SUFFIX, 'warning'
     text = f'Needs about {memory.format_gb(need)} GB'
     if free is not None:
         text += f'; {memory.format_gb(free)} GB free'
-    return text, True
+    return text, 'fits'

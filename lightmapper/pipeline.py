@@ -302,15 +302,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     begin('scene')
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                                       s.scenery_emission)
-    try:
-        check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
-                                         [(p.width, p.height) for p in pages], s.page_max)
-    except memory.BakeMemoryError as error:
-        if not dry_run:
-            raise
-        logger.warning('%s; dry run continues for timing only', error)
-        warnings.append(str(error))
-        check = memory.MemoryCheck(error.estimate, error.free)
+    check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
+                                     [(p.width, p.height) for p in pages], s.page_max)
+    if not check.fits:
+        logger.warning('%s', check.message)
+        warnings.append(check.message)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
               vertex_pass='skip' if choice.adapter else 'cpu')

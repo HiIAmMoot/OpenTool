@@ -7,8 +7,6 @@ import os
 
 import numpy as np
 
-from .errors import BakeError
-
 
 # b40_a and bloodgulch, 512/1024/2048, 2026-10-29; triangles fit to 0 because
 # triangle and vertex counts rise together, so the vertex term carries both.
@@ -124,13 +122,8 @@ def out_of_memory_message(counts, pages, page_max: int, free: int | None) -> str
 class MemoryCheck:
     estimate: int
     free: int | None
-
-
-class BakeMemoryError(BakeError):
-    def __init__(self, message, estimate, free):
-        self.estimate = estimate
-        self.free = free
-        super().__init__(message)
+    fits: bool = True
+    message: str = ''
 
 
 def check_bake_memory(counts, pages, page_max, free=READ) -> MemoryCheck:
@@ -140,5 +133,5 @@ def check_bake_memory(counts, pages, page_max, free=READ) -> MemoryCheck:
     if free is None:
         logger.warning('free memory is unknown, so the bake runs without the memory check')
     elif estimate > free:
-        raise BakeMemoryError(out_of_memory_message(counts, pages, page_max, free), estimate, free)
+        return MemoryCheck(estimate, free, False, out_of_memory_message(counts, pages, page_max, free))
     return MemoryCheck(estimate, free)

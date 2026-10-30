@@ -23,24 +23,25 @@ def result(monkeypatch):
 ])
 def test_describe_fits(result, free, text):
     from opentool.estimate import describe
-    assert describe(result, 1024, free) == (text, True)
+    assert describe(result, 1024, free) == (text, 'fits')
 
 
-def test_describe_refuses(result):
+def test_describe_warns(result):
     from opentool.estimate import describe
     assert describe(result, 1024, 1) == (
         'This bake needs about 9.5 GB of free memory (largest page 1024 x 1024 at Max resolution 1024); '
-        'this computer has 0.0 GB free. Try a lower texel density, or close other programs.', False)
+        'this computer has 0.0 GB free. Try a lower texel density, or close other programs. '
+        'You can still bake, at your own risk.', 'warning')
 
 
-@pytest.mark.parametrize('exc, text, allowed', [
+@pytest.mark.parametrize('exc, text, state', [
     (CapError('too many pages'), 'This level needs more lightmap space than the stock format allows at these settings. '
-     'Lower the texel density, or raise Max resolution under Advanced.', False),
-    (RuntimeError('broken'), 'The bake stopped: broken. The full error is in the log.', True),
+     'Lower the texel density, or raise Max resolution under Advanced.', 'refused'),
+    (RuntimeError('broken'), 'The bake stopped: broken. The full error is in the log.', 'error'),
 ])
-def test_describe_error(exc, text, allowed):
+def test_describe_error(exc, text, state):
     from opentool.estimate import describe
-    assert describe(exc, 1024, None) == (text, allowed)
+    assert describe(exc, 1024, None) == (text, state)
 
 
 def test_run_estimate_uses_chart_settings_and_level_cache(monkeypatch, tmp_path):
@@ -71,5 +72,5 @@ def test_describe_counts_all_127_resident_pages(result):
     result.pages.extend([(256, 256)] * 126)
     # 9 * 1024**2 * 1000 + (1024**2 + 126 * 256**2) * 100
     need = 10_367_795_200
-    assert describe(result, 1024, need) == ('Needs about 10 GB; 10 GB free', True)
-    assert describe(result, 1024, need - 1)[1] is False
+    assert describe(result, 1024, need) == ('Needs about 10 GB; 10 GB free', 'fits')
+    assert describe(result, 1024, need - 1)[1] == 'warning'
