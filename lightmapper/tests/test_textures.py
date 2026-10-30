@@ -7,9 +7,9 @@ import numpy as np
 import pytest
 
 from conftest import HCEEK_TAGS as TAGS
-from lightmapper.formats.bitmap_decode import UnsupportedBitmap, decode_bitmap
+from lightmapper.formats.bitmap_decode import UnsupportedBitmap, decode_bitmap, decode_bitmap_alpha
 from lightmapper.formats.scenery import gather_occluders
-from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, write_tag
+from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
 from lightmapper.textures import TextureSet, shader_texture
 
 
@@ -105,6 +105,50 @@ def test_unsupported_bitmaps_raise(kwargs):
 def test_truncated_pixel_data_raises():
     with pytest.raises(UnsupportedBitmap):
         decode_bitmap(bitmap_tag(2, 2, 'A8R8G8B8', bytes(8)))
+
+
+def test_p8_bump_alpha_is_transparent_from_index_249():
+    tag = bitmap_tag(4, 1, 'P8', bytes([0, 248, 249, 255]))
+    assert decode_bitmap_alpha(tag).tolist() == [[255, 255, 0, 0]]
+
+
+def test_bitmap_alpha_of_a_colour_format_is_its_alpha_channel():
+    assert decode_bitmap_alpha(bitmap_tag(1, 1, 'A8R8G8B8', bytes([3, 2, 1, 9]))).tolist() == [[9]]
+
+
+@pytest.mark.parametrize('kwargs', [dict(flags=0x8), dict(kind=1, depth=2)])
+def test_p8_alpha_refuses_what_decode_bitmap_refuses(kwargs):
+    with pytest.raises(UnsupportedBitmap):
+        decode_bitmap_alpha(bitmap_tag(1, 1, 'P8', bytes(8), **kwargs))
+
+
+def test_p8_alpha_refuses_short_pixel_data():
+    with pytest.raises(UnsupportedBitmap):
+        decode_bitmap_alpha(bitmap_tag(4, 1, 'P8', bytes(3)))
+
+
+def test_p8_alpha_uses_bitmap_index_and_pixel_data_offset():
+    tag = bitmap_tag(1, 1, 'P8', bytes([0, 248, 249, 255, 250]))
+    second = child(tag.root, 'bitmaps')
+    for key, value in (('width', 2), ('height', 2), ('depth', 1), ('format', 17), ('pixel_data_offset', 1)):
+        second.set(key, value)
+    tag.root.block('bitmaps').append(second)
+    alpha = decode_bitmap_alpha(tag, 1)
+    assert alpha.dtype == np.uint8
+    assert alpha.tolist() == [[255, 0], [0, 0]]
+
+
+@pytest.mark.parametrize('index', [-1, 1])
+def test_p8_alpha_refuses_missing_bitmap(index):
+    with pytest.raises(UnsupportedBitmap, match=f'no bitmap {index}'):
+        decode_bitmap_alpha(bitmap_tag(1, 1, 'P8', bytes([0])), index)
+
+
+@pytest.mark.ek
+def test_stock_p8_bump_alpha_has_its_holes():
+    tag = read_tag(resolve_reference_path(TAGS, 'bitm', r'levels\b30\bitmaps\alpha grate bump'))
+    alpha = decode_bitmap_alpha(tag)
+    assert alpha.shape == (256, 1024) and abs((alpha < 128).mean() - 0.341) < 0.005
 
 
 def plate_candidate(fmt):

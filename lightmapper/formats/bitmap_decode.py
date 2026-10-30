@@ -1,8 +1,9 @@
 """Decode H1A bitmap tags to RGBA, mip 0 of one bitmap.
 
-Decoders use metadata from the tag reader's fields. Only plain 2D colour
-formats are decoded; palettised, swizzled, volume and cube bitmaps are refused
-to avoid guessing their layout.
+Decoders use metadata from the tag reader's fields. decode_bitmap decodes only
+plain 2D colour formats and refuses palettised bitmaps; decode_bitmap_alpha
+also reads a palettised bump map's alpha. Swizzled, volume and cube bitmaps
+are refused to avoid guessing their layout.
 """
 
 import io
@@ -94,3 +95,26 @@ def decode_bitmap(tag: Tag, index: int = 0) -> np.ndarray:
     if len(pixels) < size or not width or not height:
         raise UnsupportedBitmap('pixel data is shorter than the bitmap')
     return _decode(name, width, height, pixels)
+
+
+def decode_bitmap_alpha(tag: Tag, index: int = 0) -> np.ndarray:
+    bitmaps = tag.root.block('bitmaps')
+    if not 0 <= index < len(bitmaps):
+        raise UnsupportedBitmap(f'no bitmap {index}')
+    bitmap = bitmaps[index]
+    if bitmap.get('format') != 17:
+        return decode_bitmap(tag, index)[:, :, 3]
+    width, height = bitmap.get('width'), bitmap.get('height')
+    if bitmap.get('type') != 0 or bitmap.get('depth') > 1:
+        raise UnsupportedBitmap('only 2D bitmaps are decoded')
+    if bitmap.get('flags') & SWIZZLED:
+        raise UnsupportedBitmap('swizzled bitmap')
+    size = width * height
+    offset = bitmap.get('pixel_data_offset')
+    pixels = tag.root.data('processed_pixel_data')[offset:offset + size]
+    if len(pixels) < size or not width or not height:
+        raise UnsupportedBitmap('pixel data is shorter than the bitmap')
+    # (the encoder writes 255 for alpha up to 0x80, bitmaps.c:895-898;
+    # only palette entries 249-255 are transparent, bitmaps.c:320-353)
+    indices = np.frombuffer(pixels, np.uint8).reshape(height, width)
+    return np.where(indices >= 249, np.uint8(0), np.uint8(255))
