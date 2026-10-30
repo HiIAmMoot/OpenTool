@@ -15,7 +15,8 @@ from lightmapper.blender_job import write_job
 from test_blender_bake import UP, build, floor, full_quad, sun
 from test_vertex_gpu import CASES, edge_receivers, textured_room, write_bare_scene
 from test_vertex_pass import (S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene, roof,
-                              run_driver, twin_scene, unpaired_back_face_scene, wall_facing_minus_x)
+                              run_driver, twin_scene, unpaired_back_face_scene, wall_facing_minus_x,
+                              texel_scene, mixed_scene, assert_flagged_bounce, assert_emission_relay, assert_mixed)
 
 
 def run_probe(out):
@@ -388,7 +389,9 @@ def blender_and_numba(tmp_path, **kwargs):
     blender = run_driver(tmp_path, **kwargs)
     ours = vertex_cpu.load_and_run(tmp_path, saved_pages(tmp_path))
     metrics = {'rays': ours.rays}
-    for field in ('irradiance', 'vector'):
+    for field in ('irradiance', 'vector', 'texel_rgb'):
+        if getattr(ours, field) is None:
+            continue
         diff = np.abs(getattr(ours, field) - blender[field])
         rel = diff / np.maximum(np.abs(blender[field]), 1e-6)
         metrics[field] = {'max_abs': float(diff.max(initial=0)), 'max_rel': float(rel.max(initial=0)),
@@ -638,14 +641,115 @@ def test_a_small_chunk_gives_the_same_result(tmp_path, monkeypatch):
                ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit')) and split.rays == whole.rays
 
 
-def test_texel_queries_are_refused_until_ported(tmp_path):
+def test_tool_mode_returns_empty_texel_rgb(tmp_path):
     pages = write_bare_scene(tmp_path)
+    result = vertex_cpu.load_and_run(tmp_path, pages)
+    assert result.texel_rgb.shape == (0, 3) and result.texel_rgb.dtype == np.float32
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['grazing', 'behind', 'pane', 'vertex', 'vertex_back', 'edge',
+                                  'emission_budget', 'ordinary_budget'])
+def test_numba_matches_blender_pass_on_texel_scenes(tmp_path, kind):
+    blender, ours = blender_and_numba(tmp_path, **texel_scene(kind))
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(ours.irradiance, blender['irradiance'], rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(ours.vector, blender['vector'], rtol=1e-5, atol=1e-6)
+    assert ours.rays == int(blender['rays'])
+    if kind == 'vertex_back':
+        assert ours.irradiance[0] == pytest.approx(3, rel=.05)
+    if kind == 'edge':
+        assert ours.rays == 2 * 512
+        np.testing.assert_allclose(ours.texel_rgb, .105, rtol=.3)
+    if kind in ('emission_budget', 'ordinary_budget'):
+        np.testing.assert_allclose(ours.texel_rgb, 2. if kind == 'emission_budget' else 1., rtol=.05)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('bounces', [0, 1, 2])
+def test_flagged_stage_budget_matches(tmp_path, bounces):
+    blender, ours = blender_and_numba(tmp_path, **texel_scene('flagged_bounce'), bounces=bounces)
+    assert_flagged_bounce(ours.texel_rgb, bounces)
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-5, atol=1e-6)
+    assert ours.rays == int(blender['rays'])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('bounces', [0, 1])
+def test_direct_emission_takes_no_reflected_stage(tmp_path, bounces):
+    blender, ours = blender_and_numba(tmp_path, **texel_scene('emission_relay'), bounces=bounces)
+    assert_emission_relay(ours.texel_rgb, bounces)
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-5, atol=1e-6)
+    assert ours.rays == int(blender['rays'])
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('kind', ['mixed_dark_flagged', 'mixed_bright_flagged', 'mixed_delta', 'mixed_ordinary'])
+def test_mixed_texel_sources_match(tmp_path, kind):
+    blender, ours = blender_and_numba(tmp_path, **mixed_scene(kind))
+    assert_mixed(kind, ours.texel_rgb)
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-5, atol=1e-6)
+    assert ours.rays == int(blender['rays'])
+
+
+@pytest.mark.blender
+def test_ignore_normals_enhanced_mode_matches(tmp_path):
+    scene = textured_room()
+    scene['receivers'][0]['ignore_normals'] = True
+    scene.update(mode='enhanced', ignore_normals=[True] * 36 + [False] * 28)
+    blender, ours = blender_and_numba(tmp_path, **scene)
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-5, atol=1e-6)
+    rel = np.abs(ours.irradiance - blender['irradiance']) / np.maximum(blender['irradiance'], 1e-6)
+    assert blender['irradiance'].min() > 0
+    assert np.median(rel) <= 1e-4 and rel.max() <= 1e-2
+    assert ours.rays == int(blender['rays']) and np.array_equal(ours.sun_lit, blender['sun_lit'])
+    assert ours.sun_lit.any()
+    assert ours.sun_throughput is None
+
+
+def test_texel_gather_at_the_stock_query_limit_uses_cpu_budgets(tmp_path, monkeypatch):
+    pages = write_bare_scene(tmp_path, triangles=False)
     with np.load(tmp_path / 'scene.npz') as data:
         scene = {key: data[key] for key in data.files}
-    scene['texel_pos'] = np.ones((1, 3), np.float32)
+    count = 393216
+    scene.update(texel_pos=np.zeros((count, 3), np.float32),
+                 texel_normal=np.tile(np.float32(UP), (count, 1)), texel_class=np.zeros(count, np.int16),
+                 texel_page=np.zeros(count, np.int16), texel_xy=np.zeros((count, 2), np.int32),
+                 query_pos=np.empty((0, 3), np.float32), query_normal=np.empty((0, 3), np.float32),
+                 query_class=np.empty(0, np.int16), query_ignore_normals=np.empty(0, bool))
+    scene['texel_normal'][-1] = 0
     job = json.loads((tmp_path / 'job.json').read_text())
-    with pytest.raises(vertex_cpu.CpuPassError, match='texel queries are not in the compiled pass yet'):
-        vertex_cpu.run_vertex_pass(scene, job, [], pages)
+    job.update(ignore_normals_mode='enhanced', cpu_samples=72, cpu_texel_samples=0,
+               samples=144, texel_samples=512, bounces=0, suns=[])
+    chunks = []
+    gather = vertex_cpu._gather
+
+    def recording(*args):
+        chunks.append(args[2].shape[:2])
+        return gather(*args)
+
+    monkeypatch.setattr(vertex_cpu, '_gather', recording)
+    result = vertex_cpu.run_vertex_pass(scene, job, [], pages)
+    assert result.rays == (count - 1) * 8
+    assert len(chunks) == 2 and sum(m for m, _ in chunks) == count - 1
+    assert all(rays == 8 and m * rays <= vertex_cpu.CHUNK_RAYS for m, rays in chunks)
+    assert result.texel_rgb.shape == (count, 3) and result.texel_rgb.dtype == np.float32
+    np.testing.assert_array_equal(result.texel_rgb, 0)
+
+
+@pytest.mark.blender
+def test_texel_stages_are_chunk_and_thread_invariant(tmp_path, monkeypatch):
+    blender, whole = blender_and_numba(tmp_path, **texel_scene('flagged_bounce'), bounces=2)
+    monkeypatch.setattr(vertex_cpu, 'CHUNK_RAYS', 4096)
+    default = numba.get_num_threads()
+    try:
+        numba.set_num_threads(1)
+        split = vertex_cpu.load_and_run(tmp_path, saved_pages(tmp_path))
+    finally:
+        numba.set_num_threads(default)
+    for field in ('texel_rgb', 'vector', 'irradiance', 'sun_lit', 'edge_sun_lit'):
+        np.testing.assert_array_equal(getattr(split, field), getattr(whole, field))
+    assert split.rays == whole.rays == int(blender['rays'])
 
 
 @pytest.mark.parametrize('mixed', [False, True])

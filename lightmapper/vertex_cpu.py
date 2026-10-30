@@ -508,9 +508,72 @@ class CpuPassError(RuntimeError):
     pass
 
 
+def gather_texels(scene, job, textures, pages):
+    count = len(scene.get('texel_pos', ()))
+    rgb = np.zeros((count, 3), np.float32)
+    if not count:
+        return rgb, 0, pages
+    from .raster import flagged_transport, ordinary_transport, texel_contribution, texel_ray_counts
+
+    usable, n, tangent, bitangent, spin = query_frames(scene['texel_normal'], job.get('seed', 0))
+    pos = scene['texel_pos'].astype(np.float64)
+    cls = scene['texel_class'].astype(np.int64)
+    cs = cpu_scene(scene, job, textures, pages)
+    bvh = build_bvh(cs.corners32)
+    bv = (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order)
+    probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
+                 query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
+    probe.pop('query_inverse', None)
+    query, sun_index, origins, dirs, _ = sun_rays(probe, job, usable, n)
+    carried, escaped = np.empty((len(origins), 3)), np.empty(len(origins), bool)
+    _shadow(cs.arrays(), bv, origins.astype(np.float32), dirs.astype(np.float32),
+            np.full(len(origins), RAY_LENGTH), carried, escaped)
+    for k, sun in enumerate(job['suns']):
+        rows = np.flatnonzero((sun_index == k) & escaped)
+        rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
+    counts = texel_ray_counts(scene, job['pages'], max(1, round(job.get('cpu_samples', job['samples']) / 9)),
+                              job.get('cpu_texel_samples', job['texel_samples']))
+    ids = np.flatnonzero(usable)
+
+    def reflection(base, flagged_pages, with_pages, with_emission):
+        source = cpu_scene(scene, job, textures, base, flagged_pages)
+        sc = source.arrays()
+        delta = np.zeros((count, 3), np.float32)
+        for rays in np.unique(counts[ids]):
+            rows = ids[counts[ids] == rays]
+            local, phi, radius = sphere(int(rays))
+            chunk = max(1, CHUNK_RAYS // int(rays))
+            for first in range(0, len(rows), chunk):
+                chosen = rows[first:first + chunk]
+                angle = phi[None, :] + spin[chosen, None]
+                direction = (radius[None, :, None] * np.cos(angle)[:, :, None] * tangent[chosen, None, :]
+                             + radius[None, :, None] * np.sin(angle)[:, :, None] * bitangent[chosen, None, :]
+                             + local[None, :, 2, None] * n[chosen, None, :])
+                origin = (pos[chosen, None, :] + RAY_EPSILON * direction).astype(np.float32)
+                sums = np.empty((len(chosen), 4))
+                _gather(sc, bv, origin, direction.astype(np.float32), direction, cls[chosen], usable[chosen],
+                        True, False, with_pages, with_emission, sums)
+                delta[chosen] = 4 / rays * sums[:, :3]
+        return delta
+
+    def flagged(values):
+        return [flagged_transport(scene, i, p.shape[1], p.shape[0], values) for i, p in enumerate(pages)]
+
+    # original emission reaches the flagged sources before they spend a reflected stage
+    rgb += reflection(pages, None, False, True)
+    casts = len(query) + int(counts[ids].sum())
+    stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
+    for _ in range(max(0, int(job['bounces']))):
+        delta = reflection(stable, sources, True, False)
+        rgb += delta
+        casts += int(counts[ids].sum())
+        stable, sources = [np.zeros_like(p) for p in pages], flagged(delta)
+    installed = [p + texel_contribution(scene, i, p.shape[1], p.shape[0], rgb)[0] for i, p in enumerate(pages)]
+    return rgb, casts, installed
+
+
 def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> VertexPassResult:
-    if len(scene.get('texel_pos', ())):
-        raise CpuPassError('texel queries are not in the compiled pass yet')
+    texel_rgb, texel_rays, pages = gather_texels(scene, job, textures, pages)
     rays = int(job.get('cpu_vertex_rays', job['vertex_rays']))
     usable, n, tangent, bitangent, spin = query_frames(scene['query_normal'], job.get('seed', 0))
     queries = len(n)
@@ -566,9 +629,9 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
             sun_throughput[sun_query[rows], k] = carried[rows]
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
-    total = int(usable.sum()) * rays + len(sun_query) + len(edge)
+    total = texel_rays + int(usable.sum()) * rays + len(sun_query) + len(edge)
     return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
-                          sun_throughput)
+                          sun_throughput, texel_rgb)
 
 
 def load_and_run(work: Path, pages: list) -> VertexPassResult:
