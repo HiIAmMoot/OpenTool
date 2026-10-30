@@ -299,6 +299,25 @@ def test_access_violation_with_calloc_null_is_out_of_memory(tmp_path, fake, monk
     assert 'Calloc returns null' in str(caught.value)
 
 
+def test_out_of_memory_message_uses_free_memory_from_before_blender_started(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
+    started = []
+    real_run = subprocess.run
+
+    def run(*args, **kwargs):
+        started.append(True)
+        return real_run(*args, **kwargs)
+    monkeypatch.setattr(blender_job.subprocess, 'run', run)
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 99_000_000_000 if started else 9_800_000_000)
+    with pytest.raises(BlenderOutOfMemory) as caught:
+        run_blender(work, s)
+    assert caught.value.message == memory.out_of_memory_message(
+        SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)], s.page_max, 9_800_000_000)
+
+
 def test_access_violation_without_calloc_stays_blender_error(tmp_path, fake, monkeypatch):
     work = tmp_path / 'work'
     s = Settings(blender=fake)

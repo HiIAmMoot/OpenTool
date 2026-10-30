@@ -1314,6 +1314,17 @@ def test_density_selection_and_preset_trigger_estimates(ready_app_with_fake):
     assert fake.calls[2].texels_per_unit == 1
 
 
+def test_preset_switch_estimates_once_on_the_final_inputs(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    app._select_preset('Normal')
+    finish_estimate(app, fake, len(fake.calls) - 1)
+    before = len(fake.calls)
+    app._select_preset('High')
+    pump(app.root, lambda: len(fake.calls) > before)
+    app.root.update()
+    assert [(c.texels_per_unit, c.page_max) for c in fake.calls[before:]] == [(4.0, 1024)]
+
+
 @pytest.mark.parametrize('field, value', [('texels_per_unit', ''), ('texels_per_unit', 'bad'),
                                          ('page_max', ''), ('page_max', 'bad')])
 def test_invalid_chart_inputs_clear_estimate(ready_app_with_fake, field, value):

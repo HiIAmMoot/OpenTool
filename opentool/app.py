@@ -333,7 +333,8 @@ class App:
                               values['texels_per_unit'], values['page_max'])
 
     def _inputs_changed(self):
-        if self.busy:
+        # (a preset writes its fields one at a time; _select_preset estimates once when all are in)
+        if self.busy or self._setting_preset:
             return
         inputs = self.estimate_inputs()
         if inputs is None:
@@ -467,6 +468,7 @@ class App:
                     self.advanced_vars[field].set(presets.format_density(value) if field == 'texels_per_unit' else str(value))
         finally:
             self._setting_preset = False
+        self._inputs_changed()
 
     def _toggle_advanced(self):
         if self._advanced_open:

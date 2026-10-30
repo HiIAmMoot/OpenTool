@@ -11,7 +11,7 @@ The defaults aim for tool's final-quality lighting, plus light from scenery shad
 | `texels_per_unit` | 2.0 | Lightmap texels per world unit, for shaders at detail level 1. Doubling it doubles the sharpness and roughly quadruples the texels. |
 | `detail_level_scale` | (2.667, 1.0, 0.6, 0.03) | Multiplier on `texels_per_unit` for shader detail levels 0 to 3, taken from tool's final-quality ratios. Detail level 3 surfaces get almost no texels. |
 | `padding` | 4 | Empty texels around each chart, so filtering does not bleed between charts. |
-| `page_max` | 1024 | Largest page side in texels. Stock maps use at most 512 by 1024. Pages up to 4096 work in MCC (owner, 2026-10-28). Bake memory grows with the square of the page side, so the peak depends on how big the pages really are. Measured on b40_a, whose texel density fits the level in one page of about 1M texels at either setting: 3.39 GB peak at 1024 and 3.35 GB at 2048. Measured on bloodgulch and putput, whose larger pages reached about 11.6 GB at 2048. Estimated, not measured: about 42.7 GB for one full 4096 by 4096 page. The bake checks free memory before Blender starts and warns when the bake may not fit; you can still bake, at your own risk. (GB = 10^9 bytes.) |
+| `page_max` | 1024 | Largest page side in texels. Stock maps use at most 512 by 1024. Pages up to 4096 work in MCC. Bake memory grows with the square of the page side, so the peak depends on how big the pages really are. Measured on b40_a, whose texel density fits the level in one page of about 1M texels at either setting: 3.39 GB peak at 1024 and 3.35 GB at 2048. Measured on bloodgulch and putput, whose larger pages reached about 11.6 GB at 2048. Estimated, not measured: about 42.7 GB for one full 4096 by 4096 page. The bake checks free memory before Blender starts and warns when the bake may not fit; you can still bake, at your own risk. (GB = 10^9 bytes.) |
 | `page_min` | 8 | Smallest page side in texels. |
 | `max_pages` | 127 | Most pages a level may use. The stock format allows 127 plus an empty last entry. |
 | `max_materials_per_page` | 2048 | Stock limit on materials per page. |
@@ -19,7 +19,7 @@ The defaults aim for tool's final-quality lighting, plus light from scenery shad
 | `max_surfaces` | 20000 | Stock limit on surfaces per material. A larger material is split. |
 | `respect_normal_seams` | true | Cut charts at hard creases, as tool does. Shaders that ask for simple parameterization stay joined across creases either way. |
 
-A level that cannot fit the configured limits is refused. Errors can name a chart that exceeds `page_max` including padding, or several possible packing limits; they do not always identify one remedy. Lowering density or increasing `page_max` within tested sizes may help. The `max_*` settings are configurable, so do not raise them above their stock defaults. Later writer or validation checks can reject values above stock.
+A level that cannot fit the configured limits is refused. Errors can name a chart that exceeds `page_max` including padding, or several possible packing limits; they do not always identify one remedy. Lowering density or increasing `page_max` may help. The `max_*` settings are configurable, so do not raise them above their stock defaults. Later writer or validation checks can reject values above stock.
 
 ## The bake
 
@@ -71,7 +71,8 @@ Every successful bake writes `summary.json` into its work folder. Besides the se
 | Key | What it holds |
 |---|---|
 | `devices` | The `device` setting, the vendor and adapter chosen, the Cycles devices tried, and what each stage ran on: `page_bake` (a Cycles device such as `OPTIX` or `HIP`, or `CPU`), `vertex_pass` (the GPU and its backend, or `cpu`) and `denoise` (`CUDA`, `CPU` or `off`). |
-| `warnings` | Text lines for anything that fell back or was left unpaired: no GPU with ray queries found, Cycles falling back to the CPU, a failed GPU vertex pass, the denoiser running on the CPU, coincident triangle groups of more than two that could not be paired. An empty list means nothing fell back. |
+| `warnings` | Text lines for anything that fell back or was left unpaired: no GPU with ray queries found, Cycles falling back to the CPU, a failed GPU vertex pass, the denoiser running on the CPU, coincident triangle groups of more than two that could not be paired, and the memory warning when the bake may not fit in free memory (it still ran). An empty list means nothing fell back. |
+| `memory` | The memory check made before Blender started: `estimate_gb` (what the bake is expected to need) and `free_gb` (free physical memory then, or `null` when it could not be read). |
 | `rays` | The counts the bake used: `samples` per texel, `texel_samples` for chart edges and `vertex_rays` per vertex query. They are the CPU counts for a stage that ran on the CPU. |
 | `vertex_rays_cast` | How many rays the vertex pass cast in all. |
 | `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex` (and `blender_glow` when enhanced normals ran a second Blender run), then `vertex_pass`, `denoise`, `finish`, `write` and `total`. |

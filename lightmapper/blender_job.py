@@ -219,6 +219,8 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
                '--python', str(BAKE_SCRIPT), '--', str(work / job_name)]
     environment = dict(os.environ)
     environment['LIGHTMAPPER_LAUNCH_TIME'] = str(time.time())
+    # (read before Blender starts: once it has died its memory is free again and the message would contradict itself)
+    free_before = free_physical_bytes()
     try:
         with open(log, 'wb') as handle:
             done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=handle,
@@ -233,7 +235,7 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
         # an access violation alone is any crash; only Blender's own failed-allocation line makes it memory
         if done.returncode in ACCESS_VIOLATION and ('Calloc returns null' in tail or 'Malloc returns null' in tail):
             message = out_of_memory_message(SceneCounts.from_npz(work / job['scene']),
-                                            [tuple(p) for p in job['pages']], s.page_max, free_physical_bytes())
+                                            [tuple(p) for p in job['pages']], s.page_max, free_before)
             raise BlenderOutOfMemory(message, tail)
         raise BlenderError(f'blender exited with {done.returncode}\n{tail}')
     if not out.is_file():
