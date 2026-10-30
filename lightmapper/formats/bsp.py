@@ -205,3 +205,35 @@ def apply_layout(bsp: Tag, geometry: BspGeometry, pages: list[OutPage],
     root.set_block('lightmaps', new_pages)
     root.set_reference('lightmaps_bitmap', 'bitm', bitmap_path)
     return new_to_input
+
+
+# the cluster of each point by the collision BSP walk the engine's scenario code does, -1 outside any
+def point_clusters(bsp_tag: Tag, points: np.ndarray) -> np.ndarray:
+    root = bsp_tag.root
+    result = np.full(len(points), -1, dtype=np.int32)
+    collision = root.block('collision_bsp')
+    if not collision:
+        return result
+    nodes = [(n.get('plane'), n.get('back_child'), n.get('front_child'))
+             for n in collision[0].block('bsp3d_nodes')]
+    planes = [p.get('plane') for p in collision[0].block('planes')]
+    leaf_clusters = [leaf.get('cluster') for leaf in root.block('leaves')]
+    cluster_count = len(root.block('clusters'))
+    for i, point in enumerate(points):
+        current = 0
+        # (a cycle in a malformed tree would never reach a leaf)
+        for _ in range(len(nodes) + 1):
+            if current == 0xFFFFFFFF:
+                break
+            if current & 0x80000000:
+                leaf = current & 0x7FFFFFFF
+                if leaf < len(leaf_clusters) and 0 <= leaf_clusters[leaf] < cluster_count:
+                    result[i] = leaf_clusters[leaf]
+                break
+            if current >= len(nodes) or nodes[current][0] >= len(planes):
+                break
+            plane, back, front = nodes[current]
+            *normal, d = planes[plane]
+            side = float(np.dot(normal, point)) - d
+            current = front if side >= 0 else back
+    return result

@@ -333,3 +333,66 @@ def test_invalid_layout_indices_refused_without_mutation(invalid):
 def test_empty_lightmaps_refused():
     with pytest.raises(ValueError, match='lightmaps.*empty'):
         api().read_geometry(new_tag('sbsp'))
+
+
+def cluster_bsp(nodes, planes, leaf_clusters, cluster_count):
+    bsp = new_tag('sbsp')
+    root = bsp.root
+    root.set_block('clusters', [child(root, 'clusters') for _ in range(cluster_count)])
+    leaves = []
+    for c in leaf_clusters:
+        leaf = child(root, 'leaves')
+        leaf.set('cluster', c)
+        leaves.append(leaf)
+    root.set_block('leaves', leaves)
+    collision = child(root, 'collision_bsp')
+    built = []
+    for plane, back, front in nodes:
+        node = child(collision, 'bsp3d_nodes')
+        node.set('plane', plane)
+        node.set('back_child', back)
+        node.set('front_child', front)
+        built.append(node)
+    collision.set_block('bsp3d_nodes', built)
+    built = []
+    for value in planes:
+        plane = child(collision, 'planes')
+        plane.set('plane', value)
+        built.append(plane)
+    collision.set_block('planes', built)
+    root.set_block('collision_bsp', [collision])
+    return bsp
+
+
+def test_point_in_front_of_the_root_plane_is_in_its_leafs_cluster():
+    tag = cluster_bsp([(0, 0xFFFFFFFF, 0x80000000)], [(0, 0, 1, 0)], [3], 4)
+    points = np.float64([[0, 0, 1], [0, 0, -1], [0, 0, 0]])
+    assert api().point_clusters(tag, points).tolist() == [3, -1, 3]
+
+
+def test_a_leaf_or_cluster_the_bsp_does_not_have_is_outside():
+    module = api()
+    plane = [(0, 0, 1, 0)]
+    point = np.float64([[0, 0, 1]])
+    assert module.point_clusters(cluster_bsp([(0, 0xFFFFFFFF, 0x80000005)], plane, [3], 4), point).tolist() == [-1]
+    assert module.point_clusters(cluster_bsp([(0, 0xFFFFFFFF, 0x80000000)], plane, [3], 3), point).tolist() == [-1]
+    assert module.point_clusters(cluster_bsp([(0, 0xFFFFFFFF, 0x80000000)], plane, [-1], 4), point).tolist() == [-1]
+    assert module.point_clusters(cluster_bsp([(7, 0xFFFFFFFF, 0x80000000)], plane, [3], 4), point).tolist() == [-1]
+    assert module.point_clusters(cluster_bsp([(0, 0xFFFFFFFF, 4)], plane, [3], 4), point).tolist() == [-1]
+
+
+def test_a_node_loop_or_missing_collision_bsp_gives_no_cluster():
+    module = api()
+    loop = cluster_bsp([(0, 0, 0)], [(0, 0, 1, 0)], [3], 4)
+    assert module.point_clusters(loop, np.float64([[0, 0, 1]])).tolist() == [-1]
+    bare = new_tag('sbsp')
+    assert module.point_clusters(bare, np.float64([[0, 0, 1], [1, 1, 1]])).tolist() == [-1, -1]
+
+
+@pytest.mark.ek
+def test_point_outside_the_bsp_has_no_cluster():
+    from conftest import HCEEK_TAGS
+    from lightmapper.tagio.tagfile import resolve_reference_path
+    tag = read_tag(resolve_reference_path(HCEEK_TAGS, 'sbsp', r'levels\test\bloodgulch\bloodgulch'))
+    inside, outside = api().point_clusters(tag, np.float64([[57.04, -138.0, 1.57], [0, 0, 5000]]))
+    assert inside >= 0 and outside == -1
