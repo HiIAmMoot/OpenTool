@@ -9,12 +9,15 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import subprocess
 from time import perf_counter
+import zipfile
 
 import numba
 from numba import njit, prange
 import numpy as np
 
+from . import frozen
 from .vertex_gpu import VertexPassResult, ambient_table, edge_rays, hemisphere, query_frames, sphere, sun_rays
 
 
@@ -644,6 +647,80 @@ def load_and_run(work: Path, pages: list) -> VertexPassResult:
     return run_vertex_pass(scene, job, textures, pages)
 
 
+def run_in_child(work: Path, pages: list[np.ndarray], timeout: float | None) -> tuple[VertexPassResult, dict]:
+    work = Path(work).resolve()
+    np.savez(work / 'diffuse.npz', **{f'diffuse_{i}': p for i, p in enumerate(pages)})
+    out = work / 'cpu_out.npz'
+    # a crashed child must not leave an earlier run looking successful
+    out.unlink(missing_ok=True)
+    try:
+        done = subprocess.run(frozen.child_command(frozen.CPU_VERTEX_FLAG, str(work)), cwd=work,
+                              stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout,
+                              creationflags=frozen.NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        raise CpuPassError(f'vertex: timed out after {timeout} s') from None
+    except OSError as error:
+        raise CpuPassError(f'vertex: process died (exit unavailable): {error}') from error
+    tail = '\n'.join(done.stderr.decode(errors='replace').splitlines()[-40:])
+    died = f'vertex: process died (exit {done.returncode}): {tail}'
+    if done.returncode:
+        raise CpuPassError(died)
+    try:
+        with np.load(out, allow_pickle=False) as data:
+            result = VertexPassResult(np.array(data['vector'], np.float32), np.array(data['irradiance'], np.float32),
+                                      np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
+                                      int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32)
+                                       if 'vertex_sun_throughput' in data.files else None,
+                                      np.array(data['texel_rgb'], np.float32))
+            timing = {'compile': float(data['seconds_compile']), 'trace': float(data['seconds_trace']),
+                      'threading_layer': str(data['threading_layer']), 'threads': int(data['threads'])}
+        job = json.loads((work / 'job.json').read_text())
+        with np.load(work / job['scene'], allow_pickle=False) as data:
+            q = len(data['query_pos'])
+            edges = len(data['edge_pos']) if 'edge_pos' in data else 0
+            texels = len(data['texel_pos']) if 'texel_pos' in data else 0
+            needs_throughput = (job.get('ignore_normals_mode', 'tool') == 'tool'
+                                and 'query_ignore_normals' in data and data['query_ignore_normals'].any())
+        suns = len(job['suns'])
+        if (result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
+                or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)
+                or (result.sun_throughput is not None) != bool(needs_throughput)
+                or (result.sun_throughput is not None and result.sun_throughput.shape != (q, suns, 3))
+                or result.texel_rgb.shape != (texels, 3)):
+            raise ValueError('short vertex arrays')
+        return result, timing
+    except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as error:
+        raise CpuPassError(f'{died}\n{error}') from error
+
+
+def warm_up():
+    scene = {
+        'positions': np.float32([[0, 0, 0], [1, 0, 0], [0, 1, 0]]),
+        'tris': np.int32([[0, 1, 2]]), 'tex_uv': np.zeros((3, 2), np.float32),
+        'lm_uv': np.zeros((3, 2), np.float32), 'tri_twin': np.int32([-1]),
+        'tri_class': np.int16([0]), 'tri_page': np.int16([0]), 'tri_texture': np.int32([-1]),
+        'tri_casts_shadow': np.ones(1, bool), 'tri_cutout': np.zeros(1, bool),
+        'tri_tint': np.ones((1, 3), np.float32), 'tri_emission': np.zeros((1, 3), np.float32),
+        'occ_positions': np.empty((0, 3), np.float32), 'occ_tris': np.empty((0, 3), np.int32),
+        'occ_uv': np.empty((0, 2), np.float32), 'occ_tri_texture': np.empty(0, np.int32),
+        'occ_tri_casts_shadow': np.empty(0, bool), 'occ_tri_cutout': np.empty(0, bool),
+        'occ_tri_emission': np.empty((0, 3), np.float32), 'occ_tri_tint': np.empty((0, 3), np.float32),
+        'query_pos': np.float32([[.25, .25, 1]]), 'query_normal': np.float32([[0, 0, -1]]),
+        'query_class': np.int16([0]),
+    }
+    job = {'vertex_rays': 1, 'suns': [], 'ambient': {}, 'albedo_scale': 1., 'albedo_fallback': .5}
+    pages = [np.zeros((1, 1, 3), np.float32)]
+    run_vertex_pass(scene, job, [], pages)
+    cs = cpu_scene(scene, job, [], pages)
+    bvh = build_bvh(cs.corners32)
+    origins, dirs = scene['query_pos'], scene['query_normal']
+    limits = np.full(1, RAY_LENGTH, np.float32)
+    closest_hits(bvh, cs.corners32, origins, dirs, limits)
+    brute_force_hits(cs.corners32, origins, dirs, limits)
+    probe(cs, bvh, origins, dirs, np.zeros(1, np.int64))
+    _probe_kernel(np.ones(1, np.float64))
+
+
 @njit(parallel=True, cache=True)
 def _probe_kernel(values):
     result = np.empty_like(values)
@@ -672,4 +749,19 @@ def probe_main(out: Path) -> int:
 def child_main(argv: list[str]) -> int:
     if argv[:1] == ['--probe']:
         return probe_main(Path(argv[1]))
-    raise ValueError('expected --probe and an output path')
+    work = Path(argv[0])
+    with np.load(work / 'diffuse.npz', allow_pickle=False) as data:
+        pages = [data[f'diffuse_{i}'] for i in range(len(data.files))]
+    started = perf_counter()
+    warm_up()
+    seconds_compile = perf_counter() - started
+    started = perf_counter()
+    result = load_and_run(work, pages)
+    seconds_trace = perf_counter() - started
+    throughput = {'vertex_sun_throughput': result.sun_throughput} if result.sun_throughput is not None else {}
+    np.savez(work / 'cpu_out.npz', vector=result.vector, irradiance=result.irradiance,
+             sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays),
+             texel_rgb=result.texel_rgb, **throughput, seconds_compile=np.float64(seconds_compile),
+             seconds_trace=np.float64(seconds_trace), threading_layer=numba.threading_layer(),
+             threads=np.int64(numba.get_num_threads()))
+    return 0

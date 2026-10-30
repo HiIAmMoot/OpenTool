@@ -803,3 +803,175 @@ def test_gather_rgb_switches_and_inactive_query(tmp_path):
                            np.array([True, False]), True, ambient, pages, emission, sums)
         np.testing.assert_allclose(sums[0, :3], want, rtol=1e-6)
         np.testing.assert_array_equal(sums[1], 0)
+
+
+def write_cpu_child_scene(work):
+    scene = build([full_quad()], [roof(0)])
+    write_job(work, scene, [], [sun(UP, strength=3.0)], {'0': [.2] * 3},
+              dataclasses.replace(S, vertex_rays=64), 'all')
+    return []
+
+
+def assert_child_equal(work, pages, timeout):
+    expected = vertex_cpu.load_and_run(work, pages)
+    result, timing = vertex_cpu.run_in_child(work, pages, timeout)
+    for field in ('vector', 'irradiance', 'sun_lit', 'edge_sun_lit', 'texel_rgb', 'sun_throughput'):
+        want, got = getattr(expected, field), getattr(result, field)
+        assert got is None if want is None else np.array_equal(got, want)
+    assert result.rays == expected.rays
+    assert set(timing) == {'compile', 'trace', 'threading_layer', 'threads'}
+    assert timing['compile'] >= 0 and timing['trace'] >= 0
+    assert timing['threading_layer'] in ('workqueue', 'omp', 'tbb') and timing['threads'] >= 1
+    with np.load(work / 'cpu_out.npz', allow_pickle=False) as data:
+        for field in ('rays', 'threads'):
+            assert data[field].dtype == np.int64 and data[field].shape == ()
+        for field in ('seconds_compile', 'seconds_trace'):
+            assert data[field].dtype == np.float64 and data[field].shape == ()
+        assert data['threading_layer'].dtype.kind == 'U'
+    return result
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('case', ['seed_1', 'sun_throughput', 'enhanced'])
+def test_cpu_child_matches_the_in_process_pass(tmp_path, case):
+    scene = texel_scene('vertex') if case == 'enhanced' else CASES[case]
+    blender, direct = blender_and_numba(tmp_path, **scene)
+    assert_parity(blender, direct)
+    assert_child_equal(tmp_path, saved_pages(tmp_path), 300)
+
+
+def cpu_child_code(monkeypatch, code):
+    monkeypatch.setattr(frozen, 'child_command', lambda *args: [sys.executable, '-c', code])
+
+
+def test_a_dying_cpu_child_becomes_a_cpu_pass_error(tmp_path, monkeypatch):
+    cpu_child_code(monkeypatch, 'import sys; print("driver fault", file=sys.stderr); sys.exit(3)')
+    with pytest.raises(vertex_cpu.CpuPassError, match=r'vertex: process died \(exit 3\):.*driver fault'):
+        vertex_cpu.run_in_child(tmp_path, [np.zeros((4, 4, 3), np.float32)], 60)
+
+
+@pytest.mark.parametrize('code', [
+    'pass',
+    'from pathlib import Path; Path("cpu_out.npz").write_bytes(b"short")',
+    'import numpy as np; np.savez("cpu_out.npz", vector=np.zeros((1,3)))',
+])
+def test_missing_or_short_cpu_output_is_an_error(tmp_path, monkeypatch, code):
+    cpu_child_code(monkeypatch, code)
+    with pytest.raises(vertex_cpu.CpuPassError, match=r'vertex: process died \(exit 0\)'):
+        vertex_cpu.run_in_child(tmp_path, [], 60)
+
+
+def test_child_timeout_discards_stale_output(tmp_path, monkeypatch):
+    (tmp_path / 'cpu_out.npz').write_bytes(b'stale')
+    cpu_child_code(monkeypatch, 'import time; time.sleep(60)')
+    with pytest.raises(vertex_cpu.CpuPassError, match='vertex: timed out after 0.2 s'):
+        vertex_cpu.run_in_child(tmp_path, [], .2)
+    assert not (tmp_path / 'cpu_out.npz').exists()
+
+
+def test_cpu_child_launch_failure_is_a_cpu_pass_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(frozen, 'child_command', lambda *args: [str(tmp_path / 'absent.exe')])
+    with pytest.raises(vertex_cpu.CpuPassError, match=r'vertex: process died \(exit unavailable\):'):
+        vertex_cpu.run_in_child(tmp_path, [], 60)
+
+
+def test_cpu_child_starts_without_a_window(tmp_path, monkeypatch):
+    real = subprocess.run
+    seen = {}
+
+    def spy(args, **kwargs):
+        seen.update(kwargs, args=args)
+        return real(args, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', spy)
+    with pytest.raises(vertex_cpu.CpuPassError):
+        vertex_cpu.run_in_child(tmp_path, [], 60)
+    assert seen['creationflags'] == frozen.NO_WINDOW
+    assert seen['args'] == frozen.child_command(frozen.CPU_VERTEX_FLAG, str(tmp_path.resolve()))
+    assert seen['cwd'] == tmp_path.resolve() and 'env' not in seen
+    assert seen['stdin'] == subprocess.DEVNULL and seen['capture_output'] is True and seen['timeout'] == 60
+
+
+def test_child_without_a_timeout_runs(tmp_path):
+    assert_child_equal(tmp_path, write_cpu_child_scene(tmp_path), None)
+
+
+def test_cpu_child_runs_in_a_folder_with_spaces_and_accents(tmp_path):
+    work = tmp_path / 'my bakes é'
+    assert_child_equal(work, write_cpu_child_scene(work), 300)
+
+
+def test_unwritable_cache_dir_still_runs_the_pass(tmp_path, monkeypatch):
+    cache = tmp_path / 'not_a_directory'
+    cache.write_text('occupied')
+    monkeypatch.setenv('NUMBA_CACHE_DIR', str(cache))
+    assert_child_equal(tmp_path, write_cpu_child_scene(tmp_path), 300)
+    assert cache.read_text() == 'occupied'
+
+
+@pytest.mark.parametrize('field', ['vector', 'irradiance', 'sun_lit', 'edge_sun_lit', 'texel_rgb',
+                                  'missing_throughput', 'short_throughput', 'unexpected_throughput'])
+def test_cpu_child_refuses_consistently_short_or_unexpected_arrays(tmp_path, monkeypatch, field):
+    np.savez(tmp_path / 'scene.npz', query_pos=np.zeros((2, 3)), edge_pos=np.zeros((3, 3)),
+             texel_pos=np.zeros((4, 3)), query_ignore_normals=np.array([True, False]))
+    mode = 'tool' if 'throughput' in field and field != 'unexpected_throughput' else 'enhanced'
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}], 'ignore_normals_mode': mode}))
+    arrays = dict(vector=np.zeros((2, 3)), irradiance=np.zeros(2), sun_lit=np.zeros((2, 1), bool),
+                  edge_sun_lit=np.zeros((3, 1), bool), texel_rgb=np.zeros((4, 3)), rays=np.int64(0),
+                  seconds_compile=0., seconds_trace=0., threading_layer='workqueue', threads=np.int64(1))
+    if field == 'short_throughput':
+        arrays['vertex_sun_throughput'] = np.zeros((1, 1, 3))
+    elif field == 'unexpected_throughput':
+        arrays['vertex_sun_throughput'] = np.zeros((2, 1, 3))
+    elif field != 'missing_throughput':
+        arrays[field] = arrays[field][:-1]
+
+    def child(*args, **kwargs):
+        np.savez(tmp_path / 'cpu_out.npz', **arrays)
+        return subprocess.CompletedProcess(args[0], 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', child)
+    with pytest.raises(vertex_cpu.CpuPassError, match=r'vertex: process died \(exit 0\).*\nshort vertex arrays'):
+        vertex_cpu.run_in_child(tmp_path, [], 60)
+
+
+def test_cpu_child_exchange_at_the_stock_query_limit(tmp_path, monkeypatch):
+    q = 393216
+    np.savez(tmp_path / 'scene.npz', query_pos=np.zeros((q, 3), np.float32), edge_pos=np.zeros((0, 3)),
+             query_ignore_normals=np.ones(q, bool))
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}, {}]}))
+    code = ('import numpy as np; '
+            f'q={q}; '
+            'np.savez("cpu_out.npz", vector=np.full((q,3),.25,np.float32), '
+            'irradiance=np.ones(q,np.float32), sun_lit=np.ones((q,2),bool), '
+            'vertex_sun_throughput=np.full((q,2,3),.125,np.float32), '
+            'texel_rgb=np.zeros((0,3),np.float32), seconds_compile=np.float64(.5), '
+            'seconds_trace=np.float64(1.5), threading_layer="workqueue", threads=np.int64(2), '
+            'edge_sun_lit=np.zeros((0,2),bool), rays=np.int64(q*4096))')
+    cpu_child_code(monkeypatch, code)
+    pages = [np.ones((2, 2, 3), np.float32)]
+    result, timing = vertex_cpu.run_in_child(tmp_path, pages, 60)
+    assert result.vector.shape == (393216, 3) and result.rays == 1610612736
+    np.testing.assert_array_equal(result.vector, .25)
+    assert result.sun_throughput.shape == (393216, 2, 3)
+    np.testing.assert_array_equal(result.sun_throughput, .125)
+    assert timing == {'compile': .5, 'trace': 1.5, 'threading_layer': 'workqueue', 'threads': 2}
+    with np.load(tmp_path / 'diffuse.npz') as data:
+        np.testing.assert_array_equal(data['diffuse_0'], pages[0])
+
+
+def test_child_warm_up_compiles_every_kernel_on_one_triangle(monkeypatch):
+    # cached entry points contain their compiled callees without populating the callees' Python dispatchers
+    kernels = [vertex_cpu._gather, vertex_cpu._shadow, vertex_cpu._probe_rays, vertex_cpu._closest_hits,
+               vertex_cpu.brute_force_hits, vertex_cpu._probe_kernel]
+    seen = []
+    build = vertex_cpu.build_bvh
+
+    def recording(corners):
+        seen.append(corners.shape)
+        return build(corners)
+
+    monkeypatch.setattr(vertex_cpu, 'build_bvh', recording)
+    vertex_cpu.warm_up()
+    assert seen and all(shape == (1, 3, 3) for shape in seen)
+    assert not [kernel.py_func.__name__ for kernel in kernels if not kernel.nopython_signatures]
