@@ -189,6 +189,7 @@ def write_tags(tmp_path):
     tags = tmp_path / 'tags'
     tags.mkdir(exist_ok=True)
     write_tag(bitmap_tag(1, 1, 'A8R8G8B8', bytes([3, 2, 1, 9])), tags / 'bm.bitmap')
+    write_tag(bitmap_tag(1, 1, 'A8R8G8B8', bytes([3, 2, 1, 9])), tags / 'bump.bitmap')
     return tags
 
 
@@ -209,6 +210,7 @@ def test_shader_model_cutout_default(tmp_path):
         write_tag(tag, tags / 'm.shader_model')
         found = shader_texture(tags, 'soso', 'm')
         assert (found.albedo, found.cutout, found.casts_shadow) == ('bm', cutout, True)
+        assert (found.cutout_alpha, found.cutout_alpha_scale) == (None, 1.0)
 
 
 def test_shader_model_uv_scale_multiplies_and_zero_reads_as_one(tmp_path):
@@ -231,14 +233,32 @@ def test_shader_texture_is_immutable():
         shader_texture('.', None, '').cutout = True
 
 
-def test_shader_environment_alpha_tested_is_cutout(tmp_path):
-    for flags, cutout in ((0, False), (1, True)):
-        tags, tag = shader_with_flags('senv', 'properties.flags', flags, tmp_path)
-        tag.root.set_reference('diffuse.base_map', 'bitm', 'bm')
-        write_tag(tag, tags / 'e.shader_environment')
-        found = shader_texture(tags, 'senv', 'e', (5.0, 5.0))
-        assert (found.albedo, found.uv_scale, found.cutout, found.casts_shadow) == (
-            'bm', (1.0, 1.0), cutout, True)
+@pytest.mark.parametrize('flags, bump, scale, want', [
+    (0x0, 'bump', 0.0, (False, None, 1.0)),
+    (0x2, 'bump', 0.0, (False, None, 1.0)),
+    (0x1, 'bump', 0.0, (True, 'bump', 1.0)),
+    (0x1, 'bump', 2.0, (True, 'bump', 2.0)),
+    (0x3, 'bump', 0.0, (False, None, 1.0)),
+    (0x1, '', 0.0, (False, None, 1.0)),
+])
+def test_senv_cutout_follows_the_alpha_test_flags(tmp_path, flags, bump, scale, want):
+    tags, tag = shader_with_flags('senv', 'properties.flags', flags, tmp_path,
+                                  bump__bump_map_scale=scale)
+    tag.root.set_reference('diffuse.base_map', 'bitm', 'bm')
+    tag.root.set_reference('bump.bump_map', 'bitm', bump)
+    write_tag(tag, tags / 'e.shader_environment')
+    found = shader_texture(tags, 'senv', 'e', (5.0, 5.0))
+    assert (found.cutout, found.cutout_alpha, found.cutout_alpha_scale) == want
+    assert (found.albedo, found.uv_scale, found.casts_shadow) == ('bm', (1.0, 1.0), True)
+
+
+def test_senv_without_a_base_map_is_not_a_cutout(tmp_path):
+    tags, tag = shader_with_flags('senv', 'properties.flags', 0x1, tmp_path)
+    tag.root.set_reference('bump.bump_map', 'bitm', 'bump')
+    write_tag(tag, tags / 'e.shader_environment')
+    found = shader_texture(tags, 'senv', 'e')
+    assert (found.albedo, found.cutout, found.cutout_alpha) == (None, False, None)
+    assert (found.uv_scale, found.casts_shadow, found.cutout_alpha_scale) == ((1.0, 1.0), True, 1.0)
 
 
 def test_glass_uses_background_tint_map_and_casts_no_shadow(tmp_path):
@@ -247,6 +267,7 @@ def test_glass_uses_background_tint_map_and_casts_no_shadow(tmp_path):
     write_tag(tag, tags / 'g.shader_transparent_glass')
     found = shader_texture(tags, 'sgla', 'g')
     assert (found.albedo, found.cutout, found.casts_shadow) == ('bm', False, False)
+    assert (found.cutout_alpha, found.cutout_alpha_scale) == (None, 1.0)
     write_tag(new_tag('sgla'), tags / 'g2.shader_transparent_glass')
     assert shader_texture(tags, 'sgla', 'g2').albedo is None
 
@@ -263,6 +284,7 @@ def test_chicago_first_map_and_alpha_test(tmp_path, group, name, map_block):
         write_tag(tag, tags / f'c.{name}')
         found = shader_texture(tags, group, 'c')
         assert (found.albedo, found.cutout, found.casts_shadow) == ('bm', cutout, cutout)
+        assert (found.cutout_alpha, found.cutout_alpha_scale) == (None, 1.0)
 
 
 @pytest.mark.parametrize('group', ['sotr', 'swat', 'smet', 'spla', '', None])

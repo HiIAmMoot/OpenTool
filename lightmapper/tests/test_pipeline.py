@@ -1119,7 +1119,7 @@ def test_scene_textures_and_occluder_scale(tiny):
         [read_radiosity(tags, 'senv', 'wall')], np.array([-1, 2], np.int16))
     np.testing.assert_array_equal(scene.tex_uv, group.env['texcoord'])
     assert scene.tri_class.tolist() == [-1, 2]
-    assert scene.tri_cutout.tolist() == [True, True]
+    assert scene.tri_cutout.tolist() == [False, False]
     assert scene.tri_texture.tolist() == [0, 0]
     assert scene.occ_positions.tolist() == [[10., 0., 0.], [10., 1., 0.], [11., 0., 0.]]
     assert scene.occ_uv.tolist() == [[0., 6.], [.25, 6.], [.125, 6.]]

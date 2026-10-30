@@ -18,6 +18,7 @@ from .tagio.tagfile import read_tag, resolve_reference_path
 
 logger = logging.getLogger(__name__)
 ALPHA_TESTED = 0x1
+BUMP_IS_SPECULAR_MASK = 0x2
 NOT_ALPHA_TESTED = 0x4
 
 
@@ -27,6 +28,8 @@ class ShaderTexture:
     uv_scale: tuple[float, float]
     cutout: bool
     casts_shadow: bool
+    cutout_alpha: str | None = None
+    cutout_alpha_scale: float = 1.0
 
 
 NO_TEXTURE = ShaderTexture(None, (1.0, 1.0), False, False)
@@ -46,8 +49,14 @@ def shader_texture(tags_root: Path, group: str | None, path: str,
     root = read_tag(resolve_reference_path(tags_root, group, path)).root
     if group == 'senv':
         albedo = root.reference('diffuse.base_map')[1]
-        cutout = bool(albedo) and bool(root.get('properties.flags') & ALPHA_TESTED)
-        return ShaderTexture(albedo or None, (1.0, 1.0), cutout, True)
+        bump = root.reference('bump.bump_map')[1]
+        flags = root.get('properties.flags')
+        # the lightmap pass (rasterizer_xbox_environment.c:749-764) alpha-tests the bump;
+        # 0x2 or a missing bump uses the opaque default bump texture, so it stays solid
+        cutout = bool(albedo) and bool(bump) and bool(flags & ALPHA_TESTED) and not flags & BUMP_IS_SPECULAR_MASK
+        alpha = bump if cutout else None
+        alpha_scale = (root.get('bump.bump_map_scale') or 1.0) if cutout else 1.0
+        return ShaderTexture(albedo or None, (1.0, 1.0), cutout, True, alpha, alpha_scale)
     if group == 'sgla':
         albedo = root.reference('background_tint.background_tint_map')[1]
         return ShaderTexture(albedo or None, (1.0, 1.0), False, False)
