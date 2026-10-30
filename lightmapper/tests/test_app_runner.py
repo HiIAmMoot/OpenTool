@@ -163,7 +163,7 @@ def test_runner_new_names_with_backups_covers_bsp_bitmap_and_lit_scenario(tiny):
 
 def test_runner_stages_end_with_validate(tiny):
     _, events = run(tiny)
-    assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'finish', 'write', 'validate']
+    assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write', 'validate']
 
 
 def test_runner_forwards_log_lines_and_writes_a_log_file(tiny):

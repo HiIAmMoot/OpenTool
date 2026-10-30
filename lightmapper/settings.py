@@ -51,6 +51,7 @@ class Settings(ChartSettings):
     # degrees off and the bump shading showed triangles on flat walls (Chiron); 4096 brings them within 2-5 degrees
     vertex_rays: int = 4096
     cpu_vertex_rays: int | None = None
+    cpu_vertex_backend: str = 'numba'
     # tool's final-quality grid of suns per sky light (its draft uses 2)
     sky_grid: int = 4
     # tool never lets object shaders emit; off leaves only the BSP's own emitters, for an in-game A/B
@@ -72,6 +73,8 @@ class Settings(ChartSettings):
     def __post_init__(self):
         super().__post_init__()
         self.device = gpu.normalise_device(self.device)
+        if self.cpu_vertex_backend not in ('numba', 'blender'):
+            raise ValueError(f"cpu_vertex_backend must be one of ('numba', 'blender'), not {self.cpu_vertex_backend!r}")
         if self.ignore_normals_mode not in ('tool', 'enhanced'):
             raise ValueError(f"ignore_normals_mode must be one of ('tool', 'enhanced'), not {self.ignore_normals_mode!r}")
         for name in ('cpu_samples', 'cpu_vertex_rays'):

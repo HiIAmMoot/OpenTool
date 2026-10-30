@@ -15,7 +15,7 @@ from lightmapper.formats.vertices import ENV, LM, compress, pack_uncompressed, u
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import new_element, new_tag, read_tag, resolve_reference_path, write_tag
 from lightmapper.validate import validate_bsp
-from lightmapper import gpu, vertex_gpu, blender_job, memory
+from lightmapper import gpu, vertex_cpu, vertex_gpu, blender_job, memory
 from test_blender_job import fake
 
 
@@ -76,12 +76,22 @@ def tiny(tmp_path, monkeypatch):
         job = json.loads((work / 'job.json').read_text())
         with np.load(work / 'scene.npz') as scene:
             vectors = scene['query_normal'] * (scene['query_pos'][:, 0:1] / 100 + .25)
-        return BakeResult([np.zeros((h, w, 3), np.float32) for w, h in job['pages']],
+        pages = [np.zeros((h, w, 3), np.float32) for w, h in job['pages']]
+        return BakeResult(pages,
                           vectors, np.ones(len(vectors), np.float32), 'test CPU',
                           [np.ones((h, w), bool) for w, h in job['pages']],
-                          stages={'start': 0, 'scene': 2, 'pages': 3, 'vertex': 0})
+                          stages={'start': 0, 'scene': 2, 'pages': 3, 'vertex': 0}, diffuse_pages=pages)
 
     monkeypatch.setattr(pipeline, 'run_blender', fake_blender)
+
+    def compiled(work, pages, timeout):
+        job = json.loads((work / 'job.json').read_text())
+        with np.load(work / 'scene.npz') as scene:
+            vectors = scene['query_normal'] * (scene['query_pos'][:, 0:1] / 100 + .25)
+        return vertex_gpu.VertexPassResult(vectors, np.ones(len(vectors), np.float32),
+            None, None, len(vectors) * job['cpu_vertex_rays']), cpu_info()
+
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
 
 
@@ -241,6 +251,10 @@ def test_summary_records_the_memory_check(tiny, monkeypatch, free):
     estimate = memory.bake_bytes(memory.SceneCounts(2, 6), summary['sizes'])
     assert summary['memory'] == {'estimate_gb': round(estimate / memory.GB, 2),
                                  'free_gb': 64.0 if free is not None else None}
+
+
+def cpu_info():
+    return {'compile': .125, 'trace': .25, 'threads': 2, 'threading_layer': 'workqueue'}
 
 
 def test_pipeline_outputs(tiny):
@@ -453,23 +467,26 @@ def test_gpu_choice_skips_the_blender_vertex_pass(gpu_bake, monkeypatch):
 
 
 @pytest.mark.parametrize('error_type', [vertex_gpu.GpuPassError, gpu.DeviceError])
-def test_auto_gpu_failure_falls_back_to_the_cpu_pass_with_a_warning(gpu_bake, monkeypatch, caplog, error_type):
+def test_gpu_failure_falls_back_to_the_compiled_pass(gpu_bake, monkeypatch, caplog, error_type):
     tags, settings, work = gpu_bake
+    calls = []
+    compiled = vertex_cpu.run_in_child
+
+    def run(*args):
+        calls.append(args)
+        return compiled(*args)
 
     def fail(*args):
         raise error_type('gather: device lost')
 
     monkeypatch.setattr(vertex_gpu, 'run_in_child', fail, raising=False)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', run)
     out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
     assert 'falling back to the CPU pass' in caplog.text
     assert any('device lost' in w for w in summary['warnings'])
     assert summary['devices']['vertex_pass'] == 'cpu'
-    assert (out.work / 'job_vertex.json').is_file()
-    with np.load(work / 'scene.npz') as scene:
-        expected = scene['query_pos'][:, [1, 2, 0]] * 2
-    with np.load(work / 'vertex_out.npz') as data:
-        np.testing.assert_array_equal(data['vertex_vector'], expected)
+    assert calls and not (out.work / 'job_vertex.json').exists()
 
 
 def test_named_vendor_gpu_failure_fails_before_any_tag_write(gpu_bake, monkeypatch):
@@ -487,15 +504,101 @@ def test_named_vendor_gpu_failure_fails_before_any_tag_write(gpu_bake, monkeypat
     assert not (work / 'job_vertex.json').exists()
 
 
-def test_cpu_device_runs_todays_pass_in_blender(gpu_bake, monkeypatch):
+def test_cpu_device_runs_the_compiled_pass_after_blender(gpu_bake, monkeypatch):
     tags, settings, work = gpu_bake
+    calls = []
+    compiled = vertex_cpu.run_in_child
+
+    def run(*args):
+        assert (work / 'out.npz').is_file()
+        calls.append(args)
+        return compiled(*args)
+
     monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
     monkeypatch.setattr(vertex_gpu, 'run_in_child', lambda *a: pytest.fail('GPU called for CPU'), raising=False)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', run)
     api().bake(tags, 'level', 'room', replace(settings, device='cpu'), work=work, dry_run=True)
     job = json.loads((work / 'job.json').read_text())
     summary = json.loads((work / 'summary.json').read_text())
-    assert job['vertex_pass'] == 'cpu' and job['cycles_devices'] == []
+    assert job['vertex_pass'] == 'skip' and calls and calls[0][2] == settings.timeout_s
+    assert calls[0][0] == work and len(calls[0][1]) == len(job['pages'])
+    from test_blender_job import page
+    for i, (w, h) in enumerate(job['pages']):
+        np.testing.assert_array_equal(calls[0][1][i], page(i, w, h))
+    assert job['cycles_devices'] == []
+    assert summary['seconds']['blender_vertex'] == 0 and 'vertex_compile' in summary['seconds']
+    assert summary['seconds']['vertex_compile'] == .125
+    assert not (work / 'job_vertex.json').exists()
+
+
+def test_summary_records_cpu_for_the_compiled_pass(gpu_bake, monkeypatch, caplog):
+    tags, settings, work = gpu_bake
+    caplog.set_level('INFO')
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+    api().bake(tags, 'level', 'room', replace(settings, device='cpu'), work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
     assert summary['devices']['vertex_pass'] == 'cpu' and summary['warnings'] == []
+    assert 'compiled CPU vertex pass: 2 threads, workqueue layer, 0.1 s compile' in caplog.text
+
+
+def test_failed_child_falls_back_to_the_blender_pass_with_a_warning(gpu_bake, monkeypatch, caplog):
+    tags, settings, work = gpu_bake
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+
+    def fail(*args):
+        raise vertex_cpu.CpuPassError('vertex: process died (exit 3): boom')
+
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', fail)
+    out = api().bake(tags, 'level', 'room', replace(settings, device='cpu'), work=work, dry_run=True)
+    summary = json.loads((work / 'summary.json').read_text())
+    warning = ("compiled CPU vertex pass failed (vertex: process died (exit 3): boom); "
+               "falling back to Blender's")
+    assert any(w.startswith(warning) for w in summary['warnings'])
+    assert warning in caplog.text
+    assert summary['devices']['vertex_pass'] == 'cpu'
+    assert (work / 'job_vertex.json').is_file()
+    with np.load(work / 'scene.npz') as scene:
+        expected = scene['query_pos'][:, [1, 2, 0]] * 2
+    with np.load(work / 'vertex_out.npz') as data:
+        np.testing.assert_array_equal(data['vertex_vector'], expected)
+    for page in out.bsp_tag.root.block('lightmaps')[:-1]:
+        for material in page.block('materials'):
+            env, lm = unpack_uncompressed(material.data('uncompressed_vertices'),
+                material.get('rendered_vertices.vertex_count'), material.get('lightmap_vertices.vertex_count'))
+            raw = env['position'][:, [1, 2, 0]].astype(np.float64) * 2
+            energy = env['position'].sum(axis=1) - 1
+            length = np.linalg.norm(raw, axis=1)
+            want = raw / np.maximum(np.maximum(length, energy), 1)[:, None]
+            want[energy <= 0] = 0
+            np.testing.assert_array_equal(lm['incident_radiosity'], want.astype(np.float32))
+
+
+def test_both_cpu_passes_failing_stops_the_bake(gpu_bake, monkeypatch):
+    tags, settings, work = gpu_bake
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+    before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
+
+    def fail(*args):
+        raise vertex_cpu.CpuPassError('vertex: process died (exit 3): boom')
+
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', fail)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'vertex_fail')
+    with pytest.raises(blender_job.BlenderError):
+        api().bake(tags, 'level', 'room', replace(settings, device='cpu'), out_bsp='copy', work=work)
+    assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
+
+
+def test_blender_backend_runs_the_vertex_only_relaunch(gpu_bake, monkeypatch):
+    tags, settings, work = gpu_bake
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', lambda *a: pytest.fail('compiled pass called'))
+    api().bake(tags, 'level', 'room', replace(settings, device='cpu', cpu_vertex_backend='blender'),
+               work=work, dry_run=True)
+    assert json.loads((work / 'job.json').read_text())['vertex_pass'] == 'skip'
+    assert (work / 'job_vertex.json').is_file()
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['warnings'] == [] and summary['devices']['vertex_pass'] == 'cpu'
+    assert 'vertex_compile' not in summary['seconds']
 
 
 def test_gpu_stages_use_the_gpu_counts(gpu_bake, monkeypatch):
@@ -514,13 +617,22 @@ def test_gpu_stages_use_the_gpu_counts(gpu_bake, monkeypatch):
     assert summary['rays'] == {'samples': s.samples, 'texel_samples': s.resolved_texel_samples(), 'vertex_rays': s.vertex_rays}
 
 
-def test_cpu_device_uses_the_cpu_counts_for_both_stages(tiny, fake, monkeypatch):
+def test_compiled_pass_uses_the_cpu_ray_count(tiny, fake, monkeypatch):
     tags, s, work = tiny
+    calls = []
+    compiled = vertex_cpu.run_in_child
+
+    def run(*args):
+        calls.append(args)
+        return compiled(*args)
+
     s = replace(s, blender=fake, device='cpu', samples=90, cpu_samples=18, vertex_rays=64, cpu_vertex_rays=16)
     monkeypatch.setattr(api(), 'run_blender', blender_job.run_blender)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', run)
     api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
     assert summary['rays'] == {'samples': 18, 'texel_samples': 18, 'vertex_rays': 16}
+    assert calls
     with np.load(work / 'scene.npz') as scene:
         assert summary['vertex_rays_cast'] == len(scene['query_pos']) * 16
 
@@ -535,7 +647,7 @@ def test_gpu_vertex_failure_reruns_on_the_cpu_with_the_cpu_rays(gpu_bake, monkey
     monkeypatch.setattr(vertex_gpu, 'run_in_child', fail)
     api().bake(tags, 'level', 'room', s, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
-    assert json.loads((work / 'job_vertex.json').read_text())['cpu_vertex_rays'] == 16
+    assert not (work / 'job_vertex.json').exists()
     assert summary['rays']['vertex_rays'] == 16 and any('GPU vertex pass failed' in w for w in summary['warnings'])
     assert summary['rays']['samples'] == 90 and summary['rays']['texel_samples'] == 90
     with np.load(work / 'scene.npz') as scene:
@@ -1217,7 +1329,6 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
     import lightmapper.pages as pages
     tags, settings, work = tiny
     pipeline = api()
-    fake = pipeline.run_blender
     calls = []
     built = []
     original_prepare = pipeline.prepare_boundaries
@@ -1227,11 +1338,13 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
         built.append(boundary)
         return boundary
 
-    def with_sun_lit(work, s):
-        result = fake(work, s)
-        result.vertex_sun_lit = np.ones((1, 0), bool)
+    compiled = vertex_cpu.run_in_child
+
+    def with_sun_lit(*args):
+        result, info = compiled(*args)
+        result.sun_lit = np.ones((1, 0), bool)
         result.edge_sun_lit = np.ones((2, 0), bool)
-        return result
+        return result, info
 
     def term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
         calls.append((page, lit.shape))
@@ -1239,7 +1352,7 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
                          and len(built) == 1 and boundaries is built[0]) else 0
         return np.full((height, width, 3), value, np.float32)
 
-    monkeypatch.setattr(pipeline, 'run_blender', with_sun_lit)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', with_sun_lit)
     monkeypatch.setattr(pipeline, 'prepare_boundaries', prepare)
     monkeypatch.setattr(pipeline, 'sun_term', term)
     monkeypatch.setattr(pages, '_denoise', lambda rgb, timeout, worker=None: rgb * 2)
@@ -1276,14 +1389,17 @@ def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatc
     def blender(work, s):
         diffuse = np.repeat(np.float32([[0, 1 / 3], [1 / 3, 1]])[:, :, None], 3, axis=2)
         return BakeResult([diffuse.copy()], np.zeros((6, 3), np.float32),
-                          np.ones(6), 'test', [np.ones((2, 2), bool)],
-                          vertex_sun_lit=np.zeros((6, 1), bool), diffuse_pages=[diffuse],
-                          vertex_sun_throughput=np.full((6, 1, 3), 0.3, np.float32))
+                          np.ones(6), 'test', [np.ones((2, 2), bool)], diffuse_pages=[diffuse])
+
+    def compiled(*args):
+        return vertex_gpu.VertexPassResult(np.zeros((6, 3), np.float32), np.ones(6),
+            np.zeros((6, 1), bool), None, 0, np.full((6, 1, 3), 0.3, np.float32)), cpu_info()
 
     monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
     monkeypatch.setattr(pipeline, '_scene', scene)
     monkeypatch.setattr(pipeline, 'write_job', write)
     monkeypatch.setattr(pipeline, 'run_blender', blender)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
     # flagged samples are dark, unflagged samples have diffuse 1; only the independent sun term is added here
     want = np.array([[0.3, 1 / 3 + 0.3 * 2 / 3], [1 / 3 + 0.3 * 2 / 3, 1]])
@@ -1317,13 +1433,17 @@ def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny,
     def blender(work, s):
         with np.load(work / 'scene.npz') as scene:
             np.testing.assert_array_equal(scene['query_inverse'], [0, 1, 2, 0, 2, 3])
+        return BakeResult([np.full((8, 8, 3), c, np.float32) for c in (0.2, 0.7)],
+                          np.zeros((4, 3), np.float32), np.ones(4), 'test', [np.ones((8, 8), bool)] * 2)
+
+    def compiled(*args):
         v = np.zeros((4, 3), np.float32)
         v[:, 2] = [0.1, 0.2, 0.3, 0.4]
-        return BakeResult([np.full((8, 8, 3), c, np.float32) for c in (0.2, 0.7)],
-                          v, np.ones(4), 'test', [np.ones((8, 8), bool)] * 2)
+        return vertex_gpu.VertexPassResult(v, np.ones(4), None, None, 0), cpu_info()
 
     monkeypatch.setattr(api(), 'chart_and_pack', chart)
     monkeypatch.setattr(api(), 'run_blender', blender)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     out = api().bake(tags, 'level', 'room', replace(settings, dither=False, stitch_seams=False), work=work, dry_run=True)
     expected = [[0.1, 0.2, 0.3], [0.1, 0.3, 0.4]]
     for i, page in enumerate(out.bsp_tag.root.block('lightmaps')[:-1]):
@@ -1397,8 +1517,13 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
         assert (count > 0) == (mode == 'enhanced')
         raw = np.repeat(np.float32([[0, 1/3], [1/3, 1]])[:, :, None], 3, axis=2)
         return BakeResult([raw + emit], np.zeros((6, 3), np.float32), np.ones(6), 'test',
-                          [np.ones((2, 2), bool)], diffuse_pages=[raw],
-                          texel_rgb=np.full((count, 3), .3, np.float32))
+                          [np.ones((2, 2), bool)], diffuse_pages=[raw])
+
+    def compiled(work, pages, timeout):
+        with np.load(work / 'scene.npz') as arrays:
+            count = len(arrays['texel_pos'])
+        return vertex_gpu.VertexPassResult(np.zeros((6, 3), np.float32), np.ones(6), None,
+            None, 0, texel_rgb=np.full((count, 3), .3, np.float32)), cpu_info()
 
     def glow(work, s, pages):
         assert mode == 'enhanced', 'tool mode must never start a glow run'
@@ -1414,6 +1539,7 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
     monkeypatch.setattr(pipeline, '_scene', scene)
     monkeypatch.setattr(pipeline, 'run_blender', blender)
     monkeypatch.setattr(pipeline, 'run_blender_glow', glow)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False, bounces=bounces),
                         work=work, dry_run=True)
     want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])

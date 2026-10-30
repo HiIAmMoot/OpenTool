@@ -19,7 +19,7 @@ def test_pipeline_reports_each_stage_in_order(tiny):
     tags, settings, work = tiny
     seen = []
     api().bake(tags, 'level', 'room', settings, work=work, progress=seen.append)
-    assert seen == ['gather', 'charts', 'scene', 'blender', 'finish', 'write']
+    assert seen == ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write']
 
 
 def test_pipeline_logs_stage_starts(tiny, caplog):

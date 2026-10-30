@@ -164,3 +164,31 @@ def test_ignore_normals_mode_defaults_to_tool_and_refuses_others():
     assert Settings(ignore_normals_mode='enhanced').ignore_normals_mode == 'enhanced'
     with pytest.raises(ValueError, match='tool.*enhanced'):
         Settings(ignore_normals_mode='wrong')
+
+
+def test_cpu_vertex_backend_defaults_to_numba():
+    assert Settings().cpu_vertex_backend == 'numba'
+
+
+def test_cpu_vertex_backend_is_checked():
+    assert Settings(cpu_vertex_backend='blender').cpu_vertex_backend == 'blender'
+    with pytest.raises(ValueError, match=r"\('numba', 'blender'\)"):
+        Settings(cpu_vertex_backend='wrong')
+
+
+def test_cpu_vertex_backend_is_a_settings_file_key(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text('{"cpu_vertex_backend": "blender"}')
+    assert load_settings(path).cpu_vertex_backend == 'blender'
+
+
+def test_cpu_vertex_backend_is_not_on_the_cli():
+    from lightmapper.cli import _parser
+    import argparse
+
+    commands = next(a for a in _parser()._actions if isinstance(a, argparse._SubParsersAction))
+    assert not any('vertex_backend' in option for action in commands.choices['bake']._actions
+                   for option in action.option_strings)
+    root = Path(__file__).resolve().parents[2]
+    for name in ('presets.py', 'usersettings.py'):
+        assert 'cpu_vertex_backend' not in (root / 'opentool' / name).read_text()

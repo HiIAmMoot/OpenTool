@@ -71,7 +71,7 @@ def main():
         arrays['vertex_rays_cast'] = np.int64(len(query_pos) * rays)
     arrays['device'] = np.array(('+'.join(job['cycles_devices']) or 'CPU') + '-FAKE')
     np.savez(job_path.with_name(job['out']), **arrays)
-    if mode == 'fail':
+    if mode == 'fail' or (mode == 'vertex_fail' and job.get('vertex_only')):
         # a result is on disk, so only the exit code can tell the run failed
         print('fake blender failing on purpose')
         sys.exit(1)

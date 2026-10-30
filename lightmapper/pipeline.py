@@ -19,7 +19,7 @@ from time import perf_counter
 
 import numpy as np
 
-from . import gpu, memory, vertex_gpu
+from . import gpu, memory, vertex_cpu, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
@@ -309,7 +309,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         warnings.append(check.message)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
-              vertex_pass='skip' if choice.adapter else 'cpu')
+              vertex_pass='skip')
     stage('scene')
     begin('blender')
     result = run_blender(work, s)
@@ -323,8 +323,24 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         warning = 'cycles fell back to the CPU'
         logger.warning('%s', warning)
         warnings.append(warning)
+
+    def cpu_pass():
+        if s.cpu_vertex_backend == 'blender':
+            return run_blender_vertex_only(work, s, result.diffuse_pages)
+        try:
+            vp, info = vertex_cpu.run_in_child(work, result.diffuse_pages, s.timeout_s)
+        except vertex_cpu.CpuPassError as error:
+            warning = f"compiled CPU vertex pass failed ({error}); falling back to Blender's"
+            logger.warning('%s', warning)
+            warnings.append(warning)
+            return run_blender_vertex_only(work, s, result.diffuse_pages)
+        seconds['vertex_compile'] = info['compile']
+        logger.info('compiled CPU vertex pass: %s threads, %s layer, %.1f s compile',
+                    info['threads'], info['threading_layer'], info['compile'])
+        return vp
+
+    begin('vertex')
     if choice.adapter:
-        begin('vertex')
         try:
             vp = vertex_gpu.run_in_child(work, result.diffuse_pages, choice.adapter, s.timeout_s)
         except (vertex_gpu.GpuPassError, gpu.DeviceError) as error:
@@ -333,10 +349,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             warning = f'GPU vertex pass failed ({error}); falling back to the CPU pass'
             logger.warning('%s', warning)
             warnings.append(warning)
-            vp = run_blender_vertex_only(work, s, result.diffuse_pages)
+            vp = cpu_pass()
         else:
             vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
         result = with_vertex_pass(result, vp)
+    else:
+        result = with_vertex_pass(result, cpu_pass())
     stage('vertex_pass')
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
