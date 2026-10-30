@@ -35,6 +35,7 @@ _GROUP_FILES = {
     "sky ": "sky", "senv": "shader_environment", "sgla": "shader_transparent_glass",
     "soso": "shader_model", "schi": "shader_transparent_chicago",
     "scex": "shader_transparent_chicago_extended", "scen": "scenery", "mod2": "gbxmodel",
+    "ligh": "light",
 }
 _FORMATS = {
     "Angle": "f", "AngleBounds": "2f", "ArgbColor": "4b",

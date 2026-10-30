@@ -49,7 +49,7 @@ and the reason for such modification.
 
 ### Tag definitions
 
-`lightmapper/tagio/layouts/` holds XML tag layouts from General-101's [Halo Asset Blender Development Toolset](https://github.com/General-101/Halo-Asset-Blender-Development-Toolset), under its MIT license, copyright (c) 2020 Steven Garcia. They describe the H1A editing kit's tag definitions. The full license text is in `lightmapper/tagio/layouts/LICENSE`. The upstream commit and any local edits were not recorded, so these files are not claimed to be an exact upstream snapshot.
+`lightmapper/tagio/layouts/` holds XML tag layouts from General-101's [Halo Asset Blender Development Toolset](https://github.com/General-101/Halo-Asset-Blender-Development-Toolset), under its MIT license, copyright (c) 2020 Steven Garcia. They describe the H1A editing kit's tag definitions. The full license text is in `lightmapper/tagio/layouts/LICENSE`. The upstream commit and any local edits were not recorded, so these files are not claimed to be an exact upstream snapshot. `light.xml` was added later, unchanged, from v2.425.0 (build v425@f1351fe), `h1_merged_output/light.xml`.
 
 ## Included in the app download
 

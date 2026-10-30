@@ -29,6 +29,7 @@ _GROUP_EXTENSIONS = {
     "scex": "shader_transparent_chicago_extended", "scen": "scenery", "mod2": "gbxmodel",
     "swat": "shader_transparent_water", "smet": "shader_transparent_meter",
     "spla": "shader_transparent_plasma", "sotr": "shader_transparent_generic",
+    "ligh": "light",
 }
 
 

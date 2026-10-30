@@ -10,6 +10,7 @@ REQUIRED: tuple[str, ...] = (
     'lightmapper/tagio/layouts/LICENSE',
     'lightmapper/tagio/layouts/bitmap.xml',
     'lightmapper/tagio/layouts/gbxmodel.xml',
+    'lightmapper/tagio/layouts/light.xml',
     'lightmapper/tagio/layouts/scenario_structure_bsp.xml',
     'lightmapper/tagio/layouts/scenario.xml',
     'lightmapper/tagio/layouts/scenery.xml',

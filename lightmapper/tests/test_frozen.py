@@ -77,3 +77,8 @@ def test_child_command_when_frozen_runs_the_cpu_vertex_flag(monkeypatch, tmp_pat
     monkeypatch.setattr(sys, 'frozen', True, raising=False)
     monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
     assert frozen.child_command(frozen.CPU_VERTEX_FLAG, 'w') == [str(tmp_path / 'OpenTool-cli.exe'), '--cpu-vertex-pass', 'w']
+
+
+def test_every_layout_is_a_required_resource():
+    from lightmapper.tagio.layout import _GROUP_FILES
+    assert {f'lightmapper/tagio/layouts/{name}.xml' for name in _GROUP_FILES.values()} <= set(resources.REQUIRED)

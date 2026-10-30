@@ -8,7 +8,7 @@ from lightmapper.tagio import layout as layout_module
 from lightmapper.tagio.layout import group_version, load_group
 
 
-GROUPS = ["sbsp", "bitm", "scnr", "sky ", "senv", "sgla", "soso", "schi", "scex", "scen", "mod2"]
+GROUPS = ["sbsp", "bitm", "scnr", "sky ", "senv", "sgla", "soso", "schi", "scex", "scen", "mod2", "ligh"]
 
 
 def all_layouts(root):
@@ -69,7 +69,7 @@ def test_sizes():
 
 @pytest.mark.parametrize("group, version, size", [
     ("bitm", 7, 108), ("scnr", 2, 1456), ("sky ", 1, 208),
-    ("senv", 2, 836), ("sgla", 1, 480), ("scen", 1, 508), ("mod2", 5, 232),
+    ("senv", 2, 836), ("sgla", 1, 480), ("scen", 1, 508), ("mod2", 5, 232), ("ligh", 3, 352),
 ])
 def test_group_metadata(group, version, size):
     assert group_version(group) == version
