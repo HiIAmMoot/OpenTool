@@ -62,13 +62,114 @@ def test_stage_rows_while_looking():
         ('Denoise', None, 'Looking for GPUs…')]
 
 
-def test_stage_rows_everything_on_the_gpu():
+@pytest.mark.parametrize('adapter, kind', [(RTX, 'CUDA'), (RADEON, 'HIP')])
+def test_stage_rows_everything_on_the_gpu(adapter, kind):
     # (the GPU line above the rows already names the card)
-    assert stage_rows('auto', [RTX], None) == [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', '')]
+    assert stage_rows('auto', [adapter], None, {kind: True}) == [
+        ('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', '')]
 
 
-def test_stage_rows_amd_denoises_on_the_gpu_too():
-    assert [state for _, state, _ in stage_rows('amd', [RADEON], None)] == ['GPU', 'GPU', 'GPU']
+@pytest.mark.parametrize('adapter, kind', [(RTX, 'CUDA'), (RADEON, 'HIP')])
+def test_stage_rows_refused_gpu_denoiser_predicts_cpu(adapter, kind):
+    rows = stage_rows('auto', [adapter], None, {kind: False})
+    assert rows == [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''),
+                    ('Denoise', 'CPU', 'the GPU denoiser could not start')]
+
+
+def test_stage_rows_waits_for_denoiser_probe():
+    assert stage_rows('auto', [RTX], None)[2] == ('Denoise', None, 'Checking the GPU denoiser…')
+
+
+def test_stage_rows_other_vendor_denoises_on_cpu():
+    arc = Adapter('Intel Arc', 0x8086, (3,), 'vulkan', True)
+    assert [state for _, state, _ in stage_rows('auto', [arc], None)] == ['GPU', 'GPU', 'CPU']
+
+
+def test_stage_rows_used_hip():
+    assert stage_rows_used({'page_bake': 'HIP', 'vertex_pass': 'Radeon (vulkan)', 'denoise': 'HIP'}) == [
+        ('Page bake', 'GPU', 'HIP'), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', 'HIP')]
+
+
+@pytest.mark.parametrize('failure', ['timeout', 'crash', 'malformed', 'refused', 'launch'])
+def test_denoiser_probe_failures_are_unavailable(monkeypatch, failure):
+    import subprocess
+    from opentool import devices
+
+    def run(command, **kwargs):
+        assert command[-2:] == ['--denoise-worker', 'CUDA'] or command[-2:] == ['--denoise-worker', 'HIP']
+        assert kwargs['input'] == b'' and 0 < kwargs['timeout'] <= 5
+        if failure == 'timeout':
+            raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+        if failure == 'launch':
+            raise OSError('cannot start')
+        return subprocess.CompletedProcess(command, 1 if failure == 'crash' else 0,
+                                           b'bad frame' if failure == 'malformed' else ready_frame(failure != 'refused'), b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert devices.probe_denoiser() == {'CUDA': False, 'HIP': False}
+
+
+def ready_frame(ready):
+    import io
+    import struct
+    import numpy as np
+    out = io.BytesIO()
+    np.save(out, np.array([int(ready)], dtype=np.uint8))
+    return struct.pack('<Q', len(out.getvalue())) + out.getvalue()
+
+
+@pytest.mark.parametrize('supported', ['CUDA', 'HIP'])
+def test_denoiser_probe_reports_each_backend(monkeypatch, supported):
+    import subprocess
+    from opentool import devices
+    monkeypatch.setattr(subprocess, 'run', lambda command, **kwargs:
+                        subprocess.CompletedProcess(command, 0, ready_frame(command[-1] == supported), b''))
+    assert devices.probe_denoiser() == {'CUDA': supported == 'CUDA', 'HIP': supported == 'HIP'}
+
+
+def test_denoiser_probe_uses_frozen_console_child(monkeypatch, tmp_path):
+    import subprocess
+    import sys
+    from lightmapper import frozen
+    from opentool import devices
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    commands = []
+
+    def run(command, **kwargs):
+        commands.append(command)
+        assert kwargs['creationflags'] == frozen.NO_WINDOW
+        return subprocess.CompletedProcess(command, 0, ready_frame(True), b'')
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert devices.probe_denoiser() == {'CUDA': True, 'HIP': True}
+    assert commands == [[str(tmp_path / 'OpenTool-cli.exe'), '--denoise-worker', kind]
+                        for kind in ('CUDA', 'HIP')]
+
+
+def test_real_denoiser_probe_child_returns_ready_frames(capsys, monkeypatch):
+    import importlib.util
+    import subprocess
+    import time
+    from opentool import devices
+    if importlib.util.find_spec('pyoidn') is None:
+        pytest.skip('OIDN is not installed')
+    began = time.perf_counter()
+    real_run = subprocess.run
+    answers = {}
+
+    def run(command, **kwargs):
+        done = real_run(command, **kwargs)
+        assert done.returncode in (0, 2), done.stderr.decode(errors='replace')
+        assert done.stdout in (ready_frame(True), ready_frame(False))
+        answers[command[-1]] = done.stdout == ready_frame(True)
+        return done
+
+    monkeypatch.setattr(subprocess, 'run', run)
+    assert devices.probe_denoiser() == answers
+    assert set(answers) == {'CUDA', 'HIP'}
+    with capsys.disabled():
+        print(f' OIDN probe child time: {time.perf_counter() - began:.3f} s')
 
 
 def test_stage_rows_without_ray_queries_keep_only_the_pages_on_the_gpu():

@@ -1,6 +1,33 @@
-from lightmapper import gpu
+import io
+import struct
+import subprocess
+
+from lightmapper import denoise_worker, frozen, gpu
 
 CPU_HINT = 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'
+
+
+def probe_denoiser():
+    import numpy as np
+
+    available = {}
+    for kind in ('CUDA', 'HIP'):
+        available[kind] = False
+        try:
+            # EOF after the ready frame exercises the bake's startup without denoising a page.
+            done = subprocess.run(denoise_worker.worker_command(kind), input=b'', capture_output=True,
+                                  timeout=5, creationflags=frozen.NO_WINDOW)
+            if done.returncode:
+                continue
+            size = struct.unpack('<Q', done.stdout[:8])[0]
+            payload = done.stdout[8:]
+            if size != len(payload):
+                continue
+            ready = np.load(io.BytesIO(payload), allow_pickle=False)
+            available[kind] = ready.shape == (1,) and ready.dtype == np.uint8 and bool(ready[0] == 1)
+        except (OSError, subprocess.TimeoutExpired, ValueError, EOFError, struct.error):
+            pass
+    return available
 
 
 def gpu_text(adapters, reason):
@@ -27,8 +54,7 @@ def device_hint(setting, adapters, reason):
     return "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."
 
 
-def stage_rows(setting, adapters, reason):
-    """(stage, 'GPU' | 'CPU' | 'Off' | None, detail) for what a bake with this setting is expected to run where."""
+def stage_rows(setting, adapters, reason, denoiser=None):
     stages = ('Page bake', 'Vertex pass', 'Denoise')
     if adapters is None:
         return [(stage, None, 'Looking for GPUs…') for stage in stages]
@@ -40,8 +66,16 @@ def stage_rows(setting, adapters, reason):
     if choice.setting == 'cpu':
         return [(stage, 'CPU', '') for stage in stages]
     if choice.adapter:
+        denoise = ('Denoise', 'CPU', '')
+        if choice.oidn != 'CPU':
+            if denoiser is None:
+                denoise = ('Denoise', None, 'Checking the GPU denoiser…')
+            elif denoiser.get(choice.oidn, False):
+                denoise = ('Denoise', 'GPU', '')
+            else:
+                denoise = ('Denoise', 'CPU', 'the GPU denoiser could not start')
         return [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''),
-                ('Denoise', 'CPU' if choice.oidn == 'CPU' else 'GPU', '')]
+                denoise]
     return [('Page bake', 'GPU', "Cycles picks a GPU when the bake starts, and falls back to the CPU without one"),
             ('Vertex pass', 'CPU', 'no GPU with ray queries'), ('Denoise', 'CPU', '')]
 

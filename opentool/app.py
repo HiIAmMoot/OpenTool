@@ -29,6 +29,7 @@ class App:
     def __init__(self, root: tk.Misc, *, store_path: Path | None = None,
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
                  log_path: Path | None = None, probe_gpu=gpu.probe_adapters,
+                 probe_denoiser=devices.probe_denoiser,
                  estimate=estimate_module.run_estimate):
         self.root = root
         self.window = root.winfo_toplevel()
@@ -38,6 +39,9 @@ class App:
         self.find_blender = find_blender
         self._run_bake = run_bake
         self._probe_gpu = probe_gpu
+        self._probe_denoiser = probe_denoiser
+        self._denoiser = None
+        self._using_stage_rows = False
         self._estimate = estimate
         self.generation = 0
         self.estimate_state = 'idle'
@@ -69,9 +73,13 @@ class App:
         self.window.protocol('WM_DELETE_WINDOW', self.on_close)
         self._build()
         self._restore()
+        for value in (*self.advanced_vars.values(), self.preset_var, self.device_var, self.bsp_var,
+                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.verbose_var):
+            value.trace_add('write', lambda *_args: self._reset_used_rows())
         self._set_blender_status('Looking for Blender…')
         self._discover_blender()
         self._discover_gpu()
+        self._discover_denoiser()
         root.after(100, self._poll)
 
     def _build(self):
@@ -344,6 +352,7 @@ class App:
         # (a preset writes its fields one at a time; _select_preset estimates once when all are in)
         if self.busy or self._setting_preset:
             return
+        self._reset_used_rows()
         inputs = self.estimate_inputs()
         if inputs is None:
             if self._estimate_inputs is not None:
@@ -468,8 +477,15 @@ class App:
             state.configure(text=where or '…', foreground={'GPU': 'green', 'CPU': 'red'}.get(where, ''))
             detail.configure(text=text)
 
-    def _update_device_hint(self):
-        self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason))
+    def _reset_used_rows(self):
+        if self._using_stage_rows and not self.busy:
+            self._update_device_hint()
+
+    def _update_device_hint(self, *, prediction=True):
+        if prediction:
+            self._using_stage_rows = False
+        if not self._using_stage_rows:
+            self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason, self._denoiser))
         self.gpu_label.configure(text=devices.gpu_text(self._adapters, self._gpu_reason))
         self.device_hint.configure(text=devices.device_hint(self._device_value(), self._adapters, self._gpu_reason))
 
@@ -569,6 +585,18 @@ class App:
 
         threading.Thread(target=discover, daemon=True).start()
 
+    def _discover_denoiser(self):
+        probe, events = self._probe_denoiser, self.events
+
+        def discover():
+            try:
+                result = probe()
+            except Exception:
+                result = {}
+            events.put(('denoiser', result))
+
+        threading.Thread(target=discover, daemon=True).start()
+
     def _choose_blender(self):
         path = filedialog.askopenfilename(filetypes=[('Blender', 'blender.exe')])
         if not path:
@@ -650,7 +678,13 @@ class App:
             elif event[0] == 'gpu':
                 self._adapters, self._gpu_reason = event[1:]
                 try:
-                    self._update_device_hint()
+                    self._update_device_hint(prediction=False)
+                except tk.TclError:
+                    pass
+            elif event[0] == 'denoiser':
+                self._denoiser = event[1]
+                try:
+                    self._update_device_hint(prediction=False)
                 except tk.TclError:
                     pass
             elif event[0] == 'device':
@@ -699,8 +733,11 @@ class App:
             for problem in outcome.problems:
                 self._append_log(str(problem))
         if outcome.devices:
+            self._using_stage_rows = True
             self._show_stage_rows(devices.stage_rows_used(outcome.devices))
             self._set_optional_label(self.device_label, devices.result_line(outcome.devices, outcome.rays, outcome.warnings))
+        else:
+            self._update_device_hint()
         for warning in outcome.warnings:
             # (the runner already sent most warnings as they happened)
             if f'WARNING: {warning}' not in self._live_warnings:
@@ -763,6 +800,7 @@ class App:
         self.log_box.delete('1.0', 'end')
         self.log_box.configure(state='disabled')
         self._set_optional_label(self.device_label, '')
+        self._update_device_hint()
         self.stage_label.configure(text='Starting…', foreground='')
         self.progress['value'] = 0
         gate = self._gate = _BakeGate()

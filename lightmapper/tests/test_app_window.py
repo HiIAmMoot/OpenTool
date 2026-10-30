@@ -54,6 +54,7 @@ def make_app(tmp_path, monkeypatch, request, tk_root):
             lambda remembered=None: Blender(Path('C:/b/blender.exe'), (5, 2)),
         )
         kwargs.setdefault('probe_gpu', lambda: ([RTX], None))
+        kwargs.setdefault('probe_denoiser', lambda: {'CUDA': True, 'HIP': False})
         kwargs.setdefault('estimate', lambda _inputs: ESTIMATE_FITS)
         app = App(
             root,
@@ -885,6 +886,63 @@ def test_finished_bake_shows_what_was_used_in_the_stage_rows(ready_app):
     run_events(ready_app, [('done', outcome)])
     assert stage_texts(ready_app) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'CPU', 'red'),
                                       ('Denoise', 'CPU', 'red')]
+
+
+def cpu_outcome():
+    return BakeOutcome('done', 'Done.', [], None, Path(), 'CPU',
+                       {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}, None, [])
+
+
+def test_new_bake_resets_stage_rows_to_prediction(ready_app):
+    ready_app._bake_done(cpu_outcome())
+    ready_app._run_bake = lambda req, emit: None
+    ready_app.start_bake()
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU']
+
+
+def test_failed_bake_without_devices_resets_stage_rows(ready_app):
+    ready_app._bake_done(cpu_outcome())
+    ready_app._bake_done(BakeOutcome('failed', 'Failed.', [], None, Path(), None))
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU']
+
+
+@pytest.mark.parametrize('event', [('gpu', [RADEON], None), ('denoiser', {'CUDA': False, 'HIP': False})])
+def test_late_probe_preserves_used_rows_until_input_change(ready_app, event):
+    ready_app._bake_done(cpu_outcome())
+    ready_app.events.put(event)
+    ready_app._drain()
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['CPU', 'CPU', 'CPU']
+    ready_app.advanced_vars['page_max'].set('1024')
+    assert ready_app.stage_rows[0][1]['text'] == 'GPU'
+
+
+def test_denoiser_probe_waits_and_updates_on_ui_thread(make_app):
+    gate, finished = threading.Event(), threading.Event()
+    threads = []
+
+    def probe():
+        threads.append(threading.current_thread())
+        gate.wait(5)
+        finished.set()
+        return {'CUDA': False, 'HIP': False}
+
+    a = make_app(probe_denoiser=probe)
+    pump(a.root, lambda: a.stage_rows[0][1]['text'] == 'GPU')
+    assert a.stage_rows[2][1]['text'] == '…'
+    gate.set()
+    assert finished.wait(5)
+    assert a.stage_rows[2][1]['text'] == '…'
+    pump(a.root, lambda: a.stage_rows[2][1]['text'] == 'CPU')
+    assert str(a.stage_rows[2][1]['foreground']) == 'red'
+    assert threads[0] is not threading.main_thread()
+
+
+def test_denoiser_probe_exception_predicts_cpu(make_app):
+    def broken():
+        raise OSError('no child')
+    a = make_app(probe_denoiser=broken)
+    pump(a.root, lambda: a.stage_rows[2][1]['text'] == 'CPU')
+    assert 'could not start' in a.stage_rows[2][2]['text']
 
 
 def test_device_row_says_looking_until_the_probe_answers(make_app):
