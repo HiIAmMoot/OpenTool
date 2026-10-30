@@ -24,8 +24,9 @@ from .blender_job import Scene, run_blender, run_blender_vertex_only, run_blende
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
 from .formats.bitmap import write_bitmap
-from .formats.bsp import apply_layout, read_geometry
-from .formats.scenery import gather_occluders
+from .formats.bsp import apply_layout, point_clusters, read_geometry
+from .formats.lights import SceneLight
+from .formats.scenery import gather_lights, gather_occluders
 from .formats.vertices import ENV, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
@@ -122,6 +123,16 @@ def _unlit_emitters(tags, geometry, textures):
     return positions, uvs, texture_ids, cutouts, emissions, tints
 
 
+# the scenery lights tool would bake: one outside every cluster of the BSP lights nothing and is dropped
+def scene_lights(scenario: Tag, tags: Path, bsp_index: int, bsp_tag: Tag) -> tuple[list[SceneLight], dict[str, int]]:
+    lights, counts = gather_lights(scenario, tags, bsp_index)
+    clusters = point_clusters(bsp_tag, np.array([l.position for l in lights], np.float64).reshape(-1, 3))
+    lights = [l for l, cluster in zip(lights, clusters) if cluster >= 0]
+    counts = {**counts, 'outside_bsp': len(clusters) - len(lights), 'baked': len(lights)}
+    logger.info('scenery lights: %s', ', '.join(f'{k} {v}' for k, v in counts.items()))
+    return lights, counts
+
+
 def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scenery_emission=True):
     textures = TextureSet(tags)
     shaders = [shader_texture(tags, *group.key[:2]) for group in geometry.groups]
@@ -209,6 +220,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             np.zeros(emit_count, np.bool_)]),
         occ_tri_emission=join([occ_emission[occluders.tri_shader], *emit_emission], (0, 3), np.float32),
         occ_tri_tint=join([np.ones((scenery_count, 3)), *emit_tints], (0, 3), np.float32),
+        occ_tri_owner=join([occluders.tri_owner, np.full(emit_count, -1, np.int32)], (0,), np.int32),
         query_pos=pos, query_normal=normal, query_class=query_class, query_inverse=inverse,
         tri_ignore_normals=tri_ignore_normals, query_ignore_normals=query_ignore_normals)
     return scene, inverse, textures
@@ -307,9 +319,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     if not check.fits:
         logger.warning('%s', check.message)
         warnings.append(check.message)
+    lights, _ = scene_lights(scenario_tag, tags, bsp_index, bsp_tag)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
-              vertex_pass='skip')
+              vertex_pass='skip', lights=lights)
     stage('scene')
     begin('blender')
     result = run_blender(work, s)

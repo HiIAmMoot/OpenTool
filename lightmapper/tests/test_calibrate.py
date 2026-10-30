@@ -219,7 +219,7 @@ def test_calibrate_writes_fit_and_report(lit, tmp_path, monkeypatch, passes):
     # the fit never replaces the package's calibration, accepted or not
     assert shipped_path.read_bytes() == shipped
     written = json.loads((work / 'calibration.json').read_text())
-    assert set(written) == {'w_sun', 'w_emit', 'w_amb', 'gamma', 'radiosity_mode', 'radiosity_scale'}
+    assert set(written) == {'w_sun', 'w_emit', 'w_amb', 'w_light', 'gamma', 'radiosity_mode', 'radiosity_scale'}
     assert written['radiosity_mode'] in ('coherence', 'scaled') and 0.25 <= written['gamma'] <= 4
     assert data['samples'] == 2 and data['clipped_fraction'] == 0
     assert 'Acceptance' in (work / 'calibration.md').read_text()

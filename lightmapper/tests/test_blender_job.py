@@ -11,7 +11,9 @@ import pytest
 import subprocess
 
 from lightmapper import blender_job, memory
-from lightmapper.blender_job import BakeResult, BlenderError, BlenderOutOfMemory, Scene, run_blender, write_job
+from lightmapper.blender_job import (BakeResult, BlenderError, BlenderOutOfMemory, Scene, lamp_batches, run_blender,
+                                     write_job)
+from lightmapper.formats.lights import SceneLight
 from lightmapper.memory import SceneCounts
 from lightmapper.gather import Sun
 from lightmapper.settings import Settings
@@ -85,7 +87,7 @@ def test_write_job_files_load_back(tmp_path):
     with np.load(tmp_path / 'scene.npz') as data:
         expected_fields = [f.name for f in fields(Scene) if getattr(scene, f.name) is not None]
         assert sorted(data.files) == sorted(expected_fields + [
-            'tri_ignore_normals', 'query_ignore_normals',
+            'tri_ignore_normals', 'query_ignore_normals', 'occ_tri_owner',
             'occ_tri_emit_only', 'tri_twin', 'tri_twin_perm',
             'texel_pos', 'texel_normal', 'texel_class', 'texel_page', 'texel_xy',
             'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])
@@ -110,7 +112,7 @@ def test_write_job_files_load_back(tmp_path):
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
         'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ignore_normals_mode', 'ambiguous_twin_groups',
-        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays'])
+        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays', 'lights'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -199,6 +201,68 @@ def test_emit_only_drops_suns_and_ambient(tmp_path):
 def test_bad_sources_rejected(tmp_path):
     with pytest.raises(ValueError):
         job_for(tmp_path, sources='moon')
+
+
+def lamp(owner, rgb=(1.0, 0.5, 0.25)):
+    return SceneLight(np.float64([1, 2, 3]), np.float64([0, 0, -1]), np.float64(rgb), 3, np.float32(9.5),
+                      np.float32(0.8), np.float32(0.9), owner, 'lamp')
+
+
+def lights_job(tmp_path, lights, sources='all', suns=None, **overrides):
+    s = Settings(w_sun=2.0, w_light=2.0, **overrides)
+    path = write_job(tmp_path, make_scene(), [(16, 8)], make_suns() if suns is None else suns, AMBIENT, s,
+                     sources, textures=[TEXTURE], lights=lights)
+    return json.loads(path.read_text())
+
+
+def test_job_lights_carry_w_light_and_tools_record(tmp_path):
+    job = lights_job(tmp_path, [lamp(7), lamp(3, (2, 0, 0)), lamp(7)])
+    first = job['lights'][0]
+    assert first == {'position': [1.0, 2.0, 3.0], 'axis': [0.0, 0.0, -1.0], 'strength': [2.0, 1.0, 0.5],
+                     'kind': 3, 'reach': 9.5, 'cos_cutoff': pytest.approx(0.8), 'cos_falloff': pytest.approx(0.9),
+                     'owner': 7, 'batch': 0}
+    assert job['lights'][1]['strength'] == [4.0, 0.0, 0.0]
+    assert all(type(v) is float for v in first['position'] + first['strength'] + [first['reach']])
+    assert type(first['kind']) is int and type(first['owner']) is int
+
+
+def test_lights_overflowing_the_link_budget_take_later_batches(tmp_path):
+    job = lights_job(tmp_path, [lamp(i) for i in range(63)] + [lamp(0)])
+    assert [l['batch'] for l in job['lights']] == [0] * 62 + [1, 0]
+
+
+@pytest.mark.parametrize('sources', ['sun', 'emit'])
+def test_calibration_sources_bake_no_lights(tmp_path, sources):
+    assert lights_job(tmp_path, [lamp(1)], sources=sources)['lights'] == []
+
+
+def test_scene_without_owners_writes_minus_one(tmp_path):
+    job_for(tmp_path)
+    with np.load(tmp_path / 'scene.npz') as data:
+        assert data['occ_tri_owner'].dtype == np.int32 and data['occ_tri_owner'].tolist() == [-1]
+    assert json.loads((tmp_path / 'job.json').read_text())['lights'] == []
+
+
+def test_glow_run_has_no_lights(tmp_path, monkeypatch):
+    lights_job(tmp_path, [lamp(1)])
+
+    def stop(*args):
+        raise BlenderError('stopped before Blender')
+
+    monkeypatch.setattr(blender_job, '_run_blender', stop)
+    with pytest.raises(BlenderError):
+        blender_job.run_blender_glow(tmp_path, Settings(), [np.zeros((2, 2, 3), np.float32)])
+    assert json.loads((tmp_path / 'job_glow.json').read_text())['lights'] == []
+
+
+@pytest.mark.parametrize('owners, suns, want', [
+    (130, 4, [62, 62, 6]), (3, 4, [3]), (2, 63, [0, 2]), (62, 0, [62]), (63, 0, [62, 1])])
+def test_lamp_batches_fill_the_budget(owners, suns, want):
+    assert [len(b) for b in lamp_batches(list(range(owners)), suns)] == want
+
+
+def test_lamp_batches_keep_first_appearance_order():
+    assert lamp_batches([9, 4, 9, 1], 0) == [[9, 4, 1]]
 
 
 @pytest.fixture

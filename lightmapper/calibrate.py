@@ -162,7 +162,7 @@ def calibrate(tags: Path, scenario: str, bsp: str, work: Path, s: Settings | Non
     accepted = all(data['acceptance'].values())
     # the package's weights are tool's analytic model; a fit is for validating them and stays in the work folder
     (work / 'calibration.json').write_text(json.dumps({
-        'w_sun': fitted.w_sun, 'w_emit': fitted.w_emit, 'w_amb': fitted.w_amb,
+        'w_sun': fitted.w_sun, 'w_emit': fitted.w_emit, 'w_amb': fitted.w_amb, 'w_light': unit.w_light,
         'gamma': fitted.gamma, 'radiosity_mode': fitted.radiosity_mode,
         'radiosity_scale': fitted.radiosity_scale}, indent=2) + '\n')
     return data

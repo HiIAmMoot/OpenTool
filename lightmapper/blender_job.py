@@ -15,6 +15,7 @@ import time
 import numpy as np
 
 from .memory import SceneCounts, free_physical_bytes, out_of_memory_message
+from .formats.lights import SceneLight
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
 from .vertex_gpu import VertexPassResult
@@ -27,6 +28,8 @@ LOG_TAIL_LINES = 40
 SOURCES = ('all', 'sun', 'emit')
 # what Windows reports when Blender dies on a failed allocation: unsigned, or signed as Python sees it elsewhere
 ACCESS_VIOLATION = (3221225477, -1073741819)
+# Cycles' light-link sets are a 64-bit mask, of which this many bits go to owners
+LINK_BITS = 62
 
 
 @dataclass
@@ -64,6 +67,8 @@ class Scene:
     texel_class: np.ndarray | None = None
     texel_page: np.ndarray | None = None
     texel_xy: np.ndarray | None = None
+    # per occluder triangle, the scenery placement it belongs to (-1 for none)
+    occ_tri_owner: np.ndarray | None = None
 
 
 _DTYPES = {
@@ -77,7 +82,7 @@ _DTYPES = {
     'query_inverse': np.int32,
     'tri_ignore_normals': np.bool_, 'query_ignore_normals': np.bool_,
     'texel_pos': np.float32, 'texel_normal': np.float32, 'texel_class': np.int16,
-    'texel_page': np.int16, 'texel_xy': np.int32,
+    'texel_page': np.int16, 'texel_xy': np.int32, 'occ_tri_owner': np.int32,
 }
 
 
@@ -110,9 +115,19 @@ class BakeResult:
     texel_rgb: np.ndarray | None = None
 
 
+# the owners of each batch of lamps: a batch is one bake of all lamps whose owners are in it, so that no lamp's link set
+# outgrows Cycles' budget. Batch 0 shares the suns' link sets, so it takes owners only while the suns leave room
+def lamp_batches(owners: list[int], sun_count: int) -> list[list[int]]:
+    owners = list(dict.fromkeys(owners))
+    first = owners[:LINK_BITS] if sun_count <= LINK_BITS else []
+    rest = owners[len(first):]
+    return [first] + [rest[i:i + LINK_BITS] for i in range(0, len(rest), LINK_BITS)]
+
+
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
               s: Settings, sources: str = 'all', textures: list | None = None,
-              choice: DeviceChoice | None = None, vertex_pass: str = 'cpu') -> Path:
+              choice: DeviceChoice | None = None, vertex_pass: str = 'cpu',
+              lights: list[SceneLight] = ()) -> Path:
     if sources not in SOURCES:
         raise ValueError(f'sources must be one of {SOURCES}, not {sources!r}')
     if vertex_pass not in ('cpu', 'skip'):
@@ -136,6 +151,8 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         elif name not in arrays:
             arrays[name] = (np.concatenate([q[name] for q in queries]) if queries
                             else np.empty(shape, _DTYPES[name]))
+    if 'occ_tri_owner' not in arrays:
+        arrays['occ_tri_owner'] = np.full(len(arrays['occ_tris']), -1, np.int32)
     corners = np.concatenate([arrays['positions'][arrays['tris']], arrays['occ_positions'][arrays['occ_tris']]])
     arrays['tri_twin'], arrays['tri_twin_perm'], ambiguous_twins = reversed_twins(corners)
     # an unlightmapped emitter is transparent to diffuse rays whatever the weights leave of its emission
@@ -168,6 +185,22 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
     if sources == 'all':
         job_ambient = {str(k): [float(x) * s.w_amb for x in v] for k, v in ambient.items()}
 
+    job_lights = []
+    if sources == 'all':
+        batch_of = {owner: b for b, owners in enumerate(lamp_batches([l.owner for l in lights], len(job_suns)))
+                    for owner in owners}
+        job_lights = [{
+            'position': [float(v) for v in light.position],
+            'axis': [float(v) for v in light.axis],
+            'strength': [float(v) * s.w_light for v in light.rgb],
+            'kind': int(light.kind),
+            'reach': float(light.reach),
+            'cos_cutoff': float(light.cos_cutoff),
+            'cos_falloff': float(light.cos_falloff),
+            'owner': int(light.owner),
+            'batch': batch_of[light.owner],
+        } for light in lights]
+
     from .terminator import edge_queries
     arrays.update(edge_queries(scene, job_suns, s.reach))
     np.savez(work / 'scene.npz', **arrays)
@@ -179,6 +212,7 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'pages': [[int(w), int(h)] for w, h in pages],
         'suns': job_suns,
         'ambient': job_ambient,
+        'lights': job_lights,
         'samples': s.samples,
         'texel_samples': s.resolved_texel_samples(),
         'cpu_samples': s.resolved_cpu_samples(),
@@ -293,7 +327,7 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> list[n
     work = Path(work)
     np.savez(work / 'glow_pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
     job = json.loads((work / 'job.json').read_text())
-    job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={},
+    job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')
     (work / 'job_glow.json').write_text(json.dumps(job, indent=2))
     _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow.log')

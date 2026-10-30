@@ -24,7 +24,7 @@ def blender_exe():
 def neutral_calibration(tmp_path_factory, monkeypatch):
     # tests expect unit weights rather than the shipped analytic source-unit conversions
     path = tmp_path_factory.mktemp("calibration") / "calibration.json"
-    path.write_text('{"w_sun": 1, "w_emit": 1, "w_amb": 1, "gamma": 1, '
+    path.write_text('{"w_sun": 1, "w_emit": 1, "w_amb": 1, "w_light": 1, "gamma": 1, '
                     '"radiosity_mode": "coherence", "radiosity_scale": 1}\n')
     from lightmapper import settings
     monkeypatch.setattr(settings, "CALIBRATION_PATH", path)

@@ -53,11 +53,12 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 
 ## Light-source weights
 
-These six default to `lightmapper/calibration.json`. The shipped values use an analytic model of tool's lighting. `calibrate` can fit them to a tool bake for experiments.
+These seven default to `lightmapper/calibration.json`. The shipped values use an analytic model of tool's lighting. `calibrate` can fit them to a tool bake for experiments.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `w_sun` | π | Weight on sky lights. Cycles bakes irradiance divided by π, so π brings sky lights back to tool's units. |
+| `w_light` | π | Weight on scenery lights; π brings Cycles' bake back to tool's units. |
 | `w_emit` | 1.0 | Weight on emissive shaders. |
 | `w_amb` | 1.0 | Weight on the sky's ambient light. |
 | `gamma` | 1.0 | Tone curve exponent. Tool applies none. |

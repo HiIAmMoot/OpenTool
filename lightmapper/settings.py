@@ -66,6 +66,7 @@ class Settings(ChartSettings):
     w_sun: float = _calibrated('w_sun')
     w_emit: float = _calibrated('w_emit')
     w_amb: float = _calibrated('w_amb')
+    w_light: float = _calibrated('w_light')
     gamma: float = _calibrated('gamma')
     radiosity_mode: str = _calibrated('radiosity_mode')
     radiosity_scale: float = _calibrated('radiosity_scale')

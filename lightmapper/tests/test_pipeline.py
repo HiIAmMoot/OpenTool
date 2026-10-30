@@ -1641,3 +1641,40 @@ def test_senv_bump_hole_lets_the_compiled_cpu_pass_ray_through(tiny):
     tri, _ = vertex_cpu._cast(cs.arrays(), (bvh.lo, bvh.hi, bvh.first, bvh.count, bvh.order),
                               np.float32([1, 1, 0.5]), np.float32([0, 0, -1]), False, np.ones(3))
     assert tri == -1
+
+
+def test_scene_has_occluder_owners_and_unlit_emitters_own_nothing(tiny):
+    tags, _, _ = tiny
+    place_scenery(tags)
+    put_sotr(tags, 'glow', 10., (1., .5, .25))
+    add_unlit_quad(tags, 'glow')
+    scene = scene_of(tags)
+    assert scene.occ_tri_owner.dtype == np.int32 and scene.occ_tri_owner.tolist() == [0, -1, -1]
+
+
+def scenery_lamp(owner, x=0.):
+    from lightmapper.formats.lights import SceneLight
+    return SceneLight(np.float64([x, 0, 1]), np.float64([0, 0, -1]), np.float64([1, 1, 1]), 2, np.float32(5),
+                      np.float32(0), np.float32(0), owner, 'lamp')
+
+
+def test_lights_outside_the_bsp_are_dropped_and_counted(tiny, monkeypatch, caplog):
+    tags, _, _ = tiny
+    pipeline = api()
+    lamps = [scenery_lamp(0), scenery_lamp(1, 50.), scenery_lamp(2)]
+    monkeypatch.setattr(pipeline, 'gather_lights', lambda *args: (lamps, {'attached': 3, 'placed': 3}))
+    monkeypatch.setattr(pipeline, 'point_clusters', lambda tag, points: np.int32([0, -1, 2]))
+    caplog.set_level('INFO')
+    kept, counts = pipeline.scene_lights(read_tag(tags / 'level.scenario'), tags, 0,
+                                         read_tag(tags / 'room.scenario_structure_bsp'))
+    assert [l.owner for l in kept] == [0, 2]
+    assert counts == {'attached': 3, 'placed': 3, 'outside_bsp': 1, 'baked': 2}
+    assert sum('scenery lights' in r.getMessage() for r in caplog.records) == 1
+
+
+def test_bake_hands_the_lights_to_the_job(tiny, monkeypatch):
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'scene_lights', lambda *args: ([scenery_lamp(4)], {'baked': 1}))
+    api().bake(tags, 'level', 'room', settings, work=work)
+    job = json.loads((work / 'job.json').read_text())
+    assert [(l['owner'], l['batch']) for l in job['lights']] == [(4, 0)]
