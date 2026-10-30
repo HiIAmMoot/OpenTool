@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 
 from lightmapper.blender_job import BAKE_SCRIPT, BlenderError, Scene, run_blender, write_job
+from lightmapper.formats.lights import SceneLight
 from lightmapper.gather import Sun
 from lightmapper.settings import Settings
 
@@ -94,10 +95,11 @@ def sun(direction=UP, classes=(0,), strength=3.0):
     return Sun(direction / np.linalg.norm(direction), 0.01, np.float64([1, 1, 1]), strength, classes)
 
 
-def bake(tmp_path, receivers, suns, pages=((16, 16),), occluders=(), textures=None):
-    s = Settings(samples=32, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, albedo_scale=1.0,
-                 albedo_fallback=0.5, ignore_normals_mode='tool')
-    write_job(tmp_path, build(receivers, occluders), list(pages), suns, {}, s, 'all', textures=textures)
+def bake(tmp_path, receivers, suns, pages=((16, 16),), occluders=(), textures=None, lights=(), **settings):
+    s = Settings(**{**dict(samples=32, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, albedo_scale=1.0,
+                           albedo_fallback=0.5, ignore_normals_mode='tool'), **settings})
+    write_job(tmp_path, build(receivers, occluders), list(pages), suns, {}, s, 'all', textures=textures,
+              lights=list(lights))
     return run_blender(tmp_path, s)
 
 
@@ -868,3 +870,55 @@ def test_bright_bounce_is_not_clamped(tmp_path, blender_exe):
             (root / 'job.json').write_text(json.dumps(job))
         return run_blender(root, s).pages[0].mean()
     assert floor_mean('off') > 1.2 * floor_mean('clamped', clamp_indirect=10)
+
+
+LAMP_PAGE = 32
+LAMP_SIDE = 8.0
+TEXEL = LAMP_SIDE / LAMP_PAGE
+
+
+def lamp_light(position, kind=2, axis=(0, 0, -1), reach=100.0, cutoff=0.0, falloff=0.0):
+    axis = np.float64(axis) / np.linalg.norm(axis)
+    return SceneLight(np.float64(position), axis, np.float64([1, 1, 1]), kind, np.float32(reach),
+                      np.float32(np.cos(cutoff)), np.float32(np.cos(falloff)), 0, 'lamp')
+
+
+def bake_lamp(tmp_path, light):
+    result = bake(tmp_path, [dict(quad=floor(0, LAMP_SIDE, 0, LAMP_SIDE))], [], pages=((LAMP_PAGE, LAMP_PAGE),),
+                  lights=[light], samples=256, w_light=1.0, vertex_rays=1, device='cpu')
+    centres = (np.arange(LAMP_PAGE) + 0.5) * TEXEL
+    x, y = np.meshgrid(centres, centres)
+    offset = np.stack([x, y, np.zeros_like(x)], axis=-1) - light.position
+    distance = np.linalg.norm(offset, axis=-1)
+    cosine = -offset[..., 2] / distance
+    return result.pages[0][..., 0], distance, cosine, offset / distance[..., None]
+
+
+@pytest.mark.blender
+def test_point_lamp_bakes_strength_over_pi_d_squared_with_the_cosine(tmp_path):
+    page, distance, cosine, _ = bake_lamp(tmp_path, lamp_light((4, 4, 1)))
+    assert np.median(page / (cosine / (np.pi * distance ** 2))) == pytest.approx(1, rel=0.01)
+
+
+@pytest.mark.blender
+def test_lamp_cutoff_ends_at_reach(tmp_path):
+    page, distance, _, _ = bake_lamp(tmp_path, lamp_light((0, 0, 0.25), reach=3))
+    assert (page[distance > 3 + TEXEL] == 0).all()
+    assert (page[distance < 3 - TEXEL] > 0).all()
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('axis', [(0, 0, -1), (1, 0, -1)])
+def test_spot_lamp_follows_tools_cosine_ramp(tmp_path, axis):
+    cutoff, falloff = 0.6, 0.3
+    light = lamp_light((4, 4, 4), 3, axis, cutoff=cutoff, falloff=falloff)
+    page, distance, cosine, direction = bake_lamp(tmp_path, light)
+    angle = np.arccos(np.clip(direction @ light.axis, -1, 1))
+    # one texel seen from the lamp, in angle
+    margin = TEXEL / distance
+    band = (angle > falloff + margin) & (angle < cutoff - margin)
+    assert band.sum() > 20
+    ramp = (direction @ light.axis - light.cos_cutoff) / (light.cos_falloff - light.cos_cutoff)
+    expected = cosine * ramp / (np.pi * distance ** 2)
+    assert np.median(page[band] / expected[band]) == pytest.approx(1, rel=0.02)
+    assert page[angle > cutoff + margin].max() < 2e-4

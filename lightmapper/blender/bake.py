@@ -43,6 +43,9 @@ SEED_SPIN = 0.7548776662466927
 QUERY_CHUNK = 256
 # measured Diffuse + Translucent / Diffuse-only bake ratio: 0.5011076 (Blender 5.2)
 BACK_SIDE_SHARE = 0.5
+# a radius-0 point light of power P bakes P cos / (4 pi^2 d^2) (1 W measured, Blender 5.2); 4 pi W makes
+# strength cos / (pi d^2), the same units as a sun of that strength
+LAMP_WATTS = 4 * math.pi
 
 
 def log(message):
@@ -487,6 +490,63 @@ def add_sun(n, sun, receiver_collection):
     obj.rotation_quaternion = mathutils.Vector((0, 0, 1)).rotation_difference(
         mathutils.Vector(sun['direction']))
     obj.light_linking.receiver_collection = receiver_collection
+
+
+def make_lamp(name, lamp):
+    light = bpy.data.lights.new(name, 'POINT')
+    light.shadow_soft_size = 0
+    strength = max(lamp['strength'])
+    light.energy = LAMP_WATTS * strength
+    light.color = [c / strength for c in lamp['strength']]
+    light.use_nodes = True
+    tree = light.node_tree
+    tree.nodes.clear()
+    output = tree.nodes.new('ShaderNodeOutputLight')
+    emission = tree.nodes.new('ShaderNodeEmission')
+    tree.links.new(emission.outputs['Emission'], output.inputs['Surface'])
+    falloff = tree.nodes.new('ShaderNodeLightFalloff')
+    falloff.inputs['Strength'].default_value = 1
+    falloff.inputs['Smooth'].default_value = 0
+    cutoff = tree.nodes.new('ShaderNodeMath')
+    cutoff.operation = 'LESS_THAN'
+    cutoff.inputs[1].default_value = lamp['reach']
+    tree.links.new(falloff.outputs['Linear'], cutoff.inputs[0])
+    gain = cutoff.outputs['Value']
+    if lamp['kind'] == 3:
+        # in a light's node tree the Normal is the light-local direction it emits along, -Z at rest
+        direction = tree.nodes.new('ShaderNodeTexCoord')
+        along = tree.nodes.new('ShaderNodeVectorMath')
+        along.operation = 'DOT_PRODUCT'
+        along.inputs[1].default_value = (0, 0, -1)
+        tree.links.new(direction.outputs['Normal'], along.inputs[0])
+        if lamp['cos_falloff'] <= lamp['cos_cutoff']:
+            ramp = tree.nodes.new('ShaderNodeMath')
+            ramp.operation = 'GREATER_THAN'
+            ramp.inputs[1].default_value = lamp['cos_cutoff']
+            tree.links.new(along.outputs['Value'], ramp.inputs[0])
+            ramp_out = ramp.outputs['Value']
+        else:
+            ramp = tree.nodes.new('ShaderNodeMapRange')
+            ramp.interpolation_type = 'LINEAR'
+            ramp.clamp = True
+            ramp.inputs['From Min'].default_value = lamp['cos_cutoff']
+            ramp.inputs['From Max'].default_value = lamp['cos_falloff']
+            ramp.inputs['To Min'].default_value = 0
+            ramp.inputs['To Max'].default_value = 1
+            tree.links.new(along.outputs['Value'], ramp.inputs['Value'])
+            ramp_out = ramp.outputs['Result']
+        both = tree.nodes.new('ShaderNodeMath')
+        both.operation = 'MULTIPLY'
+        tree.links.new(gain, both.inputs[0])
+        tree.links.new(ramp_out, both.inputs[1])
+        gain = both.outputs['Value']
+    tree.links.new(gain, emission.inputs['Strength'])
+    obj = bpy.data.objects.new(name, light)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.location = lamp['position']
+    obj.rotation_mode = 'QUATERNION'
+    obj.rotation_quaternion = mathutils.Vector((0, 0, -1)).rotation_difference(mathutils.Vector(lamp['axis']))
+    return obj
 
 
 def clear_page(image, buffer):
@@ -1183,6 +1243,9 @@ def main():
                     glow_images.append(image)
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)
         add_suns(job, receivers, occluders)
+        # (unlinked: every lamp shines on everything until the linking pass replaces this)
+        for n, lamp in enumerate(job['lights']):
+            make_lamp(f'lamp_{n}', lamp)
         out['seconds_scene'] = np.float64(time.perf_counter() - scene_started)
         diffuse_pages = []
         for i, (w, h) in enumerate(job['pages']):
