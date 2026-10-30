@@ -149,7 +149,8 @@ class TextureSet:
         if alpha is None or not whole:
             # the game reads an unusable bump as its opaque default, and only a whole-number scale tiles
             # with the base map, so the shader is solid
-            why = f'bump map cannot be read: {self._alpha_errors[bump]}' if alpha is None else                 f'bump scale {scale} is not a whole number of at least 1'
+            why = (f'bump map cannot be read: {self._alpha_errors[bump]}' if alpha is None
+                   else f'bump scale {scale} is not a whole number of at least 1')
             logger.warning('%s: bump map %s is not usable as a cut-out (%s); the shader stays solid', albedo, bump, why)
             alpha, scale = np.full((1, 1), 255, np.uint8), 1
         image = compose_cutout(colour, alpha, int(scale))
