@@ -44,3 +44,19 @@ def test_read_summary_of_a_missing_file_is_none(tmp_path):
 def test_a_glow_pass_recorded_as_off_reads_skipped():
     lines = report.bake_report({'devices': {**FULL['devices'], 'glow_pass': 'off'}})
     assert lines == ['Devices: page bake OPTIX, vertex pass cpu, glow pass skipped, denoise CPU']
+
+
+def test_a_skipped_glow_pass_names_its_reason():
+    devices = {**FULL['devices'], 'glow_pass': 'off', 'glow_reason': 'bounces set to 0'}
+    assert report.bake_report({'devices': devices}) == [
+        'Devices: page bake OPTIX, vertex pass cpu, glow pass skipped (bounces set to 0), denoise CPU']
+
+
+def test_a_glow_pass_that_ran_ignores_a_stale_reason():
+    devices = {**FULL['devices'], 'glow_pass': 'HIP', 'glow_reason': ''}
+    assert report.bake_report({'devices': devices})[0].startswith('Devices: page bake OPTIX, vertex pass cpu, glow pass HIP,')
+
+
+def test_a_malformed_summary_only_leaves_lines_out():
+    assert report.bake_report({'seconds': None, 'devices': None, 'written': None}) == []
+    assert report.bake_report({'seconds': [1], 'devices': 'x', 'written': 3}) == []

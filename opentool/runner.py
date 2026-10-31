@@ -92,14 +92,13 @@ def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True)
     write_tag(tag, path, backup=backups)
 
 
-def read_summary(work: Path) -> tuple[dict | None, dict | None, list[str]]:
+def summary_parts(summary: dict | None) -> tuple[dict | None, dict | None, list[str]]:
     try:
-        summary = json.loads((work / 'summary.json').read_text())
         devices, rays, warnings = summary['devices'], summary.get('rays'), summary.get('warnings', [])
         if (isinstance(devices, dict) and {'page_bake', 'vertex_pass', 'denoise'} <= devices.keys()
                 and isinstance(warnings, list)):
             return devices, rays if isinstance(rays, dict) else None, [str(text) for text in warnings]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (KeyError, TypeError, AttributeError):
         pass
     return None, None, []
 
@@ -194,9 +193,11 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         status = 'problems' if problems else 'done'
         summary = report.read_summary(work / 'summary.json')
         lines = report.bake_report(summary) if summary is not None else []
-        written = (summary or {}).get('written') or {}
-        total = (summary or {}).get('seconds', {}).get('total')
-        if written and total is not None:
+        written = (summary or {}).get('written')
+        seconds = (summary or {}).get('seconds')
+        total = seconds.get('total') if isinstance(seconds, dict) else None
+        if (isinstance(written, dict) and written and all(isinstance(v, int) for v in written.values())
+                and isinstance(total, (int, float))):
             duration, size = report.format_duration(total), report.format_size(sum(written.values()))
             message = (f'Finished with problems in {duration}. The tags were written ({size}); the problems are listed in the log.'
                        if problems else f'Done in {duration}: the lit level is {out_scenario or request.scenario} ({size} written).')
@@ -204,7 +205,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             message = ('Finished with problems. The tags were written; the problems are listed in the log.' if problems
                        else f'Done. The lit level is {out_scenario or request.scenario}.')
         output_folder = resolve_reference_path(request.tags, 'sbsp', written_bsp).parent
-        outcome = BakeOutcome(status, message, problems, output_folder, work, device, *read_summary(work), lines)
+        outcome = BakeOutcome(status, message, problems, output_folder, work, device, *summary_parts(summary), lines)
     except Exception as exc:
         logger.exception('Bake failed')
         outcome = BakeOutcome('failed', explain(exc, work), [], None, work, device)

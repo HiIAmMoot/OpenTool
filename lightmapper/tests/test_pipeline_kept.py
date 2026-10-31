@@ -387,3 +387,12 @@ def test_write_again_reads_the_scene_and_job_it_kept(tiny, tmp_path, monkeypatch
     forbid_baking(monkeypatch)
     api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
     assert [path.read_bytes() for path in written(tags)] == first
+
+
+def test_write_again_records_the_written_sizes(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    summary = json.loads((work / 'write_summary.json').read_text())
+    assert summary['written'] == {'bitmap': (tags / 'copy.bitmap').stat().st_size,
+                                  'bsp': (tags / 'copy.scenario_structure_bsp').stat().st_size}

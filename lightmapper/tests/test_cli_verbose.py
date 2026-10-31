@@ -187,10 +187,11 @@ def test_cli_write_prints_the_report_and_keeps_its_warnings(monkeypatch, tmp_pat
     work = kept_manifest(tmp_path)
     (work / 'write_summary.json').write_text(json.dumps({
         'seconds': {'total': 3.0}, 'written': {'bitmap': 1048576, 'bsp': 2097152}, 'warnings': ['a warning'],
-        'devices': {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off', 'glow_pass': 'off'}}))
+        'devices': {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off', 'glow_pass': 'off',
+                    'glow_reason': 'bounces set to 0'}}))
     monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: type('O', (), {'work': work})())
     cli.main(['write', str(work)])
     out = capsys.readouterr().out
     assert 'BSP written: 2.0 MB' in out and 'warning: a warning' in out
-    assert out.count('denoise') == 1
+    assert out.count('denoise') == 1 and 'glow pass skipped (bounces set to 0)' in out
     assert out.index('Total time:') < out.index('Work:')

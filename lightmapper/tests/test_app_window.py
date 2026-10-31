@@ -1900,3 +1900,11 @@ def test_finished_bake_logs_the_report(ready_app):
     run_events(ready_app, [('done', outcome)])
     lines = ready_app.log_box.get('1.0', 'end-1c').splitlines()
     assert lines.index('bad uv') < lines.index('Total time: 45 s') < lines.index('Pages: 1 (64x64)') < lines.index('WARNING: careful')
+
+
+def test_the_glow_hook_leaves_a_finished_bakes_rows(ready_app):
+    # (called directly: a changed variable also resets the used rows through _reset_used_rows, which is by design)
+    ready_app._bake_done(cpu_outcome())
+    used = stage_texts(ready_app)
+    ready_app._glow_inputs_changed()
+    assert stage_texts(ready_app) == used

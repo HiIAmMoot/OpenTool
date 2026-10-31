@@ -469,3 +469,16 @@ def test_without_a_summary_the_old_messages_stand(tiny, monkeypatch):
     monkeypatch.setattr(report, 'read_summary', lambda path: None)
     out, _ = run(tiny)
     assert out.message == 'Done. The lit level is level_lit.' and out.report == []
+
+
+def test_without_a_summary_the_old_problems_message_stands(tiny, monkeypatch):
+    monkeypatch.setattr(runner, 'validate_bsp', lambda *a, **k: ['bad'])
+    monkeypatch.setattr(report, 'read_summary', lambda path: None)
+    out, _ = run(tiny)
+    assert out.message == 'Finished with problems. The tags were written; the problems are listed in the log.'
+
+
+def test_a_malformed_summary_does_not_fail_a_written_bake(tiny, monkeypatch):
+    monkeypatch.setattr(report, 'read_summary', lambda path: {'seconds': None, 'devices': None, 'written': {'bsp': 1}})
+    out, _ = run(tiny)
+    assert out.status == 'done' and out.message == 'Done. The lit level is level_lit.'

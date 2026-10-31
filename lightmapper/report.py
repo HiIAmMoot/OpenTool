@@ -26,7 +26,8 @@ def read_summary(path: Path) -> dict | None:
 
 
 def bake_report(summary: dict) -> list[str]:
-    seconds = summary.get('seconds') or {}
+    seconds = summary.get('seconds')
+    seconds = seconds if isinstance(seconds, dict) else {}
     lines = []
 
     def timed(label, *keys, required=1):
@@ -43,18 +44,21 @@ def bake_report(summary: dict) -> list[str]:
     timed('Denoising', 'denoise')
     timed('Writing', 'write')
     sizes = summary.get('sizes')
-    if 'pages' in summary and sizes is not None:
+    if 'pages' in summary and isinstance(sizes, list):
         lines.append(f"Pages: {summary['pages']} ({', '.join(f'{w}x{h}' for w, h in sizes)})")
-    written = summary.get('written') or {}
-    if 'bitmap' in written:
+    written = summary.get('written')
+    written = written if isinstance(written, dict) else {}
+    if isinstance(written.get('bitmap'), int):
         lines.append(f"Bitmap written: {format_size(written['bitmap'])}")
-    if 'bsp' in written:
+    if isinstance(written.get('bsp'), int):
         lines.append(f"BSP written: {format_size(written['bsp'])}")
-    devices = summary.get('devices') or {}
+    devices = summary.get('devices')
+    devices = devices if isinstance(devices, dict) else {}
     # (a skipped glow run is recorded as 'off')
     glow = devices.get('glow_pass')
     if glow in (None, '', 'off'):
-        glow = 'skipped'
+        reason = devices.get('glow_reason')
+        glow = f'skipped ({reason})' if reason else 'skipped'
     if {'page_bake', 'vertex_pass', 'denoise'} <= devices.keys():
         lines.append(f"Devices: page bake {devices['page_bake']}, vertex pass {devices['vertex_pass']}, "
                      f"glow pass {glow}, denoise {devices['denoise']}")
