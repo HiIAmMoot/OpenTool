@@ -39,7 +39,8 @@ def test_shipped_calibration_is_tools_analytic_model(monkeypatch):
     monkeypatch.setattr(settings, 'CALIBRATION_PATH', Path(settings.__file__).with_name('calibration.json'))
     s = Settings()
     assert (s.w_sun, s.w_emit, s.w_amb, s.gamma) == (pi, 1.0, 1.0, 1.0)
-    assert s.w_light == pi
+    # (scenery lamps are fitted to tool's bakes, not to the analytic model)
+    assert s.w_light == pytest.approx(2.4318545407889416)
     assert (s.radiosity_mode, s.radiosity_scale) == ('coherence', 1.0)
 
 

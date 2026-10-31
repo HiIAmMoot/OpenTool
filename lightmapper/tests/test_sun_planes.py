@@ -49,6 +49,7 @@ def test_vertex_sun_requires_any_adjacent_plane_facing_light(bake_module, revers
     vp.cast = lambda *args: (-1, None)
     vp.shade = lambda tri, *args: np.zeros(len(tri))
     vp.ambient = np.zeros((2, 3))
+    vp.light_flat = None
     vector, energy, _ = vp.run()
     assert energy[1] == 0
     np.testing.assert_array_equal(vector[1], [0, 0, 0])
@@ -172,6 +173,7 @@ def test_gather_rays_start_one_epsilon_along_their_own_direction(bake_module):
                     query_class=np.int16([0]))
     vp.job = dict(vertex_rays=4, suns=[])
     vp.ambient = np.zeros((2, 3))
+    vp.light_flat = None
     calls = []
 
     def cast(origin, direction):

@@ -499,7 +499,7 @@ def test_vertex_only_relaunch_returns_the_lamp_throughput(tmp_path):
     scene = replace(build([dict(quad=floor(-4, 4, -4, 4))]), query_pos=np.float32([[0, 0, 0], [1, 0, 0]]),
                     query_normal=np.float32([[0, 0, 1]] * 2), query_class=np.int16([0, 0]),
                     query_ignore_normals=np.bool_([True, False]))
-    s = Settings(samples=4, vertex_rays=1, w_light=1.0, blender=str(LIGHTMAPPER_BLENDER))
+    s = Settings(samples=4, vertex_rays=1, w_light=1.0, blender=str(LIGHTMAPPER_BLENDER), ignore_normals_mode='tool')
     write_job(tmp_path, scene, [(8, 8)], [], {}, s, lights=[lamp_light((0, 0, 2))])
     first = run_blender(tmp_path, s)
     relaunch = blender_job.run_blender_vertex_only(tmp_path, s, first.diffuse_pages)

@@ -1761,7 +1761,9 @@ def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=(), route='cpu'):
     elif route == 'relaunch':
         monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
         settings = replace(settings, device='cpu', cpu_vertex_backend='blender')
-    return pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
+    # (flat lamp light is the traditional mode's)
+    return pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False, ignore_normals_mode='tool'),
+                         work=work, dry_run=True)
 
 
 def test_flat_light_term_lights_flagged_texels_once_in_tool_mode(tiny, monkeypatch):
