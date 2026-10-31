@@ -593,3 +593,25 @@ def test_written_uncovered_texels_and_padding_beyond_take_the_covered_class(deno
     np.testing.assert_allclose(added[:, 2:6], 0.1, atol=1e-6)
     np.testing.assert_allclose(added[:, 6], 0.1, atol=1e-6)
     np.testing.assert_allclose(added[:, 7:11], 0.1, atol=1e-6)
+
+
+def test_a_temp_folder_that_cannot_be_deleted_does_not_fail_close():
+    worker = pages.DenoiseWorker.start('CPU', 60, strict=True)
+    # (a handle another child inherited keeps stderr.txt undeletable on Windows)
+    leaked = open(Path(worker.cwd.name) / pages.STDERR_FILE, 'rb')
+    try:
+        worker.close()
+    finally:
+        leaked.close()
+
+
+def test_one_off_denoise_survives_an_undeletable_temp_folder(monkeypatch):
+    real = tempfile.TemporaryDirectory
+
+    class Stuck(real):
+        def cleanup(self):
+            raise PermissionError(32, 'in use')
+
+    monkeypatch.setattr(pages.tempfile, 'TemporaryDirectory', Stuck)
+    page = np.full((8, 8, 3), 0.5, np.float32)
+    assert pages._denoise(page, 60).shape[:2] == (8, 8)

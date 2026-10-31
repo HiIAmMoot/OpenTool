@@ -12,6 +12,7 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
+import time
 from time import perf_counter
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
@@ -42,10 +43,13 @@ def _denoise(page: np.ndarray, timeout: float, worker=None) -> np.ndarray:
     padded = np.pad(page, ((_BORDER, _BORDER), (_BORDER, _BORDER), (0, 0)), mode='edge')
     np.save(data, padded)
     try:
-        with tempfile.TemporaryDirectory() as cwd:
+        scratch = tempfile.TemporaryDirectory()
+        try:
             done = subprocess.run(denoise_worker.worker_command(), input=data.getvalue(),
-                                  capture_output=True, cwd=cwd, timeout=timeout,
+                                  capture_output=True, cwd=scratch.name, timeout=timeout,
                                   creationflags=frozen.NO_WINDOW)
+        finally:
+            _clean(scratch)
     except subprocess.TimeoutExpired:
         raise RuntimeError(f'OIDN denoise timed out after {timeout:g} s') from None
     if done.returncode:
@@ -68,6 +72,20 @@ class DenoiseTimeoutError(RuntimeError):
 # (the worker's stderr goes to a file: nothing reads a pipe while a page is denoising, so a chatty runtime would
 # fill the pipe and stall the worker until the page's timeout)
 STDERR_FILE = 'stderr.txt'
+
+
+def _clean(cwd):
+    # a finished bake must not fail on a scratch folder: on Windows a handle another child inherited while the
+    # worker's stderr.txt was being passed on can hold the file after the worker has exited, so retry, then leak it
+    for attempt in range(4):
+        try:
+            cwd.cleanup()
+            return
+        except OSError as error:
+            if attempt == 3:
+                log.debug('could not remove %s: %s', cwd.name, error)
+            else:
+                time.sleep(0.1)
 
 
 def _stderr_tail(cwd) -> str:
@@ -141,7 +159,7 @@ class DenoiseWorker:
                     # the blocked pipe reader to finish.
                     process.kill()
                     process.wait()
-                    cwd.cleanup()
+                    _clean(cwd)
                     raise DenoiseTimeoutError(
                         f'OIDN {device} startup timed out after {start_timeout:g} s') from None
         except FutureTimeout:
@@ -153,7 +171,7 @@ class DenoiseWorker:
                 process.kill()
                 process.wait()
             stderr = _stderr_tail(cwd)
-            cwd.cleanup()
+            _clean(cwd)
             if stderr:
                 raise RuntimeError(f'{error}: {stderr}') from error
             raise
@@ -173,7 +191,7 @@ class DenoiseWorker:
                 self.process.wait()
         tail = _stderr_tail(self.cwd)
         if self.cwd is not None:
-            self.cwd.cleanup()
+            _clean(self.cwd)
             self.cwd = None
         return tail
 
