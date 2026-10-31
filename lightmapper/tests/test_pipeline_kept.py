@@ -2,7 +2,8 @@ from dataclasses import replace
 
 import pytest
 
-from lightmapper import kept
+from lightmapper import cpu_vertex_job as vertex_cpu, kept
+from lightmapper.errors import KeptBakeError
 from test_pipeline import api, run_enhanced_pipeline, tiny  # noqa: F401
 
 
@@ -90,3 +91,45 @@ def test_kept_bake_drops_the_superseded_outputs(tiny, tmp_path):
     api().bake(tags, 'level', 'room', tool(settings), out_bsp='copy', work=work, keep=True)
     assert not (work / 'out.npz').exists() and not (work / 'lamps_1_out.npz').exists()
     assert (work / 'blender.log').read_text() == 'log'
+
+
+def test_kept_source_is_the_bsp_from_before_an_in_place_bake(tiny, tmp_path):
+    tags, settings, _ = tiny
+    work = kept_work(tmp_path, tags)
+    before = (tags / 'room.scenario_structure_bsp').read_bytes()
+    api().bake(tags, 'level', 'room', tool(settings), work=work, keep=True)
+    assert (tags / 'room.scenario_structure_bsp').read_bytes() != before
+    assert (kept.kept_dir(work) / kept.SOURCE).read_bytes() == before
+
+
+def test_a_failed_rebake_into_a_kept_folder_leaves_no_old_bake(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    work = kept_work(tmp_path, tags)
+    api().bake(tags, 'level', 'room', tool(settings), out_bsp='copy', work=work, keep=True)
+    kept.read_manifest(work)
+
+    def broken(work, pages, timeout):
+        raise RuntimeError('out of memory')
+
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', broken)
+    with pytest.raises(RuntimeError):
+        api().bake(tags, 'level', 'room', tool(settings), out_bsp='copy', work=work, keep=True)
+    with pytest.raises(KeptBakeError):
+        kept.read_manifest(work)
+
+
+def test_a_rebake_drops_the_glow_of_the_earlier_kept_bake(tiny, tmp_path, monkeypatch):
+    tags = tiny[0]
+    work = kept_work(tmp_path, tags)
+    both = {'work': work, 'dry_run': False, 'out_bsp': 'copy', 'keep': True}
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs=both)
+    assert (kept.kept_dir(work) / kept.GLOW).is_file()
+    run_enhanced_pipeline(tiny, monkeypatch, 'tool', bake_kwargs=both)
+    assert not (kept.kept_dir(work) / kept.GLOW).exists()
+    assert kept.read_manifest(work).glow_device == 'off'
+
+
+def test_keep_needs_a_work_folder(tiny):
+    tags, settings, _ = tiny
+    with pytest.raises(ValueError, match='a kept bake needs a work folder'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', keep=True)

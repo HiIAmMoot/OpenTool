@@ -87,7 +87,7 @@ Other options:
 - `--dry-run` runs the whole bake but writes no tags.
 - `--32bit` writes 32-bit (x8r8g8b8) lightmap pages instead of 16-bit (r5g6b5). They show no banding and take twice the space. The settings key is `lightmap_32bit`.
 - `--charts file.npz` points at a saved chart layout. It is reused only when the input BSP, the chart settings and the shaders' radiosity fields are unchanged. A normal bake rewrites its BSP, so the next bake of that level charts it again.
-- `--keep` stores what the finish needs (the BSP, scenario and charts, and the bake's results) in the app's `kept bakes` folder, one folder per level, so the tags can be written again later without baking. A new kept bake of a level replaces the last one. It needs a full bake that writes tags: it cannot be combined with `--dry-run` or `--sources`. Given `--work`, the bake is kept in that folder instead and nothing else is removed.
+- `--keep` stores what the finish needs (the BSP, scenario and charts, and the bake's results) in the app's `kept bakes` folder, one folder per level, so the tags can be written again later without baking. A new kept bake of a level replaces the last one. It needs a full bake that writes tags: it cannot be combined with `--dry-run` or `--sources sun` or `emit` (`--sources all` is fine). Given `--work`, the bake is kept in that folder instead. The bake still deletes the superseded outputs in that folder, and it prunes older kept bakes only when the folder sits in a kept level folder.
 - `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and scenery lights and write no tags. The default is `--sources all`.
 
 ### Settings

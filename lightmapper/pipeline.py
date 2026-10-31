@@ -14,6 +14,7 @@ import hashlib
 import json
 import logging
 from pathlib import Path, PureWindowsPath
+import shutil
 import tempfile
 from time import perf_counter
 
@@ -266,6 +267,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
           progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False) -> BakeOutput:
     if keep and (sources != 'all' or dry_run):
         raise ValueError('a kept bake must be a full bake that writes tags')
+    if keep and work is None:
+        # (a kept bake in the temp folder is one latest() never finds)
+        raise ValueError('a kept bake needs a work folder')
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
@@ -315,7 +319,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
                     Path(charts) if charts is not None else work / 'charts.npz')
     stage('charts')
     if keep:
-        kept.kept_dir(work).mkdir(exist_ok=True)
+        # (a folder that held a kept bake must not keep any of it: a bake that fails before its manifest would otherwise
+        # leave the old manifest and result beside the new sources, and an old glow or template would outlive a bake
+        # that has none)
+        (work / kept.MANIFEST).unlink(missing_ok=True)
+        shutil.rmtree(kept.kept_dir(work), ignore_errors=True)
+        kept.kept_dir(work).mkdir()
         template_file = resolve_reference_path(tags, group, path) if template is not None else None
         kept.save_sources(work, input_file, template_file, resolve_reference_path(tags, 'scnr', scenario),
                           Path(charts) if charts is not None else work / 'charts.npz')

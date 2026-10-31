@@ -234,4 +234,4 @@ def test_prune_logs_a_folder_it_cannot_remove(tmp_path, monkeypatch, caplog):
     with caplog.at_level('WARNING', logger='lightmapper.kept'):
         kept.prune(level / 'b')
     assert sorted(p.name for p in level.iterdir()) == ['a', 'b']
-    assert [m.split()[-1] for m in caplog.messages] == [str(level / 'a')]
+    assert len(caplog.messages) == 1 and str(level / 'a') in caplog.messages[0]
