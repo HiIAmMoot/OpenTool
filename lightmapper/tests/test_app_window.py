@@ -1786,3 +1786,21 @@ def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
     app._on_example_hover('samples')
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     assert not app.example_image_label.cget('image')
+
+
+def test_the_example_panel_follows_a_resize(app, monkeypatch):
+    app._toggle_advanced()
+    app._on_example_focus('samples')
+    app.window.update()
+    monkeypatch.setattr(app.advanced_frame, 'grid_bbox', lambda *_args: (700, 0, 500, 230))
+    app.advanced_frame.event_generate('<Configure>')
+    app.window.update()
+    info = app.example_panel.place_info()
+    assert (int(info['x']), int(info['width'])) == (708, 492)
+    assert app.example_panel.winfo_manager() == 'place'
+
+
+def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
+    app.advanced_frame.event_generate('<Configure>')
+    app.window.update()
+    assert app.example_panel.winfo_manager() == ''

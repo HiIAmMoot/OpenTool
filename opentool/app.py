@@ -224,6 +224,8 @@ class App:
         self.example_text.pack(anchor='w')
         self.example_image_label = ttk.Label(self.example_panel)
         self.example_image_label.pack(anchor='w', pady=(4, 0))
+        # (the area is read from the grid at show time: a resize or maximise moves column 2 under a panel that stays up)
+        self.advanced_frame.bind('<Configure>', lambda _event: self._show_example() if self.example_panel.winfo_manager() == 'place' else None, add='+')
         controls = {**self.advanced_entries, 'adaptive_sampling': self.adaptive_check,
                     'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check}
         for name in self.row_order:
