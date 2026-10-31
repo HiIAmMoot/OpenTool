@@ -13,7 +13,7 @@ Tool stores a level's lighting in two tags: the lightmap pages in a `bitmap` tag
 - It lays out the lightmap UVs with [xatlas](https://github.com/jpcy/xatlas). Charts split at hard creases, and the texels on either side of a chart seam are stitched so the seam is hard to see.
 - It renders the light with Blender's Cycles path tracer and works out the per-vertex light on the GPU too, when you have an NVIDIA or AMD one.
 - It denoises the pages with Intel Open Image Denoise and keeps the light in floating point until the final 16-bit encode.
-- It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap, and the lights attached to scenery (always baked; a `w_light` of 0 turns them off). Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
+- It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap, and the static lights attached to scenery (always baked; a `w_light` of 0 turns them off). Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
 
 ## How close it gets to tool
 
@@ -36,7 +36,7 @@ One difference is on purpose. Some shaders take their lightmap layout from their
 On top of the general requirements in the [README](../README.md#requirements):
 
 - [Blender 5.2](https://www.blender.org/download/), which the lightmapper runs as a separate program for the bake.
-- A GPU makes bakes much faster: an NVIDIA or AMD card whose Vulkan driver supports ray queries. Without one, the bake runs on the CPU and takes far longer. The `device` setting chooses; see [lightmapper-settings.md](lightmapper-settings.md).
+- A GPU makes bakes much faster: an NVIDIA or AMD card whose Vulkan driver supports ray queries. Without one, the bake runs on the CPU and takes longer. The `device` setting chooses; see [lightmapper-settings.md](lightmapper-settings.md).
 - [SlangPy](https://slangpy.shader-slang.org), which runs the per-vertex pass on the GPU. `requirements.txt` pins it, and the Windows app bundles it (`THIRD_PARTY_NOTICES.md` lists its parts).
 - GPU baking has been tested on an NVIDIA RTX 4060 laptop GPU and an AMD Radeon 680M. Intel GPUs are untested.
 - [LLVM](https://releases.llvm.org) and the Visual Studio Build Tools with the "Desktop development with C++" workload. The first run compiles xatlas from the bundled source, and clang needs the C++ standard library headers and Windows SDK from the Build Tools. LLVM in its default folder, `C:\Program Files\LLVM`, is found even when it is not on `PATH`.
@@ -156,7 +156,7 @@ The Windows app's presets, timed on Blood Gulch with the RTX 4060 and the device
 | Normal | 29 s | 70 s |
 | High | 67 s | 220 s |
 
-Rat Race at the default settings takes 17 s on the NVIDIA GPU, 35 s on the AMD Radeon 680M (where the denoiser runs on the CPU) and 181 s on the CPU only. Rat Race at Normal on the CPU only takes 57 s, with the CPU counts of 256 rays per texel and 1024 per vertex.
+Rat Race at the default settings takes 17 s on the NVIDIA GPU, 35 s on the AMD Radeon 680M (where the denoiser runs on the CPU) and 181 s on the CPU only in 0.2.0 and 31 s in 0.2.1, whose CPU vertex pass is compiled. Rat Race at Normal on the CPU only took 57 s in 0.2.0 and takes 23 s in 0.2.1, with the CPU counts of 256 rays per texel and 1024 per vertex. The first CPU bake on a computer compiles the pass once, which takes about a minute; later bakes load it from a cache. These CPU times were measured with `ignore_normals_mode` set to `tool`.
 
 `summary.json` records how long each stage took on your machine, and which device ran each one.
 

@@ -37,13 +37,21 @@ The quickest way to use OpenTool is the Windows app. It needs nothing installed 
 1. Download `OpenTool-<version>-windows-x64.zip` from the [releases page](https://github.com/HiIAmMoot/OpenTool/releases) and unzip it anywhere.
 2. Install [Blender 5.2](https://www.blender.org/download/) or newer if you don't have it. The app finds it on its own.
 3. Double-click `OpenTool.exe`.
-4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake. The Device row shows the GPU the app found. Auto uses it; choose NVIDIA, AMD or CPU only to override that. NVIDIA and AMD stop the bake with a message if no such GPU is found.
+4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake. The Device row shows the GPU the app found. Auto uses it; choose NVIDIA, AMD or CPU only to override that. NVIDIA and AMD stop the bake with a message if no such GPU is found. Three rows under it show where the page bake, vertex pass and denoiser will run, and after a bake what ran.
 
 With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual.
 
 The presets use more rays on a GPU than 0.1.0 did, because a GPU can afford them. On the CPU, Draft, Normal and High use 0.1.0's smaller counts; the app says so under the preset. Custom values are used as typed on any device.
 
+Under Advanced, "Ignore-normals lighting" sets how shaders flagged "ignore normals" are lit: Enhanced (the default) or Traditional, which matches tool. "32-bit lightmaps" writes 32-bit pages instead of 16-bit, with no banding and twice the space. Both stay as set whichever preset you choose. Texel density is a dropdown (1 to 32).
+
+Before a bake the app estimates the memory it needs and shows it against the free memory. If the bake may not fit it warns and lets you go on at your own risk; it never refuses. The estimate is only an estimate.
+
 On an RTX 4060 laptop GPU, Blood Gulch bakes in about 19 seconds at Draft, 29 at Normal and 67 at High. Version 0.1.0 took 24, 70 and 220.
+
+Without a GPU the vertex pass runs as compiled code on all CPU cores, and CPU-only bakes take about a sixth of 0.2.0's time: Rat Race went from 181 to 31 seconds. The first CPU bake on a computer compiles that code once, which takes about a minute; later bakes reuse it.
+
+Lights attached to scenery (torches, for example) bake: static lights only, never dynamic ones.
 
 `OpenTool-cli.exe` in the same folder takes the same commands as `python lightmap.py`. Its `check` command tests every part of the download and prints one line per part.
 
@@ -56,7 +64,7 @@ To run from source:
 - Windows.
 - [Python 3.11](https://www.python.org/downloads/).
 - The H1A editing kit, with its tags extracted.
-- For the lightmapper: [Blender 5.2](https://www.blender.org/download/) installed, a GPU for fast bakes (NVIDIA or AMD, with Vulkan ray queries; without one the bake runs on the CPU and is much slower), and [LLVM](https://releases.llvm.org) with the Visual Studio Build Tools ("Desktop development with C++") to compile one library on the first run. [Details](docs/lightmapper.md#requirements).
+- For the lightmapper: [Blender 5.2](https://www.blender.org/download/) installed, a GPU for fast bakes (NVIDIA or AMD, with Vulkan ray queries; without one the bake runs on the CPU and is slower), and [LLVM](https://releases.llvm.org) with the Visual Studio Build Tools ("Desktop development with C++") to compile one library on the first run. [Details](docs/lightmapper.md#requirements).
 
 ## Installing
 
