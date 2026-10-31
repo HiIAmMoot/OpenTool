@@ -152,6 +152,30 @@ def flat_sun_term(scene, suns, throughput, page, width, height):
     return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32)
 
 
+def flat_light_term(scene, light_flat, page, width, height):
+    term = np.zeros((height, width, 3), np.float32)
+    if scene.tri_ignore_normals is None:
+        return term
+    rows = np.flatnonzero(scene.tri_page == page)
+    if not len(rows) or not scene.tri_ignore_normals[rows].any():
+        return term
+    tris = scene.tris[rows]
+    owner, weights = triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
+    covered = owner >= 0
+    wanted = covered & scene.tri_ignore_normals[rows][np.maximum(owner, 0)]
+    count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
+    tri, weight = owner[wanted], weights[wanted]
+    corner = np.asarray(light_flat, np.float32)[scene.query_inverse[tris]]
+    sub = np.zeros((len(tri), 3), np.float32)
+    for first in range(0, len(tri), CHUNK):
+        part = slice(first, first + CHUNK)
+        sub[part] = np.einsum('nc,nck->nk', weight[part], corner[tri[part]])
+    image = np.zeros((3 * height, 3 * width, 3), np.float32)
+    image[wanted] = sub
+    total = image.reshape(height, 3, width, 3, 3).sum(axis=(1, 3), dtype=np.float64)
+    return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32)
+
+
 def _lit_edges(scene, tris, facing):
     """(tris, 3, suns): whether each edge (corner c to c+1) is shared, by both endpoint positions, with a triangle
     that is plane-facing for the sun, which is where tool's mesh has light up to the edge."""

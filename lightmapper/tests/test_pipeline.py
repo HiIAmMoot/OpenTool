@@ -1729,6 +1729,73 @@ def test_lamp_batches_reach_the_vertex_pass_pages(tiny, monkeypatch):
     assert len(passed) == 1 and all((page == 1).all() for page in passed[0])
 
 
+def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=()):
+    from lightmapper.formats.bsp import OutMaterial, OutPage
+    tags, settings, work = tiny
+    pipeline = api()
+    original_scene = pipeline._scene
+
+    def chart(groups, shaders, s):
+        lm = np.zeros(6, LM)
+        lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
+        return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
+                    np.array([[0, 1, 2], [3, 4, 5]], np.uint16), np.arange(2))])]
+
+    def scene(*args, **kwargs):
+        value = original_scene(*args, **kwargs)
+        value[0].tri_ignore_normals = np.array([True, False])
+        return value
+
+    def compiled(work, pages, timeout):
+        return vertex_gpu.VertexPassResult(np.zeros((6, 3), np.float32), np.ones(6), None, None, 0,
+                                           light_flat=light_flat), cpu_info()
+
+    monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
+    monkeypatch.setattr(pipeline, '_scene', scene)
+    monkeypatch.setattr(pipeline, 'scene_lights', lambda *args: (list(lamps), {'baked': len(lamps)}))
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
+    return pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
+
+
+def test_flat_light_term_lights_flagged_texels_once_in_tool_mode(tiny, monkeypatch):
+    out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32))
+    flagged = np.array([[1, 2/3], [2/3, 0]])
+    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * flagged, rtol=1e-6)
+    assert out.float_pages[0][1, 1].max() == 0
+
+
+def incident_vectors(out):
+    vectors = []
+    for page in out.bsp_tag.root.block('lightmaps')[:-1]:
+        for m in page.block('materials'):
+            _, lm = unpack_uncompressed(m.data('uncompressed_vertices'),
+                                        m.get('rendered_vertices.vertex_count'), m.get('lightmap_vertices.vertex_count'))
+            vectors.append(lm['incident_radiosity'])
+    return np.concatenate(vectors)
+
+
+def test_dark_lamps_change_nothing(tiny, monkeypatch):
+    tags, settings, work = tiny
+    calls = batch_runs(monkeypatch)
+    plain = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    counts = {'attached': 2, 'dynamic': 1, 'dark': 1, 'placed': 0}
+    monkeypatch.setattr(api(), 'gather_lights', lambda *args: ([], counts))
+    dimmed = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert json.loads((work / 'job.json').read_text())['lights'] == [] and calls == []
+    for a, b in zip(plain.float_pages, dimmed.float_pages):
+        np.testing.assert_array_equal(a, b)
+    np.testing.assert_array_equal(incident_vectors(plain), incident_vectors(dimmed))
+
+
+def test_summary_counts_the_lights(tiny, monkeypatch):
+    tags, settings, work = tiny
+    monkeypatch.setattr(api(), 'scene_lights', lambda *args: (lamps_of_owners(70), {'attached': 80, 'dynamic': 10, 'baked': 70}))
+    batch_runs(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert json.loads((work / 'summary.json').read_text())['lights'] == {
+        'attached': 80, 'dynamic': 10, 'baked': 70, 'batches': 2}
+
+
 def test_one_batch_launches_no_extra_run(tiny, monkeypatch):
     tags, settings, work = tiny
     many_lamps(monkeypatch, 62)

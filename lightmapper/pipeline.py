@@ -33,7 +33,7 @@ from .pages import DenoiseWorker, finish_pages, quantise
 from .radiosity import finalize, query_points
 from .raster import coverage, texel_contribution
 from .settings import Settings
-from .terminator import flat_sun_term, prepare_boundaries, sun_term
+from .terminator import flat_light_term, flat_sun_term, prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
 from .textures import TextureSet, shader_texture
 from .twins import ambiguous_warning
@@ -319,7 +319,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     if not check.fits:
         logger.warning('%s', check.message)
         warnings.append(check.message)
-    lights, _ = scene_lights(scenario_tag, tags, bsp_index, bsp_tag)
+    lights, light_counts = scene_lights(scenario_tag, tags, bsp_index, bsp_tag)
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
               vertex_pass='skip', lights=lights)
@@ -384,7 +384,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
         result = with_vertex_pass(result, vp)
     else:
-        result = with_vertex_pass(result, cpu_pass())
+        vp = cpu_pass()
+        result = with_vertex_pass(result, vp)
     stage('vertex_pass')
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
@@ -415,6 +416,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
+            if vp.light_flat is not None:
+                raw = raw + flat_light_term(scene, vp.light_flat, i, page.width, page.height)
         raw_pages.append(raw)
         masks.append(mask)
         class_maps.append(cls)
@@ -482,6 +485,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
         'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device},
+        'lights': {**light_counts, 'batches': batches},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
         'memory': {'estimate_gb': round(check.estimate / memory.GB, 2),
                    'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},

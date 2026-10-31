@@ -62,6 +62,32 @@ The bake does not read these scenery flags and fields:
 
 Skipping shadows for "does not cast shadow" would make the bake diverge from tool.
 
+Lights attached to scenery (`formats/lights.py`, `formats/scenery.py`) bake too, always (there is no setting for it). A light bakes when its tag is not dynamic, its radiosity intensity is above zero, its radiosity colour is not black and its position lies inside a cluster of the BSP being baked (tool drops the others). The summary's `lights` counts what was attached, left out and baked. Tool reads only these fields of a light, whatever the light looks like in the game:
+
+| Record field | Where it comes from |
+|---|---|
+| position, axis | the placement, the model's marker (node 0 when it is missing) and the placement's transform |
+| strength | radiosity colour times radiosity intensity |
+| kind | a point light when the cutoff angle is not positive or both angles reach pi, otherwise a spot |
+| reach | the distance where intensity over d squared drops under 1/255: sqrt(255 x intensity); the light adds nothing beyond it |
+| cutoff, falloff | cosines of the shape's cutoff and falloff angles; a spot ramps linearly in the cosine of the angle to its axis between them |
+
+A lamp lights every class of receiver, not only those a sun reaches.
+
+The bake differs from tool in these ways:
+
+- Receivers take the cosine of the angle between their normal and the lamp. Tool has none for a point light (only 1/d squared). This is a deliberate choice (owner), so pages and vertices agree with Cycles' physical lamps.
+- A lamp's own placement never shadows it (decision 8), so a lamp inside its fixture's model is not blocked by it.
+- Ignore-normals receivers keep the spot cone but take no cosine, as tool does.
+- In tool mode the light on ignore-normals triangles comes from the vertex pass (`light_flat`, added by `flat_light_term`), interpolated from the triangle's vertices like the flat sun term. A lamp over the middle of a large flagged triangle therefore reads coarse. Enhanced mode gathers it per texel.
+- Occlusion is a shadow ray, not tool's PVS.
+- There is no lamp term at shadow terminators.
+- Animated scenery sits at its default node transforms.
+
+Lamps are Cycles lights, and Cycles limits how many distinct light-linking sets one bake holds: one blocker set per lamp-owning placement allows 62 owners per run. Past that the lamps bake in extra runs (batches), each added to the main pages, which is exact because light adds linearly and the sun and other sources run in the first batch only. The vertex passes start after every batch. The summary's `lights.batches` says how many ran.
+
+Cycles' indirect sample clamp is off for every bake (owner). With the default of 10 a bright emitter or lamp bounce would be clipped, and summed batches would no longer equal one bake.
+
 These are written into the work folder as `job.json`, `scene.npz` and `textures.npz` (`blender_job.py`).
 
 ## 4. Rendering in Blender

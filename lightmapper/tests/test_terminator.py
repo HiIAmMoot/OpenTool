@@ -167,6 +167,19 @@ def test_flat_sun_term_leaves_unflagged_triangles_alone():
     assert flat_sun_term(scene, suns, throughput, 0, 2, 2).max() == 0
 
 
+def test_flat_light_term_interpolates_the_corners_and_skips_unflagged_triangles():
+    from lightmapper.terminator import flat_light_term
+    scene, _, _ = flat_scene()
+    light = np.tile(np.float32([1, 2, 0.5]), (4, 1))
+    np.testing.assert_allclose(flat_light_term(scene, light, 0, 2, 2), np.tile([1, 2, 0.5], (2, 2, 1)), rtol=1e-6)
+    assert flat_light_term(scene, light, 1, 2, 2).max() == 0
+    light[0] = 0
+    want = np.array([[35 / 108, 0.75], [0.75, 89 / 108]])
+    np.testing.assert_allclose(flat_light_term(scene, light, 0, 2, 2), want[:, :, None] * [1, 2, 0.5], rtol=1e-6)
+    scene.tri_ignore_normals[:] = False
+    assert flat_light_term(scene, light, 0, 2, 2).max() == 0
+
+
 def test_flagged_faces_make_no_edge_probes():
     from lightmapper.terminator import edge_queries, prepare_boundaries
     scene = terrace()
