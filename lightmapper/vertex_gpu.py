@@ -267,6 +267,7 @@ def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
     if enhanced:
         flags[:n_recv] |= scene.get('tri_ignore_normals', np.zeros(n_recv, bool)) * 16
     class_of = np.concatenate([scene['tri_class'], np.full(n_occ, -1)]).astype(np.int64)
+    owner = np.concatenate([np.full(n_recv, -1), scene.get('occ_tri_owner', np.full(n_occ, -1))]).astype(np.int32)
     info = np.stack([np.concatenate([scene['tri_texture'], scene['occ_tri_texture']]), flags,
                      np.concatenate([scene['tri_page'], np.full(n_occ, -1)]), class_of], axis=1)
     texels = [(np.asarray(t, np.float32) / 255.0).reshape(-1, 4) for t in textures]
@@ -279,7 +280,7 @@ def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
         offsets = np.cumsum([0] + [len(a) for a in flat])[:len(flat)]
         return np.array([[o, im.shape[1], im.shape[0], 0] for o, im in zip(offsets, images)], np.int32).reshape(-1, 4)
     return dict(
-        positions=positions, tris=tris, info=info, class_of=class_of,
+        positions=positions, tris=tris, info=info, class_of=class_of, owner=owner,
         twin=scene['tri_twin'], twin_perm=scene['tri_twin_perm'],
         tint=np.concatenate([scene['tri_tint'], scene['occ_tri_tint']]), emission=emission,
         normal=np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
@@ -331,7 +332,7 @@ def _build_world(device, vertices, indices, vertex_count, index_count):
 def _kernels(device, rgb=False):
     import slangpy as spy
     defines = {'GROUP_SIZE': str(GROUP_SIZE), 'RAY_LENGTH': repr(float(RAY_LENGTH)),
-               'RAY_EPSILON': repr(float(RAY_EPSILON)), 'PASS_LIMIT': str(PASS_LIMIT),
+               'RAY_EPSILON': repr(float(RAY_EPSILON)), 'PASS_LIMIT': str(PASS_LIMIT), 'SKIP_LIMIT': str(SKIP_LIMIT),
                'LUMA': 'float3(' + ', '.join(repr(float(x)) for x in LUMA) + ')'}
     session = device.create_slang_session(spy.SlangCompilerOptions({'include_paths': [str(SHADERS)],
                                                                       'defines': defines}))
@@ -344,13 +345,17 @@ def _ambient_of(table, cls):
     return table[np.clip(cls + 1, 0, None)] * (cls >= -1)[:, None]
 
 
-def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
+def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, lamps=(), on_lamp=None):
     """(carried rgb, escaped) per shadow ray from the kernels; each gather dispatch's luminances go to
-    reduce(ids, lum, hemi, solid_angle) as they land, so no matrix of every ray's luminance is ever held."""
+    reduce(ids, lum, hemi, solid_angle) as they land, so no matrix of every ray's luminance is ever held. The
+    lamp blocks (LampRays) are cast after the shadow rays, one block at a time, each handed to on_lamp(rays,
+    carried, escaped) as it lands."""
     rays = int(job['vertex_rays'])
     origins, dirs = shadow_rays
     carried, escaped = np.ones((len(origins), 3)), np.ones(len(origins), bool)
     if not len(arrays['tris']):
+        for block in lamps:
+            on_lamp(block, np.ones((len(block.point), 3)), np.ones(len(block.point), bool))
         return carried, escaped
     cap = dispatch_cap(device)
     if rays > cap:
@@ -364,6 +369,7 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
             tri_normal=_upload(device, arrays['normal'], np.float32), tri_vertices=indices,
             tri_twin=_upload(device, arrays['twin'], np.int32),
             tri_twin_perm=_upload(device, arrays['twin_perm'], np.int32),
+            tri_owner=_upload(device, arrays['owner'], np.int32),
             vertex_tex_uv=_upload(device, arrays['tex_uv'], np.float32),
             vertex_lm_uv=_upload(device, arrays['lm_uv'], np.float32),
             texture_info=_upload(device, arrays['texture_info'], np.int32),
@@ -403,15 +409,26 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False):
                     gather_count=len(ids[chunk]) * rays, **({'rgb_out': out} if rgb else {'lum_out': out})))
                 lum = _read(device, out, np.float32).reshape((-1, rays, 3) if rgb else (-1, rays))[:len(ids[chunk])].astype(np.float64)
             reduce(ids[chunk], lum, hemi, solid_angle)
-    for first in range(0, len(origins), cap):
-        chunk = slice(first, first + cap)
-        with _stage('shadow'):
-            out = _upload(device, np.zeros((len(origins[chunk]), 4)), np.float32, writable=True)
-            _dispatch(shadow, len(origins[chunk]), vars=dict(
-                shared, shadow_origin=_upload(device, origins[chunk], np.float32),
-                shadow_dir=_upload(device, dirs[chunk], np.float32), shadow_count=len(origins[chunk]), shadow_out=out))
-            result = _read(device, out, np.float32).reshape(-1, 4)[:len(origins[chunk])]
-        carried[chunk], escaped[chunk] = result[:, :3], result[:, 3] > 0.5
+
+    def cast_shadows(origin, direction, limit, skip):
+        carried, escaped = np.ones((len(origin), 3)), np.ones(len(origin), bool)
+        for first in range(0, len(origin), cap):
+            chunk = slice(first, first + cap)
+            with _stage('shadow'):
+                out = _upload(device, np.zeros((len(origin[chunk]), 4)), np.float32, writable=True)
+                _dispatch(shadow, len(origin[chunk]), vars=dict(
+                    shared, shadow_origin=_upload(device, origin[chunk], np.float32),
+                    shadow_dir=_upload(device, direction[chunk], np.float32),
+                    shadow_limit=_upload(device, limit[chunk], np.float32),
+                    shadow_skip=_upload(device, skip[chunk], np.int32), shadow_count=len(origin[chunk]),
+                    shadow_out=out))
+                result = _read(device, out, np.float32).reshape(-1, 4)[:len(origin[chunk])]
+            carried[chunk], escaped[chunk] = result[:, :3], result[:, 3] > 0.5
+        return carried, escaped
+
+    carried, escaped = cast_shadows(origins, dirs, np.full(len(origins), RAY_LENGTH), np.full(len(origins), -1))
+    for block in lamps:
+        on_lamp(block, *cast_shadows(block.origin, block.direction, block.limit, block.skip))
     del keep
     return carried, escaped
 
@@ -450,9 +467,27 @@ def run_vertex_pass(scene, job, textures, pages, device):
         batches.append(((phi, r, local[:, 2]),
                         (rows, scene['query_pos'][rows], n[rows], tangent[rows], bitangent[rows], spin[rows], qcls[rows]),
                         solid_angle))
+    lights = job.get('lights') or []
+    light_flat = np.zeros((queries, 3)) if ignore_normals.any() and job.get('ignore_normals_mode', 'tool') == 'tool' else None
+    lamp_rays = 0
+
+    def on_lamp(lamp, carried, escaped):
+        nonlocal lamp_rays
+        rows = np.flatnonzero(escaped)
+        # (a block holds one light and distinct points, so the fancy-index += never meets a point twice)
+        point = lamp.point[rows]
+        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3) * carried[rows]
+        weight = (strength @ LUMA) * lamp.factor[rows]
+        vector[point] += weight[:, None] * lamp.direction[rows]
+        irradiance[point] += weight
+        if light_flat is not None:
+            flagged_rows = ignore_normals[point]
+            light_flat[point[flagged_rows]] += (strength * lamp.factor[rows, None] / np.pi)[flagged_rows]
+        lamp_rays += int((lamp.limit > 0).sum())
     carried, escaped = _trace(
         device, arrays, table, job, batches,
-        (np.concatenate([sun_origin, edge_origin]), np.concatenate([sun_dir, edge_dir])), reduce)
+        (np.concatenate([sun_origin, edge_origin]), np.concatenate([sun_dir, edge_dir])), reduce,
+        lamps=iter_lamp_rays(scene['query_pos'], n, ignore_normals, usable, lights), on_lamp=on_lamp)
     # (the pass works in pi x tool units, the sun's strength carries pi and a gathered hit has no 1/pi, so the
     # ambient that tool adds as lum x normal takes pi too)
     flat = np.pi * (_ambient_of(table, qcls) @ LUMA) * usable
@@ -471,9 +506,9 @@ def run_vertex_pass(scene, job, textures, pages, device):
             sun_throughput[sun_query[rows], k] = carried[rows]
     edge_sun_lit = np.zeros((len(scene.get('edge_pos', ())), len(suns)), bool)
     edge_sun_lit[edge, edge_sun] = escaped[len(sun_query):]
-    total = texel_rays + len(ids) * rays + len(sun_query) + len(edge)
+    total = texel_rays + len(ids) * rays + len(sun_query) + lamp_rays + len(edge)
     return VertexPassResult(vector.astype(np.float32), irradiance.astype(np.float32), sun_lit, edge_sun_lit, total,
-                          sun_throughput, texel_rgb)
+                          sun_throughput, texel_rgb, None if light_flat is None else light_flat.astype(np.float32))
 
 
 def _gather_texels(scene, job, textures, pages, device):
@@ -487,10 +522,21 @@ def _gather_texels(scene, job, textures, pages, device):
                  query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
     probe.pop('query_inverse', None)
     query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
-    if len(query):
+    lights = job.get('lights') or []
+    lamp_rays = 0
+
+    def on_lamp(lamp, carried, escaped):
+        nonlocal lamp_rays
+        rows = np.flatnonzero(escaped)
+        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3)
+        rgb[lamp.point[rows]] += strength * carried[rows] * lamp.factor[rows, None] / np.pi
+        lamp_rays += int((lamp.limit > 0).sum())
+    if len(query) or lights:
         arrays = _scene_arrays(scene, textures, pages, True)
         table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
-        carried, escaped = _trace(device, arrays, table, job, [], (origin, direction), None, rgb=True)
+        carried, escaped = _trace(device, arrays, table, job, [], (origin, direction), None, rgb=True,
+                                  lamps=iter_lamp_rays(scene['texel_pos'], n, np.ones(count, bool), usable, lights),
+                                  on_lamp=on_lamp)
         for k, sun in enumerate(job['suns']):
             rows = np.flatnonzero((sun_index == k) & escaped)
             rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
@@ -506,7 +552,7 @@ def _gather_texels(scene, job, textures, pages, device):
     emitted, casts = _gather_texel_reflection(scene, dict(job, gather_pages=False, gather_emission=True), textures,
                                               pages, device, None)
     rgb += emitted
-    casts += len(query)
+    casts += len(query) + lamp_rays
     # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
     # the ordinary samples')
     stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
@@ -588,7 +634,9 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
                                       np.array(data['sun_lit'], bool), np.array(data['edge_sun_lit'], bool),
                                       int(data['rays']), np.array(data['vertex_sun_throughput'], np.float32)
                                        if 'vertex_sun_throughput' in data.files else None,
-                                      np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
+                                      np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None,
+                                      np.array(data['vertex_light_flat'], np.float32)
+                                       if 'vertex_light_flat' in data.files else None)
         job = json.loads((work / 'job.json').read_text())
         with np.load(work / job['scene'], allow_pickle=False) as data:
             q = len(data['query_pos'])
@@ -599,7 +647,9 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
         if (result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
                 or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)
                 or (result.sun_throughput is not None and result.sun_throughput.shape != (q, suns, 3))
-                or (needs_throughput and result.sun_throughput is None)):
+                or (needs_throughput and result.sun_throughput is None)
+                or (result.light_flat is not None
+                    and (not needs_throughput or result.light_flat.shape != (q, 3)))):
             raise ValueError('short vertex arrays')
         return result
     except (OSError, ValueError, KeyError, EOFError, zipfile.BadZipFile) as error:
@@ -615,6 +665,8 @@ def child_main(argv: list[str]) -> int:
         pages = [data[f'diffuse_{i}'] for i in range(len(data.files))]
     result = load_and_run(work, pages, Adapter(**fields))
     throughput = {'vertex_sun_throughput': result.sun_throughput} if result.sun_throughput is not None else {}
+    if result.light_flat is not None:
+        throughput['vertex_light_flat'] = result.light_flat
     np.savez(work / 'gpu_out.npz', vector=result.vector, irradiance=result.irradiance,
              sun_lit=result.sun_lit, edge_sun_lit=result.edge_sun_lit, rays=np.int64(result.rays),
               **throughput, texel_rgb=result.texel_rgb)

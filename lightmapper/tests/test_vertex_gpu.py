@@ -676,3 +676,82 @@ def test_gpu_child_runs_in_a_folder_with_spaces_and_accents(tmp_path):
         scene = {key: data[key] for key in data.files}
     result = vertex_gpu.run_in_child(work, pages, adapter_for('nvidia'), 120)
     assert result.vector.shape == (len(scene['query_pos']), 3)
+
+
+def lamp_scene_tools():
+    # test_vertex_cpu imports this module, so its lamp helpers come in late
+    import test_vertex_cpu
+    return test_vertex_cpu
+
+
+def gpu_lamp_run(work, vendor, **kwargs):
+    pages = lamp_scene_tools().write_lamp_case(work, **kwargs)
+    return load_and_run(work, pages, adapter_for(vendor))
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+@pytest.mark.parametrize('name', ['plane', 'wall', 'glass', 'cutout', 'own_box', 'flagged', 'spot', 'light_on_a_wall'])
+def test_gpu_matches_numba_on_the_lamp_scenes(tmp_path, vendor, name, mode):
+    from lightmapper import vertex_cpu
+    tools = lamp_scene_tools()
+    case = tools.lamp_case(name)
+    textures = {'textures': np.full((1, 1, 4), 0, np.uint8)} if name == 'cutout' else {}
+    kwargs = dict(case, mode=mode, textures=[textures['textures']] if textures else None)
+    pages = tools.write_lamp_case(tmp_path / 'cpu', **kwargs)
+    cpu = vertex_cpu.load_and_run(tmp_path / 'cpu', pages)
+    result = gpu_lamp_run(tmp_path / 'gpu', vendor, **kwargs)
+    assert cpu.irradiance.max() > 0 or name == 'wall'
+    assert result.rays == cpu.rays
+    np.testing.assert_allclose(result.irradiance, cpu.irradiance, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(result.vector, cpu.vector, rtol=1e-4, atol=1e-5)
+    if cpu.light_flat is None:
+        assert result.light_flat is None
+    else:
+        assert result.light_flat.dtype == np.float32 and cpu.light_flat.any()
+        np.testing.assert_allclose(result.light_flat, cpu.light_flat, rtol=1e-4, atol=1e-6)
+
+
+@pytest.mark.blender
+def test_gpu_lamp_own_placement_does_not_block_it(tmp_path, vendor):
+    tools = lamp_scene_tools()
+    case = tools.lamp_case('own_box')
+    assert gpu_lamp_run(tmp_path / 'own', vendor, **case).irradiance[0] == pytest.approx(np.pi / 4, rel=1e-5)
+    case['occluders'] = [(q, 5, extras) for q, _, extras in case['occluders']]
+    assert gpu_lamp_run(tmp_path / 'other', vendor, **case).irradiance[0] == 0
+
+
+@pytest.mark.blender
+def test_gpu_receivers_are_never_skipped(tmp_path, vendor):
+    # a receiver has owner -1 and an unowned lamp has skip -1: only the skip >= 0 guard keeps it in the way
+    tools = lamp_scene_tools()
+    sheet = floor(-2, 2, -2, 2, z=1)
+    kwargs = dict(queries=[((0, 0, 0), UP, False)], lights=[tools.lamp((0, 0, 2))])
+    assert gpu_lamp_run(tmp_path / 'sheet', vendor, receivers=(tools.FLOOR, sheet), **kwargs).irradiance[0] == 0
+    assert gpu_lamp_run(tmp_path / 'open', vendor, **kwargs).irradiance[0] > 0
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('stack,lit', [(255, False), (300, True)])
+def test_gpu_owner_skips_stop_at_the_skip_limit(tmp_path, vendor, stack, lit):
+    tools = lamp_scene_tools()
+    panes = [(floor(-1, 1, -1, 1, z=.1 + .002 * k), 0, {}) for k in range(stack)]
+    result = gpu_lamp_run(tmp_path, vendor, occluders=panes + [(floor(-1, 1, -1, 1, z=1.0), 1, {})],
+                          queries=[((.3, .2, 0), UP, False)], lights=[tools.lamp((.3, .2, 2), owner=0)])
+    assert (result.irradiance[0] > 0) == lit
+
+
+def test_skip_limit_reaches_the_shader():
+    assert vertex_gpu.SKIP_LIMIT == 256
+    assert 'SKIP_LIMIT' in (vertex_gpu.SHADERS / 'vertex_pass.slang').read_text()
+
+
+@pytest.mark.blender
+def test_gpu_child_returns_the_lamp_throughput(tmp_path, vendor):
+    tools = lamp_scene_tools()
+    pages = tools.write_lamp_case(tmp_path, **tools.lamp_case('glass', queries=[((0, 0, 0), UP, True),
+                                                                              ((1, 0, 0), UP, False)]))
+    expected = load_and_run(tmp_path, pages, adapter_for(vendor))
+    result = vertex_gpu.run_in_child(tmp_path, pages, adapter_for(vendor), 300)
+    assert np.array_equal(result.light_flat, expected.light_flat) and result.light_flat[0].any()
+    assert np.array_equal(result.irradiance, expected.irradiance)

@@ -4,8 +4,8 @@ VERTEX_PASS.SLANG
 The vertex pass's two ray-query kernels: gather (the luminance of what each cosine-weighted ray of a query sees)
 and shadow (the sun and edge rays, with the tint they carry through the panes they pass). Both walk the
 pass-through loop of blender/bake.py's VertexPass.cast over one acceleration structure of the receivers, then the
-occluders, so a triangle id means the same here as there. GROUP_SIZE, RAY_LENGTH, RAY_EPSILON, PASS_LIMIT and
-LUMA arrive as defines from vertex_gpu.py.
+occluders, so a triangle id means the same here as there. GROUP_SIZE, RAY_LENGTH, RAY_EPSILON, PASS_LIMIT, SKIP_LIMIT
+and LUMA arrive as defines from vertex_gpu.py.
 */
 
 /* ---------- scene */
@@ -24,6 +24,8 @@ StructuredBuffer<float3> tri_emission;
 StructuredBuffer<float3> tri_normal;
 StructuredBuffer<int> tri_twin;
 StructuredBuffer<int3> tri_twin_perm;
+/* the placement a triangle belongs to (-1 for receivers and unowned occluders) */
+StructuredBuffer<int> tri_owner;
 StructuredBuffer<uint> tri_vertices;
 StructuredBuffer<float2> vertex_tex_uv;
 StructuredBuffer<float2> vertex_lm_uv;
@@ -67,6 +69,9 @@ RWStructuredBuffer<float3> rgb_out;
 
 StructuredBuffer<float3> shadow_origin;
 StructuredBuffer<float3> shadow_dir;
+/* how far the ray looks, and the owner whose triangles it passes (-1 for none) */
+StructuredBuffer<float> shadow_limit;
+StructuredBuffer<int> shadow_skip;
 uniform uint shadow_count;
 /* carried rgb and 1 when the ray escaped */
 RWStructuredBuffer<float4> shadow_out;
@@ -174,13 +179,15 @@ float shade(int tri, float2 bary, float3 dir, int cls)
 
 /* ---------- the pass-through loop */
 
-int cast(float3 origin, float3 dir, bool shadow, inout float3 carried, out float3 hit, out float2 bary)
+int cast(float3 origin, float3 dir, bool shadow, float limit, int skip, inout float3 carried, out float3 hit,
+         out float2 bary)
 {
     float3 start = origin;
-    float remaining = RAY_LENGTH;
+    float remaining = limit;
     hit = origin;
     bary = float2(0.0);
-    for (int i = 0; i < PASS_LIMIT + 1; i++) {
+    int passes = 0, skips = 0;
+    while (passes <= PASS_LIMIT) {
         if (remaining <= 0) return -1;
         RayQuery<RAY_FLAG_FORCE_OPAQUE> q;
         RayDesc ray = { start, 0.0, dir, remaining };
@@ -191,6 +198,15 @@ int cast(float3 origin, float3 dir, bool shadow, inout float3 carried, out float
         float t = q.CommittedRayT();
         bary = q.CommittedTriangleBarycentrics();
         hit = start + t * dir;
+        if (skip >= 0 && tri_owner[tri] == skip) {
+            /* (a lamp's own placement never blocks it; the cap ends a stack of its triangles as a miss,
+               as on the cpu) */
+            if (++skips >= SKIP_LIMIT) return -1;
+            start = hit + dir * RAY_EPSILON;
+            remaining -= t + RAY_EPSILON;
+            continue;
+        }
+        passes++;
         int twin = tri_twin[tri];
         if (twin >= 0 && dot(tri_normal[tri], dir) >= 0 && dot(tri_normal[twin], dir) < 0) {
             float3 w = weights_of(bary);
@@ -222,7 +238,7 @@ void gather(uint3 id : SV_DispatchThreadID)
                  + hemi_h[k] * query_n[query];
     float3 carried = float3(1.0), hit;
     float2 bary;
-    int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, carried, hit, bary);
+    int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, RAY_LENGTH, -1, carried, hit, bary);
     lum_out[i] = tri < 0 ? 0.0 : shade(tri, bary, dir, query_class[query]);
 }
 
@@ -238,7 +254,7 @@ void gather_rgb(uint3 id : SV_DispatchThreadID)
                  + hemi_h[k] * query_n[query];
     float3 carried = float3(1.0), hit;
     float2 bary;
-    int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, carried, hit, bary);
+    int tri = cast(query_pos[query] + RAY_EPSILON * dir, dir, false, RAY_LENGTH, -1, carried, hit, bary);
     rgb_out[i] = tri < 0 ? float3(0.0) : shade_rgb(tri, bary, dir, query_class[query]);
 }
 
@@ -250,6 +266,6 @@ void shadow(uint3 id : SV_DispatchThreadID)
     if (i >= shadow_count) return;
     float3 carried = float3(1.0), hit;
     float2 bary;
-    int tri = cast(shadow_origin[i], shadow_dir[i], true, carried, hit, bary);
+    int tri = cast(shadow_origin[i], shadow_dir[i], true, shadow_limit[i], shadow_skip[i], carried, hit, bary);
     shadow_out[i] = float4(carried, tri < 0 ? 1.0 : 0.0);
 }
