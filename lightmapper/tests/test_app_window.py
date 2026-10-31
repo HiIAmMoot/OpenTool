@@ -965,32 +965,36 @@ def stage_texts(app):
 def test_stage_rows_are_green_for_gpu_and_red_for_cpu(make_app):
     a = make_app(probe_gpu=probe_for([RTX]))
     pump(a.root, lambda: a.stage_rows[0][1]['text'] == 'GPU')
-    assert stage_texts(a) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'GPU', 'green'), ('Denoise', 'GPU', 'green')]
+    assert stage_texts(a)[3] == ('Glow pass', 'Skipped', '')
+    a.ignore_normals_var.set('Enhanced')
+    assert stage_texts(a) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'GPU', 'green'), ('Denoise', 'GPU', 'green'),
+                              ('Glow pass', 'GPU', 'green')]
     a.device_var.set('CPU only')
     a.device_box.event_generate('<<ComboboxSelected>>')
     a.root.update()
-    assert stage_texts(a) == [('Page bake', 'CPU', 'red'), ('Vertex pass', 'CPU', 'red'), ('Denoise', 'CPU', 'red')]
+    assert stage_texts(a) == [('Page bake', 'CPU', 'red'), ('Vertex pass', 'CPU', 'red'), ('Denoise', 'CPU', 'red'),
+                              ('Glow pass', 'CPU', 'red')]
 
 
 def test_finished_bake_shows_what_was_used_in_the_stage_rows(ready_app):
-    devices = {'page_bake': 'OPTIX', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    devices = {'page_bake': 'OPTIX', 'vertex_pass': 'cpu', 'denoise': 'CPU', 'glow_pass': 'OPTIX'}
     outcome = BakeOutcome('done', 'Done. The lit level is level.', [], Path('C:/x'), Path(), 'OPTIX',
                           devices, None, [])
     run_events(ready_app, [('done', outcome)])
     assert stage_texts(ready_app) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'CPU', 'red'),
-                                      ('Denoise', 'CPU', 'red')]
+                                      ('Denoise', 'CPU', 'red'), ('Glow pass', 'GPU', 'green')]
 
 
 def cpu_outcome():
     return BakeOutcome('done', 'Done.', [], None, Path(), 'CPU',
-                       {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}, None, [])
+                       {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU', 'glow_pass': 'CPU'}, None, [])
 
 
 def test_new_bake_resets_stage_rows_to_prediction(ready_app):
     ready_app._bake_done(cpu_outcome())
     ready_app._run_bake = lambda req, emit: None
     ready_app.start_bake()
-    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU']
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU', 'Skipped']
 
 
 def test_changing_ignore_normals_after_a_bake_shows_the_prediction_again(ready_app):
@@ -1003,7 +1007,7 @@ def test_changing_ignore_normals_after_a_bake_shows_the_prediction_again(ready_a
 def test_failed_bake_without_devices_resets_stage_rows(ready_app):
     ready_app._bake_done(cpu_outcome())
     ready_app._bake_done(BakeOutcome('failed', 'Failed.', [], None, Path(), None))
-    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU']
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU', 'Skipped']
 
 
 @pytest.mark.parametrize('event', [('gpu', [RADEON], None), ('denoiser', {'CUDA': False, 'HIP': False})])
@@ -1011,7 +1015,7 @@ def test_late_probe_preserves_used_rows_until_input_change(ready_app, event):
     ready_app._bake_done(cpu_outcome())
     ready_app.events.put(event)
     ready_app._drain()
-    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['CPU', 'CPU', 'CPU']
+    assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['CPU', 'CPU', 'CPU', 'CPU']
     ready_app.advanced_vars['page_max'].set('1024')
     assert ready_app.stage_rows[0][1]['text'] == 'GPU'
 
@@ -1812,3 +1816,79 @@ def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
     app.advanced_frame.event_generate('<Configure>')
     app.window.update()
     assert app.example_panel.winfo_manager() == ''
+
+
+def test_traditional_predicts_a_skipped_glow_row(ready_app):
+    ready_app.ignore_normals_var.set('Traditional')
+    name, state, detail = ready_app.stage_rows[3]
+    assert (name['text'], state['text'], str(state['foreground']), detail['text']) == (
+        'Glow pass', 'Skipped', '', 'Traditional ignore normals')
+    ready_app.ignore_normals_var.set('Enhanced')
+    assert ready_app.stage_rows[3][1]['text'] == 'GPU'
+    ready_app.advanced_vars['bounces'].set('0')
+    assert (ready_app.stage_rows[3][1]['text'], ready_app.stage_rows[3][2]['text']) == ('Skipped', 'bounces set to 0')
+
+
+def test_glow_plan_moves_the_bar_to_the_glow_spans(ready_app):
+    gate, reached = threading.Event(), threading.Event()
+    steps = []
+
+    def fake(req, emit):
+        for event in (('plan', 'glow'), ('stage', 'blender'), ('pages', 2, 4)):
+            emit(event)
+        steps.append('first')
+        reached.wait(5)
+        emit(('stage', 'glow'))
+        emit(('pages', 1, 2))
+        gate.wait(5)
+        emit(('done', OUTCOME_DONE))
+
+    ready_app._run_bake = fake
+    ready_app.start_bake()
+    pump_app(ready_app, lambda: ready_app.progress['value'] == 375)
+    assert ready_app.stage_label['text'] == 'Baking in Blender: page 2 of 4'
+    reached.set()
+    pump_app(ready_app, lambda: ready_app.progress['value'] == 750)
+    assert ready_app.stage_label['text'] == 'Baking light from ignore-normals surfaces: page 1 of 2'
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+
+
+def test_a_new_bake_forgets_the_last_glow_plan(ready_app):
+    run_events(ready_app, [('plan', 'glow'), ('done', OUTCOME_DONE)])
+    assert ready_app._glow_planned is True
+    run_events(ready_app, [('stage', 'blender'), ('pages', 2, 4), ('done', OUTCOME_DONE)])
+    assert ready_app._glow_planned is False
+
+
+def test_a_failed_glow_stage_ends_like_a_failed_blender_stage(ready_app):
+    failed = BakeOutcome('failed', 'Blender could not be started.', [], None, Path(), None)
+    ends = []
+    for stage in ('blender', 'glow'):
+        run_events(ready_app, [('plan', 'glow'), ('stage', stage), ('pages', 1, 2), ('done', failed)])
+        ends.append((ready_app.stage, ready_app.stage_label['text'], str(ready_app.stage_label['foreground']),
+                     ready_app.progress['value'], ready_app.busy, str(ready_app.bake_button['state']),
+                     stage_texts(ready_app)))
+    assert ends[0] == ends[1]
+    assert ends[1][:3] == (None, 'Blender could not be started.', 'red')
+
+
+def test_an_unknown_ignore_normals_mode_reads_as_traditional():
+    assert App._ignore_normals_label('mystery') == 'Traditional'
+    assert App._ignore_normals_label('enhanced') == 'Enhanced'
+    assert App._ignore_normals_label('tool') == 'Traditional'
+
+
+def test_row_hints_leave_rays_per_texel_locked_during_a_bake(ready_app):
+    entry = ready_app.advanced_entries['samples']
+    gate = threading.Event()
+    ready_app._run_bake = lambda req, emit: (gate.wait(5), emit(('done', OUTCOME_DONE)))
+    assert ready_app.adaptive_var.get() is True
+    ready_app.start_bake()
+    ready_app.adaptive_var.set(False)
+    assert str(entry['state']) == 'disabled'
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+    assert str(entry['state']) == 'normal'
+    ready_app.adaptive_var.set(True)
+    assert str(entry['state']) == 'disabled'

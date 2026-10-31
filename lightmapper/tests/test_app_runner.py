@@ -380,3 +380,75 @@ def test_lamp_batch_stages_reach_the_status_line_not_the_stage_list(tiny, monkey
     _, events = run(tiny)
     assert ('status', 'Baking lamp batch 1 of 1') in events
     assert [e[1] for e in events if e[0] == 'stage'] == ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write', 'validate']
+
+
+class LogReadingFollower:
+    """a follower that replays whatever its log holds when started, so a test needs no polling thread."""
+    started = []
+
+    def __init__(self, path, callback):
+        self.path, self.callback = path, callback
+
+    def start(self):
+        self.started.append(self.path.name)
+        if self.path.exists():
+            for text in self.path.read_text().splitlines():
+                self.callback(text)
+
+    def stop(self):
+        pass
+
+    def join(self):
+        pass
+
+
+def fake_glow_bake(logs):
+    def bake(tags, scenario, bsp, settings, *, work, progress, **kwargs):
+        (work / 'job.json').write_text(json.dumps({'pages': [{}]}))
+        for name, text in logs.items():
+            (work / name).write_text(text)
+        progress('scene')
+        progress(pipeline.GLOW_PLANNED)
+        progress('blender')
+        progress('vertex')
+        progress('glow')
+        progress('finish')
+        raise RuntimeError('stop after the stages')
+    return bake
+
+
+def test_runner_follows_the_glow_log(tiny, monkeypatch):
+    tags, settings, work = tiny
+    LogReadingFollower.started = []
+    monkeypatch.setattr(runner, 'BlenderLogFollower', LogReadingFollower)
+    work.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(runner.pipeline, 'bake', fake_glow_bake({'blender.log': '[bake] page 0 (0, 0)\n',
+                                                                 'blender_glow.log': '[bake] device HIP\n[bake] page 0 (0, 0)\n'}))
+    events = []
+    run_bake(BakeRequest(tags, 'level', 'room', settings, True, work), events.append)
+    # (the runner clears the logs at its start, so the fake writes them in its own call)
+    names = [event for event in events if event[0] in ('plan', 'stage', 'pages', 'device')]
+    assert ('plan', 'glow') in names and ('stage', 'glow') in names
+    assert ('stage', GLOW_PLANNED_TEXT) not in names
+    assert names.index(('plan', 'glow')) < names.index(('stage', 'blender'))
+    after_glow = names[names.index(('stage', 'glow')):]
+    assert ('device', 'HIP') in after_glow and ('pages', 1, 1) in after_glow
+    assert LogReadingFollower.started == ['blender.log', 'blender_glow.log']
+
+
+GLOW_PLANNED_TEXT = pipeline.GLOW_PLANNED
+
+
+def test_reused_work_drops_an_old_glow_log(tiny, monkeypatch):
+    tags, settings, work = tiny
+    work.mkdir(parents=True, exist_ok=True); (work / 'blender_glow.log').write_text('[bake] device CUDA\n')
+    monkeypatch.setattr(runner, 'BlenderLogFollower', LogReadingFollower)
+
+    def bake(tags, scenario, bsp, settings, *, work, progress, **kwargs):
+        (work / 'job.json').write_text(json.dumps({'pages': [{}]}))
+        progress('glow')
+        raise RuntimeError('stop after the stage')
+    monkeypatch.setattr(runner.pipeline, 'bake', bake)
+    events = []
+    run_bake(BakeRequest(tags, 'level', 'room', settings, True, work), events.append)
+    assert ('stage', 'glow') in events and ('device', 'CUDA') not in events

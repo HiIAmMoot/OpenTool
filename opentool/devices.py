@@ -54,7 +54,24 @@ def device_hint(setting, adapters, reason):
     return "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."
 
 
-def stage_rows(setting, adapters, reason, denoiser=None):
+def glow_skip(mode, bounces_text):
+    if mode == 'tool':
+        return 'Traditional ignore normals'
+    if bounces_text.strip() == '0':
+        return 'bounces set to 0'
+    return None
+
+
+def stage_rows(setting, adapters, reason, denoiser=None, glow=None):
+    rows = _device_rows(setting, adapters, reason, denoiser)
+    page = rows[0]
+    # (the glow run bakes on the page bake's device; while that is unknown or the bake would stop, it says the same)
+    if page[1] is not None and glow:
+        return [*rows, ('Glow pass', 'Skipped', glow)]
+    return [*rows, ('Glow pass', page[1], page[2])]
+
+
+def _device_rows(setting, adapters, reason, denoiser):
     stages = ('Page bake', 'Vertex pass', 'Denoise')
     if adapters is None:
         return [(stage, None, 'Looking for GPUs…') for stage in stages]
@@ -84,16 +101,21 @@ def stage_rows_used(used):
     """the same rows from a finished bake's summary, so they show what really happened."""
     def state(name, cpu):
         return 'CPU' if name == cpu else 'Off' if name == 'off' else 'GPU'
+    glow = used.get('glow_pass', 'off')
     return [('Page bake', state(used['page_bake'], 'CPU'), '' if used['page_bake'] == 'CPU' else used['page_bake']),
             ('Vertex pass', state(used['vertex_pass'], 'cpu'), ''),
-            ('Denoise', state(used['denoise'], 'CPU'), '' if used['denoise'] in ('CPU', 'off') else used['denoise'])]
+            ('Denoise', state(used['denoise'], 'CPU'), '' if used['denoise'] in ('CPU', 'off') else used['denoise']),
+            ('Glow pass', 'Skipped', used.get('glow_reason', '')) if glow == 'off'
+            else ('Glow pass', state(glow, 'CPU'), '' if glow == 'CPU' else glow)]
 
 
 def result_line(devices, rays, warnings):
     pages = 'the CPU' if devices['page_bake'] == 'CPU' else f"the GPU ({devices['page_bake']})"
     vertex = 'the CPU' if devices['vertex_pass'] == 'cpu' else devices['vertex_pass']
     denoise = 'off' if devices['denoise'] == 'off' else f"on {'the CPU' if devices['denoise'] == 'CPU' else devices['denoise']}"
-    parts = [f'Pages on {pages}, vertex pass on {vertex}, denoiser {denoise}.']
+    glow = devices.get('glow_pass', 'off')
+    glow_part = '' if glow == 'off' else f", glow pass on {'the CPU' if glow == 'CPU' else f'the GPU ({glow})'}"
+    parts = [f'Pages on {pages}, vertex pass on {vertex}{glow_part}, denoiser {denoise}.']
     if rays:
         parts.append(f"{rays['samples']} rays per texel, {rays['vertex_rays']} per vertex.")
     if warnings:

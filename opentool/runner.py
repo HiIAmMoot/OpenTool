@@ -8,7 +8,7 @@ import tempfile
 from typing import Callable
 
 from lightmapper import pipeline
-from lightmapper.progress import BlenderLogFollower, parse_line
+from lightmapper.progress import GLOW_PLANNED, BlenderLogFollower, parse_line
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import read_tag, resolve_reference_path, write_tag
 from lightmapper.validate import validate_bsp
@@ -119,6 +119,29 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         except Exception:
             logger.exception('Could not report bake event')
 
+    def follow(log):
+        nonlocal follower
+        try:
+            total = len(json.loads((work / 'job.json').read_text())['pages'])
+        except (OSError, ValueError, KeyError, TypeError):
+            total = 0
+
+        def line(text):
+            nonlocal device
+            logging.getLogger('opentool.blender').info(text)
+            parsed = parse_line(text)
+            if parsed and parsed[0] == 'device':
+                device = parsed[1]; safe_emit(parsed)
+            elif parsed and parsed[0] == 'page':
+                safe_emit(('pages', parsed[1] + 1, total))
+
+        follower = BlenderLogFollower(log, line)
+        try:
+            follower.start()
+        except Exception:
+            logger.exception('Could not start Blender log follower')
+            follower = None
+
     def progress(stage):
         nonlocal follower
         try:
@@ -128,39 +151,24 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
                 # (a sub-step of the blender stage: the app has no stage of its own for it)
                 safe_emit(('status', f'Baking {stage}'))
                 return
+            if stage == GLOW_PLANNED:
+                safe_emit(('plan', 'glow'))
+                return
             safe_emit(('stage', stage))
-            if stage == 'blender':
-                try:
-                    total = len(json.loads((work / 'job.json').read_text())['pages'])
-                except (OSError, ValueError, KeyError, TypeError):
-                    total = 0
-
-                def line(text):
-                    nonlocal device
-                    logging.getLogger('opentool.blender').info(text)
-                    parsed = parse_line(text)
-                    if parsed and parsed[0] == 'device':
-                        device = parsed[1]; safe_emit(parsed)
-                    elif parsed and parsed[0] == 'page':
-                        safe_emit(('pages', parsed[1] + 1, total))
-
-                follower = BlenderLogFollower(blender_log, line)
-                try:
-                    follower.start()
-                except Exception:
-                    logger.exception('Could not start Blender log follower')
-                    follower = None
+            if stage in ('blender', 'glow'):
+                follow(blender_log if stage == 'blender' else glow_log)
         except Exception:
             logger.exception('Could not report bake progress')
 
     try:
         work.mkdir(parents=True, exist_ok=True)
-        blender_log = work / 'blender.log'
-        try:
-            # a reused work folder would otherwise replay progress from the previous run.
-            blender_log.unlink()
-        except FileNotFoundError:
-            pass
+        blender_log, glow_log = work / 'blender.log', work / 'blender_glow.log'
+        for old_log in (blender_log, glow_log):
+            try:
+                # a reused work folder would otherwise replay progress from the previous run.
+                old_log.unlink()
+            except FileNotFoundError:
+                pass
         event_handler = _EventHandler(emit, request.verbose)
         file_handler = logging.FileHandler(work / 'opentool.log', mode='w', encoding='utf-8')
         file_handler.setLevel(logging.INFO)

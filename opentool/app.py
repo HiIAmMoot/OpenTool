@@ -57,6 +57,7 @@ class App:
         self.busy = False
         self._live_warnings: set[str] = set()
         self.stage: str | None = None
+        self._glow_planned = False
         self.close_after_write = False
         self._locked: dict = {}
         self._gate = _BakeGate()
@@ -80,6 +81,8 @@ class App:
         for value in (*self.advanced_vars.values(), self.preset_var, self.device_var, self.bsp_var,
                       self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.adaptive_var, self.ignore_normals_var, self.verbose_var):
             value.trace_add('write', lambda *_args: self._reset_used_rows())
+        for value in (self.ignore_normals_var, self.advanced_vars['bounces']):
+            value.trace_add('write', lambda *_args: self._glow_inputs_changed())
         self._set_blender_status('Looking for Blender…')
         self._discover_blender()
         self._discover_gpu()
@@ -263,7 +266,7 @@ class App:
         self.device_hint = ttk.Label(device_row)
         self.device_hint.grid(row=1, column=1, columnspan=2, sticky='w', padx=(12, 0))
         self.stage_rows = []
-        for row in range(3):
+        for row in range(4):
             name, state, detail = (ttk.Label(device_row) for _ in range(3))
             name.grid(row=row + 2, column=0, sticky='w', pady=(4 if row == 0 else 0, 0))
             state.grid(row=row + 2, column=1, sticky='w', padx=(12, 0), pady=(4 if row == 0 else 0, 0))
@@ -529,7 +532,8 @@ class App:
 
     @staticmethod
     def _ignore_normals_label(mode):
-        return next((label for label, value in presets.IGNORE_NORMALS if value == mode), presets.IGNORE_NORMALS[-1][0])
+        labels = {value: label for label, value in presets.IGNORE_NORMALS}
+        return labels.get(mode, labels['tool'])
 
     @staticmethod
     def _device_label(value):
@@ -548,11 +552,19 @@ class App:
         if self._using_stage_rows and not self.busy:
             self._update_device_hint()
 
+    def _glow_inputs_changed(self):
+        # (the glow row's prediction follows these two, whether or not a finished bake's rows are showing)
+        if not self.busy:
+            self._update_device_hint()
+
     def _update_device_hint(self, *, prediction=True):
         if prediction:
             self._using_stage_rows = False
         if not self._using_stage_rows:
-            self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason, self._denoiser))
+            glow = devices.glow_skip(dict(presets.IGNORE_NORMALS).get(self.ignore_normals_var.get(), ''),
+                                     self.advanced_vars['bounces'].get())
+            self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason,
+                                                     self._denoiser, glow))
         self.gpu_label.configure(text=devices.gpu_text(self._adapters, self._gpu_reason))
         self.device_hint.configure(text=devices.device_hint(self._device_value(), self._adapters, self._gpu_reason))
 
@@ -621,7 +633,13 @@ class App:
         values = {'page_max': self.advanced_vars['page_max'].get(), 'ignore_normals_mode': self.ignore_normals_var.get()}
         for name, hint in self.row_hints.items():
             hint.configure(text=presets.row_hint(name, values.get(name, ''), adaptive))
-        self.advanced_entries['samples'].configure(state='disabled' if adaptive else 'normal')
+        entry = self.advanced_entries['samples']
+        state = 'disabled' if adaptive else 'normal'
+        if entry in self._locked:
+            # (a bake locks the form; the unlock restores this recorded state)
+            self._locked[entry] = state
+        else:
+            entry.configure(state=state)
 
     def _toggle_advanced(self):
         if self._advanced_open:
@@ -822,16 +840,19 @@ class App:
                     self._finish_close_after_write()
                 if not self.close_after_write:
                     self.stage_label.configure(text=STAGE_LABELS[event[1]])
-                self.progress['value'] = fraction(event[1]) * 1000
+                self.progress['value'] = fraction(event[1], glow=self._glow_planned) * 1000
+            elif event[0] == 'plan':
+                self._glow_planned = event[1] == 'glow'
             elif event[0] == 'status':
                 if not self.close_after_write:
                     self.stage_label.configure(text=event[1])
             elif event[0] == 'pages':
                 _, done, total = event
+                stage = 'glow' if self.stage == 'glow' else 'blender'
                 if not self.close_after_write:
                     self.stage_label.configure(
-                        text=f'Baking in Blender: page {done} of {total}' if total else f'Baking in Blender: page {done}')
-                self.progress['value'] = fraction('blender', done, total) * 1000
+                        text=f'{STAGE_LABELS[stage]}: page {done} of {total}' if total else f'{STAGE_LABELS[stage]}: page {done}')
+                self.progress['value'] = fraction(stage, done, total, glow=self._glow_planned) * 1000
             elif event[0] == 'done':
                 self._bake_done(event[1])
                 if self.close_after_write:
@@ -914,6 +935,7 @@ class App:
             self._write_exception(exc)
         self.busy = True
         self.stage = None
+        self._glow_planned = False
         self._live_warnings = set()
         self.close_after_write = False
         self._output_folder = None

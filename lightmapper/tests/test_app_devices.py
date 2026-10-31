@@ -1,7 +1,7 @@
 import pytest
 
 from lightmapper.gpu import Adapter
-from opentool.devices import device_hint, gpu_text, result_line, stage_rows, stage_rows_used
+from opentool.devices import device_hint, glow_skip, gpu_text, result_line, stage_rows, stage_rows_used
 
 RTX = Adapter('NVIDIA GeForce RTX 4060 Laptop GPU', 0x10DE, (1,), 'vulkan', True)
 RADEON = Adapter('AMD Radeon(TM) Graphics', 0x1002, (2,), 'vulkan', True)
@@ -59,21 +59,21 @@ OLD_NVIDIA = Adapter('NVIDIA GeForce GTX 860M', 0x10DE, (4,), 'vulkan', False)
 def test_stage_rows_while_looking():
     assert stage_rows('auto', None, None) == [
         ('Page bake', None, 'Looking for GPUs…'), ('Vertex pass', None, 'Looking for GPUs…'),
-        ('Denoise', None, 'Looking for GPUs…')]
+        ('Denoise', None, 'Looking for GPUs…'), ('Glow pass', None, 'Looking for GPUs…')]
 
 
 @pytest.mark.parametrize('adapter, kind', [(RTX, 'CUDA'), (RADEON, 'HIP')])
 def test_stage_rows_everything_on_the_gpu(adapter, kind):
     # (the GPU line above the rows already names the card)
     assert stage_rows('auto', [adapter], None, {kind: True}) == [
-        ('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', '')]
+        ('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', ''), ('Glow pass', 'GPU', '')]
 
 
 @pytest.mark.parametrize('adapter, kind', [(RTX, 'CUDA'), (RADEON, 'HIP')])
 def test_stage_rows_refused_gpu_denoiser_predicts_cpu(adapter, kind):
     rows = stage_rows('auto', [adapter], None, {kind: False})
     assert rows == [('Page bake', 'GPU', ''), ('Vertex pass', 'GPU', ''),
-                    ('Denoise', 'CPU', 'the GPU denoiser could not start')]
+                    ('Denoise', 'CPU', 'the GPU denoiser could not start'), ('Glow pass', 'GPU', '')]
 
 
 def test_stage_rows_waits_for_denoiser_probe():
@@ -82,12 +82,12 @@ def test_stage_rows_waits_for_denoiser_probe():
 
 def test_stage_rows_other_vendor_denoises_on_cpu():
     arc = Adapter('Intel Arc', 0x8086, (3,), 'vulkan', True)
-    assert [state for _, state, _ in stage_rows('auto', [arc], None)] == ['GPU', 'GPU', 'CPU']
+    assert [state for _, state, _ in stage_rows('auto', [arc], None)] == ['GPU', 'GPU', 'CPU', 'GPU']
 
 
 def test_stage_rows_used_hip():
     assert stage_rows_used({'page_bake': 'HIP', 'vertex_pass': 'Radeon (vulkan)', 'denoise': 'HIP'}) == [
-        ('Page bake', 'GPU', 'HIP'), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', 'HIP')]
+        ('Page bake', 'GPU', 'HIP'), ('Vertex pass', 'GPU', ''), ('Denoise', 'GPU', 'HIP'), ('Glow pass', 'Skipped', '')]
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'crash', 'malformed', 'refused', 'launch'])
@@ -174,28 +174,62 @@ def test_real_denoiser_probe_child_returns_ready_frames(capsys, monkeypatch):
 
 def test_stage_rows_without_ray_queries_keep_only_the_pages_on_the_gpu():
     rows = stage_rows('auto', [OLD_NVIDIA], None)
-    assert [(name, state) for name, state, _ in rows] == [('Page bake', 'GPU'), ('Vertex pass', 'CPU'), ('Denoise', 'CPU')]
+    assert [(name, state) for name, state, _ in rows] == [('Page bake', 'GPU'), ('Vertex pass', 'CPU'), ('Denoise', 'CPU'),
+                                                         ('Glow pass', 'GPU')]
     assert 'Cycles' in rows[0][2] and 'ray queries' in rows[1][2]
 
 
 def test_stage_rows_no_gpu_at_all():
-    assert [state for _, state, _ in stage_rows('auto', [], 'slangpy: missing')] == ['GPU', 'CPU', 'CPU']
+    assert [state for _, state, _ in stage_rows('auto', [], 'slangpy: missing')] == ['GPU', 'CPU', 'CPU', 'GPU']
 
 
 def test_stage_rows_cpu_only():
-    assert [state for _, state, _ in stage_rows('cpu', [RTX], None)] == ['CPU', 'CPU', 'CPU']
+    assert [state for _, state, _ in stage_rows('cpu', [RTX], None)] == ['CPU', 'CPU', 'CPU', 'CPU']
 
 
 def test_stage_rows_when_the_bake_would_stop():
     rows = stage_rows('nvidia', [RADEON], None)
-    assert [state for _, state, _ in rows] == [None, None, None]
-    assert rows[0][2] == 'No NVIDIA GPU with ray tracing'
+    assert [state for _, state, _ in rows] == [None, None, None, None]
+    assert rows[0][2] == rows[3][2] == 'No NVIDIA GPU with ray tracing'
+    assert rows[3][0] == 'Glow pass'
 
 
 def test_stage_rows_used_reads_the_summary():
     assert stage_rows_used({'page_bake': 'OPTIX', 'vertex_pass': 'NVIDIA GeForce RTX 4060 Laptop GPU (vulkan)',
                             'denoise': 'CUDA'}) == [
         ('Page bake', 'GPU', 'OPTIX'), ('Vertex pass', 'GPU', ''),
-        ('Denoise', 'GPU', 'CUDA')]
+        ('Denoise', 'GPU', 'CUDA'), ('Glow pass', 'Skipped', '')]
     assert stage_rows_used({'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off'}) == [
-        ('Page bake', 'CPU', ''), ('Vertex pass', 'CPU', ''), ('Denoise', 'Off', '')]
+        ('Page bake', 'CPU', ''), ('Vertex pass', 'CPU', ''), ('Denoise', 'Off', ''), ('Glow pass', 'Skipped', '')]
+
+
+def test_stage_rows_glow_skipped_for_traditional():
+    rows = stage_rows('auto', [RTX], None, {'CUDA': True}, glow='Traditional ignore normals')
+    assert rows[3] == ('Glow pass', 'Skipped', 'Traditional ignore normals')
+    assert rows[:3] == stage_rows('auto', [RTX], None, {'CUDA': True})[:3]
+    assert stage_rows('auto', None, None, glow='bounces set to 0')[3] == ('Glow pass', None, 'Looking for GPUs…')
+    assert stage_rows('nvidia', [RADEON], None, glow='bounces set to 0')[3][1] is None
+
+
+def test_stage_rows_used_glow_ran_and_skipped():
+    used = {'page_bake': 'OPTIX', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    assert stage_rows_used({**used, 'glow_pass': 'OPTIX'})[3] == ('Glow pass', 'GPU', 'OPTIX')
+    assert stage_rows_used({**used, 'glow_pass': 'CPU'})[3] == ('Glow pass', 'CPU', '')
+    assert stage_rows_used({**used, 'glow_pass': 'off', 'glow_reason': 'bounces set to 0'})[3] == (
+        'Glow pass', 'Skipped', 'bounces set to 0')
+
+
+def test_glow_skip():
+    assert glow_skip('tool', '2') == 'Traditional ignore normals'
+    assert glow_skip('enhanced', ' 0 ') == 'bounces set to 0'
+    assert glow_skip('enhanced', '2') is None
+    assert glow_skip('enhanced', '') is None
+
+
+def test_result_line_names_the_glow_pass():
+    base = {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'CPU'}
+    assert result_line({**base, 'glow_pass': 'CPU'}, None, []) == (
+        'Pages on the CPU, vertex pass on the CPU, glow pass on the CPU, denoiser on the CPU.')
+    assert result_line({**base, 'glow_pass': 'OPTIX'}, None, []) == (
+        'Pages on the CPU, vertex pass on the CPU, glow pass on the GPU (OPTIX), denoiser on the CPU.')
+    assert result_line({**base, 'glow_pass': 'off'}, None, []) == result_line(base, None, [])
