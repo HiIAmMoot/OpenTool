@@ -1,6 +1,8 @@
 """Pin the float finishing order: denoise before ambient, one quantise at the end."""
 
 import io
+import logging
+import shutil
 import struct
 import sys
 import subprocess
@@ -595,14 +597,18 @@ def test_written_uncovered_texels_and_padding_beyond_take_the_covered_class(deno
     np.testing.assert_allclose(added[:, 7:11], 0.1, atol=1e-6)
 
 
-def test_a_temp_folder_that_cannot_be_deleted_does_not_fail_close():
+def test_a_temp_folder_that_cannot_be_deleted_does_not_fail_close(caplog):
     worker = pages.DenoiseWorker.start('CPU', 60, strict=True)
-    # (a handle another child inherited keeps stderr.txt undeletable on Windows)
-    leaked = open(Path(worker.cwd.name) / pages.STDERR_FILE, 'rb')
+    folder = worker.cwd.name
+    # (an open handle keeps stderr.txt undeletable on Windows)
+    leaked = open(Path(folder) / pages.STDERR_FILE, 'rb')
     try:
-        worker.close()
+        with caplog.at_level(logging.INFO, logger='lightmapper.pages'):
+            worker.close()
     finally:
         leaked.close()
+        shutil.rmtree(folder, ignore_errors=True)
+    assert [(r.levelno, folder in r.getMessage()) for r in caplog.records if 'left temp folder' in r.getMessage()]         == [(logging.INFO, True)]
 
 
 def test_one_off_denoise_survives_an_undeletable_temp_folder(monkeypatch):

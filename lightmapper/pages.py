@@ -12,8 +12,7 @@ import struct
 import subprocess
 import tempfile
 from pathlib import Path
-import time
-from time import perf_counter
+from time import perf_counter, sleep
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 
 import numpy as np
@@ -75,17 +74,18 @@ STDERR_FILE = 'stderr.txt'
 
 
 def _clean(cwd):
-    # a finished bake must not fail on a scratch folder: on Windows a handle another child inherited while the
-    # worker's stderr.txt was being passed on can hold the file after the worker has exited, so retry, then leak it
+    # a finished bake must not fail on a scratch folder: on Windows something else (a scanner, a handle another
+    # program's child inherited) can still hold stderr.txt after the worker exits, so retry, then leave it
+    # (tempfile turns the first error into a misleading "invalid directory name", so the message omits it)
     for attempt in range(4):
         try:
             cwd.cleanup()
             return
-        except OSError as error:
+        except OSError:
             if attempt == 3:
-                log.debug('could not remove %s: %s', cwd.name, error)
+                log.info('left temp folder %s (a file in it is still open)', cwd.name)
             else:
-                time.sleep(0.1)
+                sleep(0.1 * 2 ** attempt)
 
 
 def _stderr_tail(cwd) -> str:
