@@ -152,9 +152,6 @@ class App:
             command=self._update_new_names_hint,
         )
         self.backups_check.grid(row=0, column=1, sticky='w', padx=(12, 0))
-        self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
-        ttk.Checkbutton(options, text='32-bit lightmaps', variable=self.lightmap_32bit_var).grid(
-            row=0, column=2, sticky='w', padx=(12, 0))
         self.new_names_hint = ttk.Label(self.frame)
         self.new_names_hint.grid(row=8, column=0, sticky='w')
         self._update_new_names_hint()
@@ -190,8 +187,21 @@ class App:
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
             if name in ('texels_per_unit', 'page_max'):
                 value.trace_add('write', lambda *_args: self._inputs_changed())
+        self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
+        self.lightmap_32bit_check = ttk.Checkbutton(
+            self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
+        self.lightmap_32bit_check.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w', pady=2)
+        self.ignore_normals_var = tk.StringVar(value={
+            'enhanced': 'Enhanced', 'tool': 'Tool',
+        }.get(self.settings.ignore_normals_mode, 'Enhanced'))
+        ttk.Label(self.advanced_frame, text='Ignore-normals lighting').grid(
+            row=len(presets.ADVANCED) + 1, column=0, sticky='w', padx=(0, 8), pady=2)
+        self.ignore_normals_entry = ttk.Combobox(
+            self.advanced_frame, values=('Enhanced', 'Tool'), textvariable=self.ignore_normals_var,
+            state='readonly')
+        self.ignore_normals_entry.grid(row=len(presets.ADVANCED) + 1, column=1, sticky='ew', pady=2)
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
-        self.advanced_error.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w')
+        self.advanced_error.grid(row=len(presets.ADVANCED) + 2, column=0, columnspan=2, sticky='w')
 
         blender_row = ttk.Frame(self.frame)
         blender_row.grid(row=11, column=0, sticky='ew', pady=(12, 0))
@@ -253,6 +263,8 @@ class App:
                     except (TypeError, ValueError):
                         pass
                 self.advanced_vars[name].set(value)
+        self.ignore_normals_var.set({'enhanced': 'Enhanced', 'tool': 'Tool'}.get(
+            self.settings.ignore_normals_mode, 'Enhanced'))
         if self.settings.advanced_open:
             self._toggle_advanced()
         if not self.settings.tags:
@@ -427,6 +439,7 @@ class App:
         settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path),
                                          self._device_value())
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
+        settings.ignore_normals_mode = {'Enhanced': 'enhanced', 'Tool': 'tool'}[self.ignore_normals_var.get()]
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get(),
                                   charts=runner.chart_cache_path(self._tags, self._scenario, bsp))
@@ -441,6 +454,7 @@ class App:
             blender=str(self.blender.path) if self.blender else self.settings.blender,
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
             backups=self.backups_var.get(), lightmap_32bit=self.lightmap_32bit_var.get(),
+            ignore_normals_mode={'Enhanced': 'enhanced', 'Tool': 'tool'}[self.ignore_normals_var.get()],
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(), device=self._device_value(),
         )

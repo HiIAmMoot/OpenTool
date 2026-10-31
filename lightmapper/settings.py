@@ -56,7 +56,7 @@ class Settings(ChartSettings):
     sky_grid: int = 4
     # tool never lets object shaders emit; off leaves only the BSP's own emitters, for an in-game A/B
     scenery_emission: bool = True
-    ignore_normals_mode: str = 'tool'
+    ignore_normals_mode: str = 'enhanced'
     # how far a plane-away face's sun reaches in from its lit boundary: tool's final-quality floor for the mesh cells
     # its radiosity refines to near a shadow edge (non-emissive, detail level 0)
     reach: float = 0.225

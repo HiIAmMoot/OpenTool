@@ -858,7 +858,7 @@ def test_pass_at_the_stock_query_limit(tmp_path, monkeypatch, mixed):
                  query_normal=np.tile(np.float32(UP), (count, 1)), query_class=np.zeros(count, np.int16),
                  query_ignore_normals=(np.arange(count) % 2 == 0) if mixed else np.zeros(count, bool))
     job = json.loads((tmp_path / 'job.json').read_text())
-    job.update(cpu_vertex_rays=8, suns=[])
+    job.update(cpu_vertex_rays=8, suns=[], ignore_normals_mode='tool')
     job.pop('seed', None)
     chunks = []
     gather = vertex_cpu._gather

@@ -17,6 +17,7 @@ class UserSettings:
     new_names: bool = False
     backups: bool = True
     lightmap_32bit: bool = False
+    ignore_normals_mode: str = 'enhanced'
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
     verbose: bool = False

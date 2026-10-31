@@ -226,6 +226,21 @@ def test_calibrate_writes_fit_and_report(lit, tmp_path, monkeypatch, passes):
     assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
 
 
+def test_calibrate_forces_tool_ignore_normals_mode(lit, monkeypatch):
+    from lightmapper import calibrate as module
+    tags, settings, work = lit
+    modes = []
+    real_bake = module.bake
+
+    def capture_bake(*args, **kwargs):
+        modes.append(args[3].ignore_normals_mode)
+        return real_bake(*args, **kwargs)
+
+    monkeypatch.setattr(module, 'bake', capture_bake)
+    calibrate(tags, 'level', 'room', work, replace(settings, ignore_normals_mode='enhanced'))
+    assert modes == ['tool', 'tool', 'tool']
+
+
 def test_calibrate_refuses_unpaired_sun_and_emit(lit, tmp_path, monkeypatch):
     from lightmapper import calibrate as module
     tags, settings, work = lit

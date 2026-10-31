@@ -35,7 +35,7 @@ def test_known_device_is_loaded(tmp_path, device):
 
 
 def test_round_trip(tmp_path):
-    us = UserSettings(tags='D:\\t', scenario='levels\\a\\a', bsp='a', preset='High', new_names=False, advanced={'bounces': '2'})
+    us = UserSettings(tags='D:\\t', scenario='levels\\a\\a', bsp='a', preset='High', new_names=False, advanced={'bounces': '2'}, ignore_normals_mode='tool')
     save(us, tmp_path / 's.json')
     assert load(tmp_path / 's.json') == us
 

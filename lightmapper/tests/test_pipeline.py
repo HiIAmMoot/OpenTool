@@ -1411,7 +1411,7 @@ def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatc
     monkeypatch.setattr(pipeline, 'write_job', write)
     monkeypatch.setattr(pipeline, 'run_blender', blender)
     monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
-    out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
+    out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False, ignore_normals_mode='tool'), work=work, dry_run=True)
     # flagged samples are dark, unflagged samples have diffuse 1; only the independent sun term is added here
     want = np.array([[0.3, 1 / 3 + 0.3 * 2 / 3], [1 / 3 + 0.3 * 2 / 3, 1]])
     np.testing.assert_allclose(out.float_pages[0], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)

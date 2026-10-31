@@ -96,7 +96,7 @@ def sun(direction=UP, classes=(0,), strength=3.0):
 
 def bake(tmp_path, receivers, suns, pages=((16, 16),), occluders=(), textures=None):
     s = Settings(samples=32, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, albedo_scale=1.0,
-                 albedo_fallback=0.5)
+                 albedo_fallback=0.5, ignore_normals_mode='tool')
     write_job(tmp_path, build(receivers, occluders), list(pages), suns, {}, s, 'all', textures=textures)
     return run_blender(tmp_path, s)
 
@@ -141,7 +141,7 @@ def test_mixed_texel_corrects_only_its_flagged_diffuse(tmp_path, radiance):
                  dict(quad=floor(10, 14, 0, 4, lm=right))]
     panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(radiance,) * 3, casts=False)] if radiance else []
     settings = Settings(samples=1024, vertex_rays=1, bounces=1, w_sun=1, w_emit=1,
-                        albedo_scale=1, albedo_fallback=0.5)
+                        albedo_scale=1, albedo_fallback=0.5, ignore_normals_mode='tool')
     write_job(tmp_path, build(receivers, panels), [(1, 1)], [sun(strength=np.pi)], {}, settings)
     result = run_blender(tmp_path, settings)
     # six flagged samples take the panel, three unflagged samples take the sun; the vertex page keeps half the panel

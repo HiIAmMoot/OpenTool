@@ -99,6 +99,11 @@ def test_first_screen_widgets(app):
     assert app.verbose_var.get() is False
     assert app.backups_var.get() is True
     assert app.backups_check['text'] == 'Keep backups'
+    assert app.lightmap_32bit_check.winfo_parent() == str(app.advanced_frame)
+    assert app.ignore_normals_entry.winfo_parent() == str(app.advanced_frame)
+    assert tuple(app.ignore_normals_entry['values']) == ('Enhanced', 'Tool')
+    assert str(app.ignore_normals_entry['state']) == 'readonly'
+    assert app.ignore_normals_var.get() == 'Enhanced'
     assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
     assert app.tags_label['text'] == 'HCEK tags folder'
     assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
@@ -106,6 +111,30 @@ def test_first_screen_widgets(app):
     assert app.advanced_frame.winfo_manager() == ''
     app._toggle_advanced()
     assert app.advanced_frame.winfo_manager() == 'grid'
+
+
+def test_ignore_normals_setting_is_independent_of_quality_preset(app):
+    app.ignore_normals_var.set('Tool')
+    assert app.preset_var.get() == 'Normal'
+    app.lightmap_32bit_var.set(True)
+    assert app.preset_var.get() == 'Normal'
+    app._select_preset('Draft')
+    assert app.ignore_normals_var.get() == 'Tool'
+    assert app.lightmap_32bit_var.get() is True
+
+
+@pytest.mark.parametrize('choice, mode', [('Enhanced', 'enhanced'), ('Tool', 'tool')])
+def test_ignore_normals_and_32bit_values_reach_bake_settings(app, tiny, choice, mode):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+    app.ignore_normals_var.set(choice)
+    app.lightmap_32bit_var.set(True)
+    settings = app.request().settings
+    assert settings.ignore_normals_mode == mode
+    assert settings.lightmap_32bit is True
 
 
 def test_new_names_hint_tracks_checkbox(app):
@@ -153,11 +182,15 @@ def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
     app = make_app(store_path=store)
     app._select_preset('Draft')
     app.advanced_vars['texels_per_unit'].set('3')
+    app.ignore_normals_var.set('Tool')
+    app.lightmap_32bit_var.set(True)
     assert app.preset_var.get() == 'Custom'
     app.remember()
     restored = make_app(store_path=store)
     assert restored.preset_var.get() == 'Custom'
     assert restored.advanced_vars['texels_per_unit'].get() == '3'
+    assert restored.ignore_normals_var.get() == 'Tool'
+    assert restored.lightmap_32bit_var.get() is True
 
 
 def test_equivalent_texel_value_keeps_named_preset(app):
