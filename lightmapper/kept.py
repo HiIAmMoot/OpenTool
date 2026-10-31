@@ -28,9 +28,9 @@ logger = logging.getLogger(__name__)
 KEPT_FOLDER = 'kept bakes'
 MANIFEST = 'kept.json'
 VERSION = 1
-# these cannot change what the pages hold: the Blender path and its time limit do not reach the output, and 32-bit
-# only changes how the tags are written
-ALLOWED_CHANGES = frozenset({'lightmap_32bit', 'blender', 'timeout_s'})
+# these cannot change what the pages hold: the Blender path, its time limit and the device do not reach the output of a
+# write again (it runs no device stage), and 32-bit only changes how the tags are written
+ALLOWED_CHANGES = frozenset({'lightmap_32bit', 'blender', 'timeout_s', 'device'})
 SUPERSEDED = ('out.npz', 'gpu_out.npz', 'cpu_out.npz', 'vertex_out.npz', 'glow_out.npz', 'diffuse.npz', 'glow_pages.npz')
 SOURCE = 'source.scenario_structure_bsp'
 TEMPLATE = 'template.bitmap'

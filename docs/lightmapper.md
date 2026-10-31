@@ -121,7 +121,7 @@ python lightmap.py write bake\bloodgulch --32bit
 - `--tags` defaults to the tags folder the bake was kept with. The level, its BSP and the scenario written come from the kept copies, not from the tags as they are now.
 - `--settings file.json` and the `--out-bsp`, `--out-scenario` and `--no-backups` options work as for `bake`. Without `--settings`, the settings the bake was kept with are used.
 - `--32bit` or `--16bit` picks the page format. Without either, the format the bake was kept with stands.
-- It refuses, and writes nothing, when the settings differ from the kept bake's in anything that changes the pages (the refusal names them; `lightmap_32bit`, `blender` and `timeout_s` may differ), when the level's shaders changed since the bake was kept, or when the folder is not a kept bake or is damaged. Bake again in those cases.
+- It refuses, and writes nothing, when the settings differ from the kept bake's in anything that changes the pages (the refusal names them; `lightmap_32bit`, `blender`, `timeout_s` and `device` may differ), when the level's shaders changed since the bake was kept, or when the folder is not a kept bake or is damaged. Bake again in those cases.
 - The bake's own `summary.json` stays as it was; the write adds `write_summary.json` (see [lightmapper-settings.md](lightmapper-settings.md#write_summaryjson)).
 
 ### 3. Check the result

@@ -543,3 +543,12 @@ def test_a_summary_the_report_cannot_read_leaves_the_bake_done(tiny, monkeypatch
     monkeypatch.setattr(report, 'bake_report', lambda s: (_ for _ in ()).throw(TypeError('bad summary')))
     out, _ = run(tiny)
     assert out.status == 'done' and out.report == []
+
+
+def test_write_again_leaves_the_bakes_own_log(tiny, tmp_path, monkeypatch):
+    first = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    before = (first.work / 'opentool.log').read_bytes()
+    forbid_blender(monkeypatch)
+    assert run_bake(kept_request(tiny, tmp_path, reuse=first.work), lambda e: None).status == 'done'
+    assert (first.work / 'opentool.log').read_bytes() == before
+    assert (first.work / 'write_opentool.log').is_file()

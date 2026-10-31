@@ -151,6 +151,7 @@ def test_setting_differences():
     base = Settings()
     kept_dict = json.loads(json.dumps(asdict(base)))
     assert kept.setting_differences(kept_dict, Settings(lightmap_32bit=True, blender='other', timeout_s=5)) == []
+    assert kept.setting_differences(kept_dict, Settings(device='cpu' if base.device != 'cpu' else 'auto')) == []
     out = kept.setting_differences(kept_dict, Settings(samples=base.samples + 1, denoise=not base.denoise))
     assert sorted(out) == sorted([
         f'samples: {base.samples!r} when kept, {base.samples + 1!r} now',

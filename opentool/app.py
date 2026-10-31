@@ -48,6 +48,7 @@ class App:
         self._examples_dir = examples_dir
         self.kept_root = Path(kept_root) if kept_root is not None else kept.kept_root()
         self._kept_folder: Path | None = None
+        self._kept_error: str | None = None
         self._example_images = {}
         self._example_hover = None
         self._example_focus = None
@@ -471,8 +472,12 @@ class App:
         if self._tags is not None and self._scenario and bsp:
             try:
                 folder = kept.latest(self.kept_root, self._tags, self._scenario, bsp)
+                self._kept_error = None
             except Exception as exc:
-                self._write_exception(exc)
+                # (this runs on every change of the form: the same failure is logged once, not per keystroke)
+                if str(exc) != self._kept_error:
+                    self._kept_error = str(exc)
+                    self._write_exception(exc)
         self._kept_folder = folder
 
     def request(self, write_again=False) -> runner.BakeRequest:

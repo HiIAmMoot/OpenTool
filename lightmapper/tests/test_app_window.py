@@ -1994,3 +1994,14 @@ def test_keep_and_write_again_are_locked_during_a_bake(ready_app, tiny):
     pump_app(ready_app, lambda: not ready_app.busy)
     assert str(ready_app.keep_check['state']) != 'disabled'
     assert str(ready_app.write_again_button['state']) == 'normal'
+
+
+def test_a_kept_lookup_error_is_logged_once_per_message(ready_app, monkeypatch):
+    def fail(*args):
+        raise OSError('the kept folder is unreadable')
+
+    monkeypatch.setattr(app_module.kept, 'latest', fail)
+    ready_app._inputs_changed()
+    ready_app._inputs_changed()
+    assert ready_app.log_path.read_text().count('OSError: the kept folder is unreadable') == 1
+    assert ready_app._kept_folder is None and str(ready_app.write_again_button['state']) == 'disabled'

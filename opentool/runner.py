@@ -184,7 +184,8 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             except FileNotFoundError:
                 pass
         event_handler = _EventHandler(emit, request.verbose)
-        file_handler = logging.FileHandler(work / 'opentool.log', mode='w', encoding='utf-8')
+        file_handler = logging.FileHandler(work / ('write_opentool.log' if reuse is not None else 'opentool.log'),
+                                           mode='w', encoding='utf-8')
         file_handler.setLevel(logging.INFO)
         file_handler.setFormatter(logging.Formatter('%(levelname)s: %(message)s'))
         root.setLevel(logging.INFO)
