@@ -1892,3 +1892,11 @@ def test_row_hints_leave_rays_per_texel_locked_during_a_bake(ready_app):
     assert str(entry['state']) == 'normal'
     ready_app.adaptive_var.set(True)
     assert str(entry['state']) == 'disabled'
+
+
+def test_finished_bake_logs_the_report(ready_app):
+    outcome = BakeOutcome('problems', 'Finished with problems.', ['bad uv'], Path('C:/x'), Path(), None,
+                          None, None, ['careful'], ['Total time: 45 s', 'Pages: 1 (64x64)'])
+    run_events(ready_app, [('done', outcome)])
+    lines = ready_app.log_box.get('1.0', 'end-1c').splitlines()
+    assert lines.index('bad uv') < lines.index('Total time: 45 s') < lines.index('Pages: 1 (64x64)') < lines.index('WARNING: careful')

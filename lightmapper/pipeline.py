@@ -81,6 +81,7 @@ def _write(tags, group, path, tag, backups=True):
     target = resolve_reference_path(tags, group, path)
     target.parent.mkdir(parents=True, exist_ok=True)
     write_tag(tag, target, backup=backups)
+    return target
 
 
 def copy_tags(tags: Path, scenario: str, bsp: str, out_bsp: str, out_scenario: str, backups=True):
@@ -618,9 +619,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     bitmap_tag = write_bitmap(pixels, template)
     np.save(work / 'new_to_input.npy', mapping)
     np.savez(work / 'float_pages.npz', **{f'page_{i}': page for i, page in enumerate(float_pages)})
+    written = {}
     if sources == 'all' and not dry_run:
-        _write(tags, 'bitm', output_path, bitmap_tag, backups)
-        _write(tags, 'sbsp', output_path, bsp_tag, backups)
+        written['bitmap'] = _write(tags, 'bitm', output_path, bitmap_tag, backups).stat().st_size
+        written['bsp'] = _write(tags, 'sbsp', output_path, bsp_tag, backups).stat().st_size
         if out_scenario is not None:
             scenario_tag.root.block('structure_bsps')[bsp_number].set_reference('structure_bsp', 'sbsp', output_path)
             _write(tags, 'scnr', out_scenario, scenario_tag, backups)
@@ -629,7 +631,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
-        'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
+        'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'devices': {**({} if reuse else choice.summary()), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},

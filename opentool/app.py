@@ -553,8 +553,8 @@ class App:
             self._update_device_hint()
 
     def _glow_inputs_changed(self):
-        # (the glow row's prediction follows these two, whether or not a finished bake's rows are showing)
-        if not self.busy:
+        # (the glow row's prediction follows these two even with no finished bake's rows to reset)
+        if not self.busy and not self._using_stage_rows:
             self._update_device_hint()
 
     def _update_device_hint(self, *, prediction=True):
@@ -877,6 +877,8 @@ class App:
             self._append_log('Problems')
             for problem in outcome.problems:
                 self._append_log(str(problem))
+        for line in outcome.report:
+            self._append_log(line)
         if outcome.devices:
             self._using_stage_rows = True
             self._show_stage_rows(devices.stage_rows_used(outcome.devices))

@@ -1,10 +1,11 @@
 import json
 import logging
+import re
 import shutil
 
 import pytest
 
-from lightmapper import pipeline
+from lightmapper import pipeline, report
 from lightmapper.tagio.tagfile import new_element, read_tag, resolve_reference_path, write_tag
 from test_pipeline import child, tiny
 import opentool.runner as runner
@@ -23,7 +24,7 @@ def test_runner_bakes_into_new_names(tiny):
     assert out.status == 'done' and (tags / 'room_lit.scenario_structure_bsp').is_file()
     assert (tags / 'level_lit.scenario').is_file() and out.output_folder == tags
     assert events[-1] == ('done', out)
-    assert out.message == 'Done. The lit level is level_lit.'
+    assert re.fullmatch(r'Done in \d+ s: the lit level is level_lit \(\d+\.\d MB written\)\.', out.message)
 
 
 @pytest.fixture
@@ -194,7 +195,7 @@ def test_runner_reports_validation_problems(tiny, monkeypatch):
     monkeypatch.setattr(runner, 'validate_bsp', lambda *a, **k: ['last element must have bitmap -1'])
     out, _ = run(tiny)
     assert out.status == 'problems' and out.problems == ['last element must have bitmap -1']
-    assert out.message == 'Finished with problems. The tags were written; the problems are listed in the log.'
+    assert out.message.startswith('Finished with problems in ')
 
 
 def test_runner_output_folder_is_written_bsp_folder(tiny):
@@ -419,7 +420,7 @@ def fake_glow_bake(logs):
 
 def test_runner_follows_the_glow_log(tiny, monkeypatch):
     tags, settings, work = tiny
-    LogReadingFollower.started = []
+    monkeypatch.setattr(LogReadingFollower, 'started', [])
     monkeypatch.setattr(runner, 'BlenderLogFollower', LogReadingFollower)
     work.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(runner.pipeline, 'bake', fake_glow_bake({'blender.log': '[bake] page 0 (0, 0)\n',
@@ -429,14 +430,11 @@ def test_runner_follows_the_glow_log(tiny, monkeypatch):
     # (the runner clears the logs at its start, so the fake writes them in its own call)
     names = [event for event in events if event[0] in ('plan', 'stage', 'pages', 'device')]
     assert ('plan', 'glow') in names and ('stage', 'glow') in names
-    assert ('stage', GLOW_PLANNED_TEXT) not in names
+    assert ('stage', pipeline.GLOW_PLANNED) not in names
     assert names.index(('plan', 'glow')) < names.index(('stage', 'blender'))
     after_glow = names[names.index(('stage', 'glow')):]
     assert ('device', 'HIP') in after_glow and ('pages', 1, 1) in after_glow
     assert LogReadingFollower.started == ['blender.log', 'blender_glow.log']
-
-
-GLOW_PLANNED_TEXT = pipeline.GLOW_PLANNED
 
 
 def test_reused_work_drops_an_old_glow_log(tiny, monkeypatch):
@@ -452,3 +450,22 @@ def test_reused_work_drops_an_old_glow_log(tiny, monkeypatch):
     events = []
     run_bake(BakeRequest(tags, 'level', 'room', settings, True, work), events.append)
     assert ('stage', 'glow') in events and ('device', 'CUDA') not in events
+
+
+def test_outcome_carries_the_bake_report(tiny):
+    out, _ = run(tiny)
+    assert out.report and out.report[0].startswith('Total time: ')
+    assert any(line.startswith('BSP written: ') for line in out.report)
+
+
+def test_problems_message_names_the_duration_and_size(tiny, monkeypatch):
+    monkeypatch.setattr(runner, 'validate_bsp', lambda *a, **k: ['bad'])
+    out, _ = run(tiny)
+    assert re.fullmatch(r'Finished with problems in \d+ s\. The tags were written \(\d+\.\d MB\); '
+                        r'the problems are listed in the log\.', out.message)
+
+
+def test_without_a_summary_the_old_messages_stand(tiny, monkeypatch):
+    monkeypatch.setattr(report, 'read_summary', lambda path: None)
+    out, _ = run(tiny)
+    assert out.message == 'Done. The lit level is level_lit.' and out.report == []

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -170,3 +171,26 @@ def test_cli_write_refusal_exits_1(monkeypatch, tmp_path, capsys):
 def test_cli_write_refuses_a_folder_that_is_not_kept(tmp_path, capsys):
     assert cli.main(['write', str(tmp_path)]) == 1
     assert 'not a kept bake' in capsys.readouterr().err
+
+
+def test_bake_prints_the_report_before_the_work_folder(monkeypatch, tmp_path, capsys):
+    work = tmp_path / 'w'
+    work.mkdir()
+    (work / 'summary.json').write_text('{"seconds": {"total": 45.2}}')
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: type('O', (), {'work': work})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room'])
+    out = capsys.readouterr().out
+    assert 'Total time: 45 s' in out and out.index('Total time:') < out.index('Work:')
+
+
+def test_cli_write_prints_the_report_and_keeps_its_warnings(monkeypatch, tmp_path, capsys):
+    work = kept_manifest(tmp_path)
+    (work / 'write_summary.json').write_text(json.dumps({
+        'seconds': {'total': 3.0}, 'written': {'bitmap': 1048576, 'bsp': 2097152}, 'warnings': ['a warning'],
+        'devices': {'page_bake': 'CPU', 'vertex_pass': 'cpu', 'denoise': 'off', 'glow_pass': 'off'}}))
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: type('O', (), {'work': work})())
+    cli.main(['write', str(work)])
+    out = capsys.readouterr().out
+    assert 'BSP written: 2.0 MB' in out and 'warning: a warning' in out
+    assert out.count('denoise') == 1
+    assert out.index('Total time:') < out.index('Work:')

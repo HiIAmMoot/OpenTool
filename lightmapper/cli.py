@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-from . import kept
+from . import kept, report as bake_report
 from .calibrate import calibrate
 from .blender_find import find_blender
 from .errors import KeptBakeError
@@ -115,6 +115,9 @@ def main(argv=None) -> int:
         result = bake(args.tags, args.scenario, args.bsp, settings,
                       args.out_bsp, args.out_scenario, work, args.sources, args.charts, args.dry_run,
                       backups=not args.no_backups, keep=args.keep)
+        summary = bake_report.read_summary(Path(result.work) / 'summary.json')
+        if summary is not None:
+            print_report(summary)
         print(f'Work: {result.work}')
         return 0
     if args.command == 'calibrate':
@@ -139,6 +142,11 @@ def main(argv=None) -> int:
     return int(bool(problems))
 
 
+def print_report(summary: dict) -> None:
+    for line in bake_report.bake_report(summary):
+        print(line)
+
+
 def _write(args) -> int:
     try:
         manifest = kept.read_manifest(args.work)
@@ -158,8 +166,7 @@ def _write(args) -> int:
     summary_file = args.work / 'write_summary.json'
     if summary_file.is_file():
         summary = json.loads(summary_file.read_text())
-        for name, device in summary['devices'].items():
-            print(f'{name}: {device}')
+        print_report(summary)
         for warning in summary['warnings']:
             print(f'warning: {warning}')
     print(f'Work: {result.work}')

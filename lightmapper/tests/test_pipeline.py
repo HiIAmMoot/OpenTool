@@ -267,6 +267,20 @@ def cpu_info():
     return {'compile': .125, 'trace': .25, 'threads': 2, 'threading_layer': 'workqueue'}
 
 
+def test_summary_records_the_written_sizes(tiny):
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['written'] == {'bitmap': (tags / 'copy.bitmap').stat().st_size,
+                                  'bsp': (tags / 'copy.scenario_structure_bsp').stat().st_size}
+
+
+def test_dry_run_records_no_written_sizes(tiny):
+    tags, settings, work = tiny
+    api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
+    assert json.loads((work / 'summary.json').read_text())['written'] == {}
+
+
 def test_pipeline_outputs(tiny):
     tags, settings, work = tiny
     out = api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work)

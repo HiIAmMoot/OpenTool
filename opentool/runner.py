@@ -7,7 +7,7 @@ from pathlib import Path, PureWindowsPath
 import tempfile
 from typing import Callable
 
-from lightmapper import pipeline
+from lightmapper import pipeline, report
 from lightmapper.progress import GLOW_PLANNED, BlenderLogFollower, parse_line
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import read_tag, resolve_reference_path, write_tag
@@ -42,6 +42,7 @@ class BakeOutcome:
     devices: dict | None = None
     rays: dict | None = None
     warnings: list[str] = field(default_factory=list)
+    report: list[str] = field(default_factory=list)
 
 
 def default_work(bsp: str) -> Path:
@@ -191,10 +192,19 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         bitmap_tag = read_tag(bitmap_path)
         problems = validate_bsp(bsp_tag, bitmap_tag)
         status = 'problems' if problems else 'done'
-        message = ('Finished with problems. The tags were written; the problems are listed in the log.' if problems
-                   else f'Done. The lit level is {out_scenario or request.scenario}.')
+        summary = report.read_summary(work / 'summary.json')
+        lines = report.bake_report(summary) if summary is not None else []
+        written = (summary or {}).get('written') or {}
+        total = (summary or {}).get('seconds', {}).get('total')
+        if written and total is not None:
+            duration, size = report.format_duration(total), report.format_size(sum(written.values()))
+            message = (f'Finished with problems in {duration}. The tags were written ({size}); the problems are listed in the log.'
+                       if problems else f'Done in {duration}: the lit level is {out_scenario or request.scenario} ({size} written).')
+        else:
+            message = ('Finished with problems. The tags were written; the problems are listed in the log.' if problems
+                       else f'Done. The lit level is {out_scenario or request.scenario}.')
         output_folder = resolve_reference_path(request.tags, 'sbsp', written_bsp).parent
-        outcome = BakeOutcome(status, message, problems, output_folder, work, device, *read_summary(work))
+        outcome = BakeOutcome(status, message, problems, output_folder, work, device, *read_summary(work), lines)
     except Exception as exc:
         logger.exception('Bake failed')
         outcome = BakeOutcome('failed', explain(exc, work), [], None, work, device)

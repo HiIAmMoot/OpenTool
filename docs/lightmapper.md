@@ -75,7 +75,7 @@ python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch
 
 The bake reads the scenario and BSP, then writes the lit BSP and bitmap after every stage finishes. Before replacing a tag, it saves a copy in a `backups` folder next to the tag. Backups are on by default; pass `--no-backups` to turn them off. Backups stay until you delete them: the tool never removes them.
 
-Add `-v` to see progress lines.
+Add `-v` to see progress lines. When the bake finishes, it prints a short report before the `Work:` line: the total time and the time of each stage, the page sizes, the size of the written bitmap and BSP, and the device each stage ran on. `write` prints the same report for the write.
 
 `--work` is a folder for the bake's files. It ends up holding the Blender job (`job.json`, `scene.npz`, `textures.npz`), the chart layout (`charts.npz`), Blender's log (`blender.log`), the raw and finished pages (`out.npz`, `float_pages.npz`), the surface mapping `diff` needs (`new_to_input.npy`), and `summary.json` with the settings, page sizes and timings. Without `--work`, each bake gets a new folder in your temp directory.
 
