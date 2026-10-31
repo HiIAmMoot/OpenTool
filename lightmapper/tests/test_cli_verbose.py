@@ -116,7 +116,7 @@ def kept_manifest(tmp_path, **settings):
     from lightmapper.settings import Settings
     work = tmp_path / 'kept'
     kept.kept_dir(work).mkdir(parents=True)
-    for name in (kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT):
+    for name in (kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT, kept.SCENE, kept.JOB):
         (kept.kept_dir(work) / name).write_bytes(b'x')
     base = {**asdict(Settings()), **settings, 'dropped_in_a_later_release': 1}
     kept.write_manifest(work, kept.Manifest(

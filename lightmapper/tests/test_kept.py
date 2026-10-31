@@ -80,7 +80,7 @@ def test_level_folder_is_one_per_level(tmp_path):
 
 def make_kept(work, settings=None):
     kept.kept_dir(work).mkdir(parents=True)
-    for name in ('source.scenario_structure_bsp', 'scenario.scenario', 'charts.npz', 'result.npz'):
+    for name in ('source.scenario_structure_bsp', 'scenario.scenario', 'charts.npz', 'result.npz', 'scene.npz', 'job.json'):
         (kept.kept_dir(work) / name).write_bytes(b'x')
     kept.write_manifest(work, kept.Manifest(
         tags='t', scenario='s', bsp='b', input_path='i', has_template=False, vertex_device='cpu',
@@ -91,6 +91,14 @@ def test_manifest_round_trips(tmp_path):
     make_kept(tmp_path)
     assert kept.read_manifest(tmp_path).bsp == 'b'
     assert json.loads((tmp_path / kept.MANIFEST).read_text())['version'] == kept.VERSION
+
+
+@pytest.mark.parametrize('name', [kept.SCENE, kept.JOB])
+def test_a_kept_bake_without_its_scene_or_job_is_refused(tmp_path, name):
+    make_kept(tmp_path)
+    (kept.kept_dir(tmp_path) / name).unlink()
+    with pytest.raises(KeptBakeError):
+        kept.read_manifest(tmp_path)
 
 
 def test_latest_is_the_newest_readable_kept_bake(tmp_path):

@@ -8,6 +8,7 @@ import hashlib
 import json
 import logging
 import shutil
+import struct
 import sys
 import zipfile
 from dataclasses import asdict, dataclass, fields
@@ -36,6 +37,8 @@ TEMPLATE = 'template.bitmap'
 SCENARIO = 'scenario.scenario'
 CHARTS = 'charts.npz'
 RESULT = 'result.npz'
+SCENE = 'scene.npz'
+JOB = 'job.json'
 GLOW = 'glow.npz'
 
 # diffuse_pages is as big as the pages and the finish never reads it
@@ -94,24 +97,28 @@ def write_manifest(work: Path, manifest: Manifest) -> None:
     (work / MANIFEST).write_text(json.dumps({'version': VERSION, **asdict(manifest)}, indent=1))
 
 
-def _refusal(work: Path) -> KeptBakeError:
+# a kept file that cannot be read is a damaged kept bake, whatever the reader raised
+DAMAGED = (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile)
+
+
+def refusal(work: Path) -> KeptBakeError:
     return KeptBakeError(f'{work} is not a kept bake OpenTool can write again.')
 
 
 def read_manifest(work: Path) -> Manifest:
-    refusal = _refusal(work)
+    refused = refusal(work)
     try:
         data = json.loads((work / MANIFEST).read_text())
         if not isinstance(data, dict):
-            raise refusal
+            raise refused
         if data.pop('version', None) != VERSION:
-            raise refusal
+            raise refused
         manifest = Manifest(**data)
     except (OSError, ValueError, TypeError) as exc:
-        raise refusal from exc
-    needed = [SOURCE, SCENARIO, CHARTS, RESULT] + ([TEMPLATE] if manifest.has_template else [])
+        raise refused from exc
+    needed = [SOURCE, SCENARIO, CHARTS, RESULT, SCENE, JOB] + ([TEMPLATE] if manifest.has_template else [])
     if not all((kept_dir(work) / name).is_file() for name in needed):
-        raise refusal
+        raise refused
     return manifest
 
 
@@ -155,6 +162,13 @@ def save_sources(work: Path, input_file: Path, template_file: Path | None, scena
     shutil.copyfile(charts_file, folder / CHARTS)
 
 
+def save_baked(work: Path) -> None:
+    # (the work folder's own scene.npz and job.json are rewritten by any later bake into it, which would leave a kept
+    # result beside a scene that is not its own)
+    for name in (SCENE, JOB):
+        shutil.copyfile(work / name, kept_dir(work) / name)
+
+
 def save_result(work: Path, result: BakeResult) -> None:
     arrays = {}
     for field in fields(BakeResult):
@@ -177,7 +191,7 @@ def load_result(work: Path) -> BakeResult:
     try:
         return _load_result(work)
     except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
-        raise _refusal(work) from exc
+        raise refusal(work) from exc
 
 
 def _load_result(work: Path) -> BakeResult:
@@ -212,7 +226,7 @@ def load_glow(work: Path) -> list[np.ndarray]:
         with np.load(kept_dir(work) / GLOW, allow_pickle=False) as data:
             return [data[f'page_{i}'] for i in range(len(data.files))]
     except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
-        raise _refusal(work) from exc
+        raise refusal(work) from exc
 
 
 def drop_superseded(work: Path) -> None:

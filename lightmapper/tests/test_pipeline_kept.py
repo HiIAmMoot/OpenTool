@@ -1,10 +1,12 @@
 import json
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from lightmapper import cpu_vertex_job as vertex_cpu, kept
 from lightmapper.errors import KeptBakeError
+from lightmapper.formats.bitmap import write_bitmap
 from lightmapper.tagio.tagfile import read_tag, resolve_reference_path, write_tag
 from test_pipeline import api, put, run_enhanced_pipeline, tiny  # noqa: F401
 
@@ -23,7 +25,7 @@ def test_kept_bake_holds_what_a_write_needs(tiny, tmp_path):
     before = (tags / 'room.scenario_structure_bsp').read_bytes()
     api().bake(tags, 'level', 'room', tool(settings), out_bsp='copy', work=work, keep=True)
     folder = kept.kept_dir(work)
-    assert sorted(p.name for p in folder.iterdir()) == sorted([kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT])
+    assert sorted(p.name for p in folder.iterdir()) == sorted([kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT, kept.SCENE, kept.JOB])
     manifest = kept.read_manifest(work)
     assert manifest.settings['ignore_normals_mode'] == 'tool' and manifest.glow_device == 'off'
     assert manifest.glow_reason == 'Traditional ignore normals' and manifest.vertex_device == 'cpu'
@@ -183,11 +185,26 @@ def test_write_again_writes_what_the_bake_wrote(tiny, tmp_path, monkeypatch, mod
 
 
 def test_write_again_ignores_the_tags_as_they_are_now(tiny, tmp_path, monkeypatch):
-    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    tags, settings, _ = tiny
+    settings = tool(settings)
+    template = write_bitmap([np.zeros((2, 2), np.uint16)])
+    template.root.set('usage', 1)
+    put(tags, 'bitm', 'tpl', template)
+    room = read_tag(tags / 'room.scenario_structure_bsp')
+    room.root.set_reference('lightmaps_bitmap', 'bitm', 'tpl')
+    put(tags, 'sbsp', 'room', room)
+    work = kept_work(tmp_path, tags)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, keep=True)
     first = read_tag(resolve_reference_path(tags, 'sbsp', 'copy'))
-    lit = read_tag(resolve_reference_path(tags, 'sbsp', 'copy'))
     first.root.set_reference('lightmaps_bitmap', 'bitm', 'copy2')
-    put(tags, 'sbsp', 'room', lit)
+    first_bitmap = tag_bytes(read_tag(resolve_reference_path(tags, 'bitm', 'copy')), tmp_path)
+    assert read_tag(resolve_reference_path(tags, 'bitm', 'copy')).root.get('usage') == 1
+    # (each of these changes what a layout of the tags would write: a field the layout keeps, the template's usage, and
+    # the scenario's BSP)
+    room.root.set('vehicle_floor', 5.0)
+    put(tags, 'sbsp', 'room', room)
+    template.root.set('usage', 2)
+    put(tags, 'bitm', 'tpl', template)
     scenario = read_tag(resolve_reference_path(tags, 'scnr', 'level'))
     scenario.root.block('structure_bsps')[0].set_reference('structure_bsp', 'sbsp', 'elsewhere')
     put(tags, 'scnr', 'level', scenario)
@@ -196,6 +213,7 @@ def test_write_again_ignores_the_tags_as_they_are_now(tiny, tmp_path, monkeypatc
     again = read_tag(resolve_reference_path(tags, 'sbsp', 'copy2'))
     assert again.root.reference('lightmaps_bitmap') == ('bitm', 'copy2')
     assert tag_bytes(again, tmp_path) == tag_bytes(first, tmp_path)
+    assert tag_bytes(read_tag(resolve_reference_path(tags, 'bitm', 'copy2')), tmp_path) == first_bitmap
 
 
 def test_write_again_switches_32bit(tiny, tmp_path, monkeypatch):
@@ -297,3 +315,75 @@ def test_a_kept_bake_may_reuse_the_charts_it_kept(tiny, tmp_path):
                charts=kept.kept_dir(work) / kept.CHARTS)
     assert (kept.kept_dir(work) / kept.CHARTS).is_file()
     assert kept.read_manifest(work).bsp == 'room'
+
+
+def test_write_again_after_a_plain_bake_into_the_same_folder(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    first = [path.read_bytes() for path in written(tags)]
+    for path in written(tags):
+        path.unlink()
+    api().bake(tags, 'level', 'room', replace(settings, texels_per_unit=.5), out_bsp='plain', work=work)
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    assert [path.read_bytes() for path in written(tags)] == first
+
+
+@pytest.mark.parametrize('name', [kept.SCENE, kept.JOB, kept.SCENARIO, kept.SOURCE])
+def test_write_again_refuses_a_damaged_kept_file(tiny, tmp_path, monkeypatch, name):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    for path in written(tags):
+        path.unlink()
+    (kept.kept_dir(work) / name).write_bytes(b'garbage')
+    forbid_baking(monkeypatch)
+    with pytest.raises(KeptBakeError, match='not a kept bake'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    assert not any(path.exists() for path in written(tags))
+
+
+def kept_enhanced_bake(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    work = kept_work(tmp_path, tags)
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced',
+                          bake_kwargs={'work': work, 'dry_run': False, 'out_bsp': 'copy', 'keep': True})
+    for path in written(tags):
+        path.unlink()
+    forbid_baking(monkeypatch)
+    return tags, replace(settings, ignore_normals_mode='enhanced', stitch_seams=False, bounces=1), work
+
+
+def test_write_again_refuses_a_damaged_glow(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_enhanced_bake(tiny, tmp_path, monkeypatch)
+    (kept.kept_dir(work) / kept.GLOW).write_bytes(b'garbage')
+    with pytest.raises(KeptBakeError, match='not a kept bake'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    assert not any(path.exists() for path in written(tags))
+
+
+def test_write_again_refuses_a_glow_of_another_page_count(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_enhanced_bake(tiny, tmp_path, monkeypatch)
+    page = np.zeros((2, 2, 3), np.float32)
+    np.savez(kept.kept_dir(work) / kept.GLOW, page_0=page, page_1=page)
+    with pytest.raises(KeptBakeError, match='not a kept bake'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    assert not any(path.exists() for path in written(tags))
+
+
+def test_write_again_summary_holds_no_device_of_this_machine(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    summary = json.loads((work / 'write_summary.json').read_text())
+    assert set(summary['devices']) == {'page_bake', 'vertex_pass', 'denoise', 'glow_pass', 'glow_reason'}
+
+
+def test_write_again_reads_the_scene_and_job_it_kept(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    first = [path.read_bytes() for path in written(tags)]
+    for path in written(tags):
+        path.unlink()
+    # (what a later bake into the folder leaves at its top level)
+    (work / 'scene.npz').write_bytes(b'garbage')
+    (work / 'job.json').write_text('garbage')
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    assert [path.read_bytes() for path in written(tags)] == first

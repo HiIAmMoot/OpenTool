@@ -15,10 +15,8 @@ import json
 import logging
 from pathlib import Path, PureWindowsPath
 import shutil
-import struct
 import tempfile
 from time import perf_counter
-import zipfile
 
 import numpy as np
 
@@ -248,38 +246,31 @@ def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path) -> 
     return pages
 
 
-# a kept file that cannot be read is a damaged kept bake, whatever the reader raised
-_DAMAGED = (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile)
-
-
-def _kept_refusal(work: Path) -> KeptBakeError:
-    return KeptBakeError(f'{work} is not a kept bake OpenTool can write again.')
-
-
 def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
     folder = kept.kept_dir(work)
     try:
         scenario_tag = read_tag(folder / kept.SCENARIO)
         bsp_tag = read_tag(folder / kept.SOURCE)
         template = read_tag(folder / kept.TEMPLATE) if manifest.has_template else None
-    except _DAMAGED as error:
-        raise _kept_refusal(work) from error
-    number, path = bsp_index(scenario_tag, name)
+        number, path = bsp_index(scenario_tag, name)
+    except kept.DAMAGED as error:
+        raise kept.refusal(work) from error
     return scenario_tag, bsp_tag, template, number, path
 
 
 def _kept_baked(work: Path, manifest: kept.Manifest, page_count: int):
     # everything the finish reads from the kept bake, loaded before anything is written
+    folder = kept.kept_dir(work)
     try:
-        with np.load(work / 'scene.npz') as data:
+        with np.load(folder / kept.SCENE) as data:
             scene = Scene(**{f.name: data[f.name] for f in fields(Scene) if f.name in data.files})
-        job = json.loads((work / 'job.json').read_text())
+        job = json.loads((folder / kept.JOB).read_text())
         glow = kept.load_glow(work) if manifest.glow_device != 'off' else None
-    except _DAMAGED as error:
-        raise _kept_refusal(work) from error
+    except kept.DAMAGED as error:
+        raise kept.refusal(work) from error
     result = kept.load_result(work)
     if len(result.pages) != page_count or (glow is not None and len(glow) != page_count):
-        raise _kept_refusal(work)
+        raise kept.refusal(work)
     return scene, job, result, glow
 
 
@@ -322,8 +313,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     start = last = perf_counter()
     seconds = {}
     choice = gpu.probe_choice(s.device)
-    logger.info('devices: %s', choice.summary())
-    warnings = list(choice.warnings)
+    # (a write again runs no GPU stage, so this machine's ray-query warnings say nothing about it)
+    warnings = [] if reuse else list(choice.warnings)
+    if not reuse:
+        logger.info('devices: %s', choice.summary())
     for warning in warnings:
         logger.warning('%s', warning)
     vertex_device = 'cpu'
@@ -369,7 +362,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     work = (Path(work) if work is not None else Path(tempfile.gettempdir()) / 'halo_lightmapper'
             / f'{bsp}-{datetime.now():%Y%m%d-%H%M%S}')
     work.mkdir(parents=True, exist_ok=True)
-    geometry = read_geometry(bsp_tag)
+    try:
+        geometry = read_geometry(bsp_tag)
+    except kept.DAMAGED as error:
+        if not reuse:
+            raise
+        raise kept.refusal(work) from error
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
     if not reuse:
         lighting = gather_lighting(scenario_tag, tags, s.sky_grid)
@@ -502,6 +500,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             result = with_vertex_pass(result, cpu_pass())
         stage('vertex_pass')
         if keep:
+            kept.save_baked(work)
             kept.save_result(work, result)
     begin('glow' if glow_runs else 'finish')
     raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
@@ -514,7 +513,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     job_suns = job['suns']
     texel_scene = None
     if enhanced:
-        with np.load(work / 'scene.npz') as data:
+        with np.load((kept.kept_dir(work) if reuse else work) / 'scene.npz') as data:
             texel_scene = {key: data[key] for key in data.files}
     if job.get('ambiguous_twin_groups'):
         warnings.append(ambiguous_warning(job['ambiguous_twin_groups']))
@@ -631,7 +630,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
-        'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
+        'devices': {**({} if reuse else choice.summary()), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
