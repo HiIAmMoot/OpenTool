@@ -28,7 +28,7 @@ def test_gpu_text_skips_adapters_without_ray_queries():
     ('auto', [], "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."),
     ('auto', [Adapter('Older NVIDIA', 0x10DE, (3,), 'vulkan', False)],
      "The vertex pass runs on the CPU; pages still try Cycles' GPU backends."),
-    ('cpu', [RTX], 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'),
+    ('cpu', [RTX], 'Bakes on the CPU, with fewer rays per texel for the presets.'),
     ('auto', None, '')])
 def test_device_hint(setting, adapters, hint):
     assert device_hint(setting, adapters, None) == hint
