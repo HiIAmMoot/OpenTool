@@ -5,7 +5,7 @@ import shutil
 
 import pytest
 
-from lightmapper import pipeline, report
+from lightmapper import kept, pipeline, report
 from lightmapper.tagio.tagfile import new_element, read_tag, resolve_reference_path, write_tag
 from test_pipeline import child, tiny
 import opentool.runner as runner
@@ -482,3 +482,64 @@ def test_a_malformed_summary_does_not_fail_a_written_bake(tiny, monkeypatch):
     monkeypatch.setattr(report, 'read_summary', lambda path: {'seconds': None, 'devices': None, 'written': {'bsp': 1}})
     out, _ = run(tiny)
     assert out.status == 'done' and out.message == 'Done. The lit level is level_lit.'
+
+
+def kept_request(tiny, tmp_path, **kw):
+    tags, settings, work = tiny
+    return BakeRequest(tags, 'level', 'room', settings, kw.pop('new_names', True), kw.pop('work', None),
+                       kept_root=tmp_path / 'kept', **kw)
+
+
+def test_runner_keeps_under_the_kept_root(tiny, tmp_path):
+    out = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    assert out.status == 'done'
+    assert kept.latest(tmp_path / 'kept', tiny[0], 'level', 'room') == out.work
+    assert kept.read_manifest(out.work).bsp == 'room'
+
+
+def forbid_blender(monkeypatch):
+    monkeypatch.setattr(runner.pipeline, 'run_blender', lambda *a, **k: pytest.fail('Blender ran'))
+
+
+def test_runner_writes_a_kept_bake_again(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    first = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    scenario = read_tag(tags / 'level.scenario')
+    second = child(scenario.root, 'structure_bsps'); second.set_reference('structure_bsp', 'sbsp', 'room2')
+    scenario.root.set_block('structure_bsps', [*scenario.root.block('structure_bsps'), second])
+    write_tag(scenario, tags / 'level.scenario')
+    (tags / 'level_lit.scenario').unlink()
+    forbid_blender(monkeypatch)
+    out = run_bake(kept_request(tiny, tmp_path, reuse=first.work), lambda e: None)
+    assert out.status == 'done' and out.work == first.work
+    refs = [e.reference('structure_bsp')[1] for e in read_tag(tags / 'level_lit.scenario').root.block('structure_bsps')]
+    assert refs == ['room_lit']
+    assert (first.work / 'write_summary.json').is_file() and out.report
+
+
+def test_unwritable_kept_root_stops_before_blender(tiny, tmp_path, monkeypatch):
+    forbid_blender(monkeypatch)
+    blocker = tmp_path / 'kept'
+    blocker.write_text('a file')
+    out = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    assert out.status == 'failed'
+    assert out.message == (f'OpenTool could not make a folder for kept bakes in {blocker}. '
+                           'Turn off keeping the bake, or move OpenTool to a folder you can write to.')
+
+
+def test_write_again_keeps_the_logs(tiny, tmp_path, monkeypatch):
+    first = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    (first.work / 'blender.log').write_text('[bake] device CUDA\n')
+    (first.work / 'blender_glow.log').write_text('[bake] device OPTIX\n')
+    forbid_blender(monkeypatch)
+    assert run_bake(kept_request(tiny, tmp_path, reuse=first.work), lambda e: None).status == 'done'
+    assert (first.work / 'blender.log').read_text() == '[bake] device CUDA\n'
+    assert (first.work / 'blender_glow.log').read_text() == '[bake] device OPTIX\n'
+
+
+def test_a_summary_the_report_cannot_read_leaves_the_bake_done(tiny, monkeypatch):
+    summary = {'seconds': {'total': 'x'}, 'sizes': [1], 'devices': None, 'written': {'bsp': 1}}
+    monkeypatch.setattr(report, 'read_summary', lambda path: summary)
+    monkeypatch.setattr(report, 'bake_report', lambda s: (_ for _ in ()).throw(TypeError('bad summary')))
+    out, _ = run(tiny)
+    assert out.status == 'done' and out.report == []

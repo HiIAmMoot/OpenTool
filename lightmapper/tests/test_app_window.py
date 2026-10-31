@@ -9,6 +9,7 @@ tk = pytest.importorskip('tkinter')
 from tkinter import ttk
 
 from test_pipeline import tiny
+from lightmapper import kept
 from lightmapper.blender_find import Blender, BlenderNotFound
 from lightmapper.gpu import Adapter, DeviceError
 from lightmapper.charts import CapError
@@ -59,6 +60,7 @@ def make_app(tmp_path, monkeypatch, request, tk_root):
         kwargs.setdefault('probe_gpu', lambda: ([RTX], None))
         kwargs.setdefault('probe_denoiser', lambda: {'CUDA': True, 'HIP': False})
         kwargs.setdefault('estimate', lambda _inputs: ESTIMATE_FITS)
+        kwargs.setdefault('kept_root', tmp_path / 'kept')
         app = App(
             root,
             store_path=store_path,
@@ -1908,3 +1910,87 @@ def test_the_glow_hook_leaves_a_finished_bakes_rows(ready_app):
     used = stage_texts(ready_app)
     ready_app._glow_inputs_changed()
     assert stage_texts(ready_app) == used
+
+
+def keep_a_bake(app, tiny, bsp='room'):
+    tags = tiny[0]
+    folder = kept.level_folder(app.kept_root, tags, 'level', bsp) / '20260101-000000'
+    (folder / 'kept').mkdir(parents=True)
+    names = (kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT, kept.SCENE, kept.JOB)
+    for name in names:
+        (folder / 'kept' / name).write_bytes(b'x')
+    kept.write_manifest(folder, kept.Manifest(str(tags), 'level', bsp, bsp, False, 'cpu', 'off', '', {}, 'then'))
+    return folder
+
+
+def test_keep_checkbox_reaches_the_request_and_is_remembered(ready_app):
+    assert ready_app.keep_check['text'] == 'Keep the bake to write it again'
+    assert ready_app.keep_var.get() is False and ready_app.request().keep is False
+    ready_app.keep_var.set(True)
+    assert ready_app.request().keep is True and ready_app.request().kept_root == ready_app.kept_root
+    ready_app.remember()
+    assert usersettings.load(ready_app.store_path).keep_bakes is True
+
+
+def test_write_again_is_enabled_only_for_a_kept_level(ready_app, tiny):
+    assert ready_app.write_again_button['text'] == 'Write again'
+    assert str(ready_app.write_again_button['state']) == 'disabled'
+    folder = keep_a_bake(ready_app, tiny)
+    ready_app._inputs_changed()
+    assert ready_app._kept_folder == folder and str(ready_app.write_again_button['state']) == 'normal'
+    ready_app.bsp_var.set('other')
+    ready_app._inputs_changed()
+    assert ready_app._kept_folder is None and str(ready_app.write_again_button['state']) == 'disabled'
+
+
+def test_write_again_runs_with_the_kept_folder(ready_app, tiny, monkeypatch):
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: pytest.fail('asked'))
+    folder = keep_a_bake(ready_app, tiny)
+    ready_app._inputs_changed()
+    ready_app.estimate_state = 'warning'
+    ready_app.memory_label.configure(text='Needs about 99 GB and has 1 GB free.')
+    seen = []
+    ready_app._run_bake = lambda req, emit: (seen.append(req), emit(('done', OUTCOME_DONE)))
+    ready_app.start_write_again()
+    pump_app(ready_app, lambda: not ready_app.busy)
+    assert [req.reuse for req in seen] == [folder]
+
+
+def test_write_again_asks_before_replacing_in_place(ready_app, tiny, monkeypatch):
+    folder = keep_a_bake(ready_app, tiny)
+    ready_app._inputs_changed()
+    ready_app.new_names_var.set(False)
+    asked = []
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *a: asked.append(a) or False)
+    ready_app._run_bake = lambda *a: pytest.fail('started')
+    ready_app.start_write_again()
+    assert asked == [('Replace your tags?', REPLACE_TEXT.format('Backups go in a backups folder next to them.'))]
+    assert not ready_app.busy
+
+
+def test_write_again_needs_no_blender(make_app, tiny):
+    app = make_app(find_blender=lambda remembered=None: None)
+    tags = tiny[0]
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room')
+    folder = keep_a_bake(app, tiny)
+    app._inputs_changed()
+    assert app.blender is None and str(app.bake_button['state']) == 'disabled'
+    assert str(app.write_again_button['state']) == 'normal'
+    assert app.request(write_again=True).reuse == folder
+
+
+def test_keep_and_write_again_are_locked_during_a_bake(ready_app, tiny):
+    keep_a_bake(ready_app, tiny)
+    ready_app._inputs_changed()
+    gate = threading.Event()
+    ready_app._run_bake = lambda req, emit: (gate.wait(5), emit(('done', OUTCOME_DONE)))
+    ready_app.start_bake()
+    assert str(ready_app.keep_check['state']) == 'disabled'
+    assert str(ready_app.write_again_button['state']) == 'disabled'
+    gate.set()
+    pump_app(ready_app, lambda: not ready_app.busy)
+    assert str(ready_app.keep_check['state']) != 'disabled'
+    assert str(ready_app.write_again_button['state']) == 'normal'

@@ -170,3 +170,9 @@ def test_adaptive_sampling_round_trips_and_a_0_2_1_file_loads_it_on(tmp_path):
     old = load(path)
     assert old.adaptive_sampling is True
     assert old.legacy_0_2_1 is True
+
+
+def test_keep_bakes_round_trips_and_defaults_to_false(tmp_path):
+    assert UserSettings().keep_bakes is False
+    save(UserSettings(keep_bakes=True), tmp_path / 's.json')
+    assert load(tmp_path / 's.json').keep_bakes is True

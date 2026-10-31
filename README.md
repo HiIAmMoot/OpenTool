@@ -54,7 +54,7 @@ The quickest way to use OpenTool is the Windows app. It needs nothing installed 
 3. Double-click `OpenTool.exe`.
 4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake. Auto uses the GPU the app found; choose NVIDIA, AMD or CPU only under Device to override that. More options are under Advanced.
 
-With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual.
+With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual. Tick "Keep the bake to write it again" to keep the finished bake in the app's folder; Write again then writes it to the tags again without baking, for example with 32-bit lightmaps or to other tag names.
 
 The first CPU bake on a computer compiles some code once, which takes about a minute.
 

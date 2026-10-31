@@ -9,7 +9,8 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
-from lightmapper import blender_find, gpu
+from lightmapper import blender_find, gpu, kept
+from lightmapper.errors import KeptBakeError
 from lightmapper.memory import free_physical_bytes
 from lightmapper.progress import STAGE_LABELS, fraction
 from . import devices, errors, estimate as estimate_module, examples, form, jobobject, presets, runner, usersettings
@@ -30,7 +31,8 @@ class App:
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
                  log_path: Path | None = None, probe_gpu=gpu.probe_adapters,
                  probe_denoiser=devices.probe_denoiser,
-                 estimate=estimate_module.run_estimate, examples_dir: Path | None = None):
+                 estimate=estimate_module.run_estimate, examples_dir: Path | None = None,
+                 kept_root: Path | None = None):
         self.root = root
         self.window = root.winfo_toplevel()
         self.tk_root = root._root()
@@ -44,6 +46,8 @@ class App:
         self._using_stage_rows = False
         self._estimate = estimate
         self._examples_dir = examples_dir
+        self.kept_root = Path(kept_root) if kept_root is not None else kept.kept_root()
+        self._kept_folder: Path | None = None
         self._example_images = {}
         self._example_hover = None
         self._example_focus = None
@@ -159,6 +163,9 @@ class App:
             command=self._update_new_names_hint,
         )
         self.backups_check.grid(row=0, column=1, sticky='w', padx=(12, 0))
+        self.keep_var = tk.BooleanVar(value=self.settings.keep_bakes)
+        self.keep_check = ttk.Checkbutton(options, text='Keep the bake to write it again', variable=self.keep_var)
+        self.keep_check.grid(row=0, column=2, sticky='w', padx=(12, 0))
         self.new_names_hint = ttk.Label(self.frame)
         self.new_names_hint.grid(row=8, column=0, sticky='w')
         self._update_new_names_hint()
@@ -278,6 +285,8 @@ class App:
         controls.grid(row=13, column=0, sticky='ew', pady=(12, 0))
         self.bake_button = ttk.Button(controls, text='Bake', command=self.start_bake, state='disabled')
         self.bake_button.pack(side='left')
+        self.write_again_button = ttk.Button(controls, text='Write again', command=self.start_write_again, state='disabled')
+        self.write_again_button.pack(side='left', padx=(6, 0))
         self.memory_label = ttk.Label(controls, wraplength=480)
         self.memory_label.pack(side='left', padx=(12, 0))
         self._output_folder: Path | None = None
@@ -412,6 +421,7 @@ class App:
         if self.busy or self._setting_preset:
             return
         self._reset_used_rows()
+        self._refresh_kept_folder()
         inputs = self.estimate_inputs()
         if inputs is None:
             if self._estimate_inputs is not None:
@@ -455,7 +465,17 @@ class App:
         else:
             label.grid_remove()
 
-    def request(self) -> runner.BakeRequest:
+    def _refresh_kept_folder(self):
+        folder = None
+        bsp = self.bsp_var.get()
+        if self._tags is not None and self._scenario and bsp:
+            try:
+                folder = kept.latest(self.kept_root, self._tags, self._scenario, bsp)
+            except Exception as exc:
+                self._write_exception(exc)
+        self._kept_folder = folder
+
+    def request(self, write_again=False) -> runner.BakeRequest:
         if self._tags is None:
             raise ValueError('Pick a tags folder.')
         problem = form.tags_folder_problem(self._tags)
@@ -466,8 +486,20 @@ class App:
         bsp = self.bsp_var.get()
         if not bsp:
             raise ValueError('Pick a BSP.')
-        if self.blender is None:
+        blender_path = ''
+        if write_again:
+            # (a write again runs no Blender; its path only has to match what the kept bake allows to differ)
+            if self._kept_folder is None:
+                raise ValueError('There is no kept bake of this level to write again.')
+            try:
+                kept_blender = kept.read_manifest(self._kept_folder).settings.get('blender', '')
+            except KeptBakeError as exc:
+                raise ValueError(str(exc)) from exc
+            blender_path = str(self.blender.path) if self.blender is not None else str(kept_blender)
+        elif self.blender is None:
             raise ValueError(self.blender_label['text'])
+        else:
+            blender_path = str(self.blender.path)
         if self.preset_var.get() == presets.CUSTOM:
             for field in presets.ADVANCED:
                 if not self.advanced_vars[field].get().strip():
@@ -486,14 +518,16 @@ class App:
             self.advanced_error.configure(text=str(exc))
             raise
         self.advanced_error.configure(text='')
-        settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path),
+        settings = presets.build_settings(self.preset_var.get(), advanced, blender_path,
                                          self._device_value())
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
         settings.adaptive_sampling = self.adaptive_var.get()
         settings.ignore_normals_mode = dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()]
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get(),
-                                  charts=runner.chart_cache_path(self._tags, self._scenario, bsp))
+                                  charts=runner.chart_cache_path(self._tags, self._scenario, bsp),
+                                  keep=self.keep_var.get() and not write_again,
+                                  reuse=self._kept_folder if write_again else None, kept_root=self.kept_root)
 
     def remember(self):
         advanced = {
@@ -508,7 +542,7 @@ class App:
             adaptive_sampling=self.adaptive_var.get(),
             ignore_normals_mode=dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
             advanced_open=self._advanced_open,
-            verbose=self.verbose_var.get(), device=self._device_value(),
+            verbose=self.verbose_var.get(), device=self._device_value(), keep_bakes=self.keep_var.get(),
         )
         usersettings.save(self.settings, self.store_path)
 
@@ -517,6 +551,9 @@ class App:
         valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
                  and not self.busy and self.estimate_state in ('idle', 'fits', 'warning', 'error'))
         self.bake_button.configure(state='normal' if valid else 'disabled')
+        again = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and not self.busy
+                 and self._kept_folder is not None)
+        self.write_again_button.configure(state='normal' if again else 'disabled')
 
     def _update_new_names_hint(self):
         text = ('Saves the lit level as <name>_lit and leaves your tags as they are.'
@@ -891,6 +928,7 @@ class App:
                 self._append_log(f'WARNING: {warning}')
         self._output_folder = outcome.output_folder
         self.open_button.configure(state='normal' if outcome.output_folder else 'disabled')
+        self._refresh_kept_folder()
         self._unlock_form()
 
     def _lock_form(self):
@@ -911,14 +949,21 @@ class App:
         self._update_bake_state()
 
     def start_bake(self):
+        self._start(False)
+
+    def start_write_again(self):
+        self._start(True)
+
+    def _start(self, write_again):
         if self.busy:
             return
         try:
-            request = self.request()
+            request = self.request(write_again)
         except ValueError as exc:
             self.stage_label.configure(text=str(exc), foreground='red')
             return
-        if self.estimate_state == 'warning':
+        # (a write again bakes nothing, so the memory the bake would need does not matter)
+        if self.estimate_state == 'warning' and not write_again:
             message = self.memory_label['text'].removesuffix(estimate_module.RISK_SUFFIX)
             if not messagebox.askyesno(
                     'Not enough memory',
@@ -942,6 +987,7 @@ class App:
         self.close_after_write = False
         self._output_folder = None
         self.bake_button.configure(state='disabled')
+        self.write_again_button.configure(state='disabled')
         self.open_button.configure(state='disabled')
         self._lock_form()
         self.log_box.configure(state='normal')

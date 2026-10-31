@@ -23,6 +23,7 @@ class UserSettings:
     advanced_open: bool = False
     verbose: bool = False
     device: str = 'auto'
+    keep_bakes: bool = False
     # set by load alone, never saved: 0.2.1 wrote no adaptive_sampling, and saved 'enhanced' for every preset
     legacy_0_2_1: bool = field(default=False, compare=False)
 

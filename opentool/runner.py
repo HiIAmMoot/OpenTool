@@ -7,7 +7,8 @@ from pathlib import Path, PureWindowsPath
 import tempfile
 from typing import Callable
 
-from lightmapper import pipeline, report
+from lightmapper import kept, pipeline, report
+from lightmapper.errors import KeptBakeError
 from lightmapper.progress import GLOW_PLANNED, BlenderLogFollower, parse_line
 from lightmapper.settings import Settings
 from lightmapper.tagio.tagfile import read_tag, resolve_reference_path, write_tag
@@ -29,6 +30,9 @@ class BakeRequest:
     verbose: bool = False
     backups: bool = True
     charts: Path | None = None
+    keep: bool = False
+    reuse: Path | None = None
+    kept_root: Path | None = None
 
 
 @dataclass
@@ -72,9 +76,10 @@ class _EventHandler(logging.Handler):
             pass
 
 
-def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True):
+def write_lit_scenario(tags, scenario, bsp, out_bsp, out_scenario, backups=True, source: Path | None = None):
     path = resolve_reference_path(tags, 'scnr', out_scenario)
-    tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
+    # (a kept bake's own copy of the scenario: the tags' one may have gained or lost BSPs since the bake)
+    tag = read_tag(source if source is not None else resolve_reference_path(tags, 'scnr', scenario))
     entries = tag.root.block('structure_bsps')
     for entry in entries:
         _, original_bsp = entry.reference('structure_bsp')
@@ -104,7 +109,8 @@ def summary_parts(summary: dict | None) -> tuple[dict | None, dict | None, list[
 
 
 def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome:
-    work = Path(request.work) if request.work is not None else default_work(request.bsp)
+    reuse = Path(request.reuse) if request.reuse is not None else None
+    work = reuse or (Path(request.work) if request.work is not None else default_work(request.bsp))
     root = logging.getLogger()
     old_level = root.level
     event_handler = None
@@ -161,9 +167,17 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
             logger.exception('Could not report bake progress')
 
     try:
+        if request.keep and reuse is None and request.work is None:
+            kept_base = request.kept_root if request.kept_root is not None else kept.kept_root()
+            try:
+                work = kept.create_work(kept_base, request.tags, request.scenario, request.bsp)
+            except OSError as exc:
+                raise KeptBakeError(f'OpenTool could not make a folder for kept bakes in {kept_base}. '
+                                    'Turn off keeping the bake, or move OpenTool to a folder you can write to.') from exc
         work.mkdir(parents=True, exist_ok=True)
         blender_log, glow_log = work / 'blender.log', work / 'blender_glow.log'
-        for old_log in (blender_log, glow_log):
+        # (a write again runs no Blender: the logs of the bake it comes from stay with the kept bake)
+        for old_log in (blender_log, glow_log) if reuse is None else ():
             try:
                 # a reused work folder would otherwise replay progress from the previous run.
                 old_log.unlink()
@@ -176,14 +190,20 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         root.setLevel(logging.INFO)
         root.addHandler(event_handler)
         root.addHandler(file_handler)
-        out_bsp, out_scenario = new_names(request.scenario, bsp_tag_path(request.tags, request.scenario, request.bsp)) if request.new_names else (None, None)
+        if reuse is not None:
+            input_path = kept.read_manifest(reuse).input_path
+        else:
+            input_path = bsp_tag_path(request.tags, request.scenario, request.bsp)
+        out_bsp, out_scenario = new_names(request.scenario, input_path) if request.new_names else (None, None)
         # keep pipeline reads on the modder's original tags; runner writes the lit scenario so references for other BSPs survive.
         result = pipeline.bake(request.tags, request.scenario, request.bsp, request.settings,
                                out_bsp=out_bsp, out_scenario=None, work=work, progress=progress,
-                               backups=request.backups, charts=request.charts)
+                               backups=request.backups, charts=request.charts, keep=request.keep,
+                               reuse=reuse is not None)
         if out_scenario is not None:
             write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario,
-                               backups=request.backups)
+                               backups=request.backups,
+                               source=kept.kept_dir(reuse) / kept.SCENARIO if reuse is not None else None)
         safe_emit(('stage', 'validate'))
         written_bsp = out_bsp or bsp_tag_path(request.tags, request.scenario, request.bsp)
         bsp_tag = read_tag(resolve_reference_path(request.tags, 'sbsp', written_bsp))
@@ -191,8 +211,14 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         bitmap_tag = read_tag(bitmap_path)
         problems = validate_bsp(bsp_tag, bitmap_tag)
         status = 'problems' if problems else 'done'
-        summary = report.read_summary(work / 'summary.json')
-        lines = report.bake_report(summary) if summary is not None else []
+        summary = report.read_summary(work / ('write_summary.json' if reuse is not None else 'summary.json'))
+        lines = []
+        if summary is not None:
+            try:
+                lines = report.bake_report(summary)
+            except Exception:
+                # (the report is extra: a summary it cannot read must not turn a written bake into a failed one)
+                logger.exception('Could not build the bake report')
         written = (summary or {}).get('written')
         seconds = (summary or {}).get('seconds')
         total = seconds.get('total') if isinstance(seconds, dict) else None
