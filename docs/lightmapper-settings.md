@@ -1,6 +1,6 @@
 # Lightmapper settings
 
-Pass settings to `bake` or `calibrate` as a JSON file with `--settings file.json`; the [lightmapper guide](lightmapper.md#settings) has an example. Keys are the setting names below, and an unknown key is an error. Anything you leave out keeps its default. The settings a bake used are saved in its `summary.json`.
+Pass settings to `bake`, `write` or `calibrate` as a JSON file with `--settings file.json`; the [lightmapper guide](lightmapper.md#settings) has an example. Keys are the setting names below, and an unknown key is an error. Anything you leave out keeps its default. The settings a bake used are saved in its `summary.json` (a write again: `write_summary.json`).
 
 The defaults aim for tool's final-quality lighting, plus light from scenery shaders, which tool does not have. Changing settings trades bake time and memory for sharper or cleaner lighting.
 
@@ -77,7 +77,7 @@ Every successful bake writes `summary.json` into its work folder. Besides the se
 | `memory` | The memory check made before Blender started: `estimate_gb` (what the bake is expected to need) and `free_gb` (free physical memory then, or `null` when it could not be read). |
 | `rays` | The counts the bake used: `samples` per texel, `texel_samples` for chart edges and `vertex_rays` per vertex query. They are the CPU counts for a stage that ran on the CPU. |
 | `vertex_rays_cast` | How many rays the vertex pass cast in all. |
-| `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex` (and `blender_glow` when enhanced normals ran a second Blender run), then `blender_lamp_batches` (only when scenery lights needed extra runs), `vertex_pass`, `glow` (only when that second run happened: the whole stage, `blender_glow` is the Blender run alone), `denoise`, `finish`, `write` and `total`. |
+| `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex`, then `blender_lamp_batches` (only when scenery lights needed extra runs), `vertex_pass`, `glow` (only when that second run happened: the whole stage, `blender_glow` is the Blender run alone), `denoise`, `finish`, `write` and `total`. |
 | `lights` | What the scenery lights came to (`--sources sun` and `emit` runs, which leave scenery lights out, write only `baked` and `batches`): `attached` (lights found on scenery), `dynamic` and `dark` (left out because the light is dynamic or has no radiosity intensity or colour), `missing_light`, `missing_model` and `missing_marker` (left out because the light, model or marker tag could not be found), `placed` (positions found), `outside_bsp` (outside every cluster of the BSP), `baked` (lights in the bake: 0 for `--sources sun` and `emit` runs, which leave scenery lights out, and when `w_light` is 0) and `batches` (Cycles runs the lights took, 1 unless there were many). |
 
 ## write_summary.json

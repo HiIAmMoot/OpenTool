@@ -7,6 +7,7 @@ lightmapper/vendor/xatlas/build/
 
 # bake work folders and local settings
 bake/
+kept bakes/
 *.local.json
 
 .vscode/
