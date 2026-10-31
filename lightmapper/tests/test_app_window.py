@@ -147,6 +147,8 @@ def test_ultra_is_a_preset_button(app):
     assert app.preset_var.get() == 'Ultra'
     assert app.advanced_vars['texels_per_unit'].get() == '8'
     assert app.advanced_vars['page_max'].get() == '2048'
+    assert app.advanced_vars['vertex_rays'].get() == '16384'
+    assert app.ignore_normals_var.get() == 'Enhanced'
 
 
 def test_a_0_2_2_settings_file_keeps_enhanced_on_a_named_preset(tmp_path, make_app):
@@ -260,6 +262,7 @@ def test_blank_custom_field_shows_label_error(app, tiny):
     app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
     pump(app.root, lambda: app.blender is not None)
     app._select_preset('Custom')
+    app.adaptive_var.set(False)
     app.advanced_vars['samples'].set('')
     with pytest.raises(ValueError, match='Rays per texel is empty'):
         app.request()
@@ -1625,3 +1628,93 @@ def test_status_event_sets_the_stage_label(ready_app):
     pump_app(ready_app, lambda: ready_app.stage_label.cget('text') == 'Baking lamp batch 1 of 2')
     gate.set()
     pump_app(ready_app, lambda: not ready_app.busy)
+
+
+def _ready(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags)); app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.blender is not None and app.bsp_box.get() == 'room')
+
+
+def test_advanced_columns_split_equally(app):
+    first = app.advanced_frame.grid_columnconfigure(1)
+    second = app.advanced_frame.grid_columnconfigure(2)
+    assert first['uniform'] and first['uniform'] == second['uniform']
+    assert first['weight'] and first['weight'] == second['weight']
+
+
+def test_advanced_row_order(app):
+    widgets = {name: app.advanced_entries[name] for name in presets.ADVANCED}
+    widgets['adaptive_sampling'] = app.adaptive_check
+    widgets['ignore_normals_mode'] = app.ignore_normals_entry
+    widgets['lightmap_32bit'] = app.lightmap_32bit_check
+    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
+    rows = [widgets[name].grid_info()['row'] for name in app.row_order]
+    assert rows == sorted(set(rows))
+    assert app.advanced_error.grid_info()['row'] > rows[-1]
+    assert set(app.row_hints) == set(app.row_order)
+    assert all(app.row_hints[name].grid_info()['row'] == widgets[name].grid_info()['row'] for name in app.row_order)
+    assert app.page_max_hint is app.row_hints['page_max']
+
+
+def test_enhanced_shows_its_hint(app):
+    app._select_preset('Ultra')
+    assert app.row_hints['ignore_normals_mode']['text'] == presets.ENHANCED_HINT
+    app._select_preset('Normal')
+    assert app.row_hints['ignore_normals_mode']['text'] == ''
+
+
+def test_adaptive_greys_rays_per_texel(app):
+    entry = app.advanced_entries['samples']
+    assert app.adaptive_var.get() is True
+    assert app.adaptive_check['text'] == 'Adaptive sampling'
+    assert str(entry['state']) == 'disabled'
+    assert app.row_hints['samples']['text'] == presets.ADAPTIVE_HINT
+    value = app.advanced_vars['samples'].get()
+    app.adaptive_var.set(False)
+    assert str(entry['state']) == 'normal'
+    assert app.row_hints['samples']['text'] == ''
+    assert app.advanced_vars['samples'].get() == value
+
+
+def test_adaptive_reaches_settings_and_is_remembered(tmp_path, tiny, make_app):
+    a = make_app(store_path=tmp_path / 's.json')
+    _ready(a, tiny)
+    assert a.request().settings.adaptive_sampling is True
+    a.adaptive_var.set(False)
+    assert a.request().settings.adaptive_sampling is False
+    a.remember()
+    b = make_app(store_path=tmp_path / 's.json')
+    assert b.adaptive_var.get() is False
+    assert str(b.advanced_entries['samples']['state']) == 'normal'
+
+
+def test_picking_a_preset_keeps_adaptive_off(app):
+    app.adaptive_var.set(False)
+    app._select_preset('High')
+    assert app.adaptive_var.get() is False
+    assert app.preset_var.get() == 'High'
+    app.adaptive_var.set(True)
+    assert app.preset_var.get() == 'High'
+
+
+def test_form_lock_restores_rays_per_texel_greyed(app):
+    app._lock_form()
+    app._unlock_form()
+    assert str(app.advanced_entries['samples']['state']) == 'disabled'
+    app.adaptive_var.set(False)
+    app._lock_form()
+    app._unlock_form()
+    assert str(app.advanced_entries['samples']['state']) == 'normal'
+
+
+def test_empty_rays_per_texel_under_adaptive_says_how_to_fill_it(app, tiny):
+    _ready(app, tiny)
+    app._select_preset('Custom')
+    app.advanced_vars['samples'].set('')
+    message = 'Rays per texel is empty. Turn off Adaptive sampling to fill it in, or pick a preset.'
+    with pytest.raises(ValueError) as caught:
+        app.request()
+    assert str(caught.value) == message
+    assert app.advanced_error['text'] == message

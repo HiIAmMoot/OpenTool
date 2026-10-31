@@ -35,8 +35,22 @@ DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
 PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
 
 
+ENHANCED_HINT = 'the bake can take up to twice as long, and needs more memory'
+ADAPTIVE_HINT = 'the most rays per texel while adaptive sampling is on'
+
+
 def page_max_hint(value: str) -> str:
     return PAGE_MAX_HINT if value in ('2048', '4096') else ''
+
+
+def row_hint(name: str, value: str, adaptive: bool) -> str:
+    if name == 'page_max':
+        return page_max_hint(value)
+    if name == 'ignore_normals_mode':
+        return ENHANCED_HINT if value == 'Enhanced' else ''
+    if name == 'samples':
+        return ADAPTIVE_HINT if adaptive else ''
+    return ''
 
 
 def format_density(value: float) -> str:

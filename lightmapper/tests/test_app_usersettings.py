@@ -157,3 +157,16 @@ def test_save_removes_temp_file_when_replace_fails(tmp_path, monkeypatch):
     with pytest.raises(OSError, match='replace failed'):
         save(UserSettings(), target)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_adaptive_sampling_round_trips_and_a_0_2_1_file_loads_it_on(tmp_path):
+    path = tmp_path / 's.json'
+    assert UserSettings().adaptive_sampling is True
+    save(UserSettings(adaptive_sampling=False), path)
+    loaded = load(path)
+    assert loaded.adaptive_sampling is False
+    assert loaded.legacy_0_2_1 is False
+    path.write_text(json.dumps({'preset': 'High'}))
+    old = load(path)
+    assert old.adaptive_sampling is True
+    assert old.legacy_0_2_1 is True

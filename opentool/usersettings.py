@@ -17,6 +17,7 @@ class UserSettings:
     new_names: bool = False
     backups: bool = True
     lightmap_32bit: bool = False
+    adaptive_sampling: bool = True
     ignore_normals_mode: str = 'tool'
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
@@ -72,9 +73,9 @@ def save(us: UserSettings, path: Path | None = None) -> None:
     try:
         with tempfile.NamedTemporaryFile('w', encoding='utf-8', dir=target.parent, delete=False) as temp:
             temp_path = Path(temp.name)
-            # adaptive_sampling marks the file as written by 0.2.2 or later (0.2.1 files lack it)
+            # the adaptive_sampling key also marks the file as written by 0.2.2 or later (0.2.1 files lack it)
             saved = {key: value for key, value in asdict(us).items() if key != 'legacy_0_2_1'}
-            temp.write(json.dumps({**saved, 'adaptive_sampling': True}, indent=2))
+            temp.write(json.dumps(saved, indent=2))
         os.replace(temp_path, target)
     finally:
         if temp_path is not None:

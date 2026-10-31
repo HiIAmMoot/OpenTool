@@ -145,3 +145,16 @@ def test_density_up_to_32_is_valid():
 def test_density_values_add_a_custom_entry():
     assert presets.density_values('8') == ['1', '2', '4', '8', '12', '16', '24', '32']
     assert presets.density_values('3') == ['1', '2', '4', '8', '12', '16', '24', '32', '3']
+
+
+def test_row_hint():
+    assert presets.row_hint('page_max', '2048', False) == presets.PAGE_MAX_HINT
+    assert presets.row_hint('page_max', '512', True) == ''
+    assert presets.row_hint('ignore_normals_mode', 'Enhanced', False) == presets.ENHANCED_HINT
+    assert presets.row_hint('ignore_normals_mode', 'Traditional', False) == ''
+    assert presets.row_hint('samples', '1024', True) == presets.ADAPTIVE_HINT
+    assert presets.row_hint('samples', '1024', False) == ''
+    for name in ('texels_per_unit', 'vertex_rays', 'sky_grid', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):
+        assert presets.row_hint(name, 'Enhanced', True) == ''
+    assert presets.ENHANCED_HINT == 'the bake can take up to twice as long, and needs more memory'
+    assert presets.ADAPTIVE_HINT == 'the most rays per texel while adaptive sampling is on'
