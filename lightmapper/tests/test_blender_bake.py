@@ -832,8 +832,8 @@ def test_page_buffer_is_refilled_before_every_bake(tmp_path, blender_exe):
         np.testing.assert_array_equal(rgb[~written], -1)  # not the previous bake's value
 
 
-def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None):
-    s = Settings(samples=8, vertex_rays=1)
+def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None, **settings):
+    s = Settings(samples=8, vertex_rays=1, **settings)
     write_job(tmp_path, build([full_quad()]), [(16, 16)], [], {}, s)
     if clamp_indirect is not None:
         job = json.loads((tmp_path / 'job.json').read_text())
@@ -850,8 +850,15 @@ def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None):
 
 @pytest.mark.blender
 def test_cycles_clamps_are_off(tmp_path, blender_exe):
-    assert run_scene_settings_driver(tmp_path, blender_exe) == {
+    recorded = run_scene_settings_driver(tmp_path, blender_exe)
+    assert {k: recorded[k] for k in ('sample_clamp_direct', 'sample_clamp_indirect')} == {
         'sample_clamp_direct': 0.0, 'sample_clamp_indirect': 0.0}
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('adaptive', [True, False])
+def test_adaptive_sampling_follows_the_setting(tmp_path, blender_exe, adaptive):
+    assert run_scene_settings_driver(tmp_path, blender_exe, adaptive_sampling=adaptive)['use_adaptive_sampling'] is adaptive
 
 
 @pytest.mark.blender

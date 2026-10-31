@@ -44,6 +44,13 @@ def test_shipped_calibration_is_tools_analytic_model(monkeypatch):
     assert (s.radiosity_mode, s.radiosity_scale) == ('coherence', 1.0)
 
 
+def test_adaptive_sampling_defaults_on_and_loads_off(tmp_path):
+    assert Settings().adaptive_sampling is True
+    p = tmp_path / 's.json'
+    p.write_text('{"adaptive_sampling": false}')
+    assert load_settings(p).adaptive_sampling is False
+
+
 def test_none_gives_defaults():
     assert load_settings(None) == Settings()
 

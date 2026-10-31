@@ -1,4 +1,4 @@
-"""Runs inside Blender: runs setup_scene on the job and records the Cycles sample clamps."""
+"""Runs inside Blender: runs setup_scene on the job and records the Cycles sample clamps and adaptive sampling."""
 
 import importlib.util
 import json
@@ -15,7 +15,8 @@ def main():
         job = json.load(handle)
     scene, _ = bake.setup_scene(job)
     clamps = {'sample_clamp_direct': float(scene.cycles.sample_clamp_direct),
-              'sample_clamp_indirect': float(scene.cycles.sample_clamp_indirect)}
+              'sample_clamp_indirect': float(scene.cycles.sample_clamp_indirect),
+              'use_adaptive_sampling': bool(scene.cycles.use_adaptive_sampling)}
     with open(os.path.join(root, 'clamps.json'), 'w') as handle:
         json.dump(clamps, handle)
 

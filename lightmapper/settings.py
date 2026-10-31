@@ -42,6 +42,8 @@ class Settings(ChartSettings):
     bounces: int = 1
     albedo_scale: float = 1.0
     albedo_fallback: float = 0.5
+    # a texel stops once its noise is below Cycles' default threshold, so samples is an upper limit; off bakes every sample
+    adaptive_sampling: bool = True
     denoise: bool = True
     stitch_seams: bool = True
     dither: bool = True

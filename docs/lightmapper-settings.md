@@ -29,6 +29,7 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 | `samples` | 256 | Cycles samples per texel when a GPU bakes the pages. Each texel is baked as a 3 by 3 grid, so each of the nine gets a ninth. |
 | `cpu_samples` | null | Samples per texel when Cycles runs on the CPU, including when `auto` finds no GPU or Cycles falls back mid-bake. `null` follows `samples`; a value must be at least 1. When `texel_samples` is `null`, the edge target follows this count on the CPU. |
 | `texel_samples` | null | Texels at a chart's edge that own few of their nine samples are baked again until they reach about this many. `null` follows `samples`, `0` turns the extra pass off, a number sets the target. |
+| `adaptive_sampling` | true | Cycles adaptive sampling: a texel stops once its noise is below Cycles' default threshold, so `samples` is an upper limit. Off bakes every sample. |
 | `bounces` | 1 | Diffuse bounces. One bounce matches tool's shadow brightness. More bounces give brighter, more physically correct shadows. |
 | `vertex_rays` | 4096 | Rays per unique position and normal query for incident light vectors, plus separate sun-shadow rays, when a GPU runs the vertex pass. Fewer rays bake faster but can show triangle patterns in bump-mapped surfaces. |
 | `cpu_vertex_rays` | null | Rays per query when the vertex pass runs on the CPU, including the fallback after a GPU pass fails. `null` follows `vertex_rays`; a value must be at least 1. |
