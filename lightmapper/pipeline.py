@@ -15,15 +15,17 @@ import json
 import logging
 from pathlib import Path, PureWindowsPath
 import shutil
+import struct
 import tempfile
 from time import perf_counter
+import zipfile
 
 import numpy as np
 
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
-from .errors import BakeError
+from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, point_clusters, read_geometry
 from .formats.lights import SceneLight
@@ -54,14 +56,18 @@ class BakeOutput:
     work: Path
 
 
-def find_bsp(tags: Path, scenario: str, name: str):
-    tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
+def bsp_index(scenario_tag: Tag, name: str) -> tuple[int, str]:
     matches = [(i, entry.reference('structure_bsp')[1])
-               for i, entry in enumerate(tag.root.block('structure_bsps'))
+               for i, entry in enumerate(scenario_tag.root.block('structure_bsps'))
                if PureWindowsPath(entry.reference('structure_bsp')[1]).name == name]
     if len(matches) != 1:
         raise ValueError(f'expected one structure BSP named {name!r}, found {len(matches)}')
-    index, path = matches[0]
+    return matches[0]
+
+
+def find_bsp(tags: Path, scenario: str, name: str):
+    tag = read_tag(resolve_reference_path(tags, 'scnr', scenario))
+    index, path = bsp_index(tag, name)
     return tag, index, path
 
 
@@ -228,14 +234,53 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     return scene, inverse, textures
 
 
+def _chart_settings(s: Settings) -> ChartSettings:
+    return ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
+
+
 def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path) -> list:
-    chart_s = ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
+    chart_s = _chart_settings(s)
     key = chart_cache_key(input_file, chart_s, radiosity)
     pages = load_charts(cache, key)
     if pages is None:
         pages = chart_and_pack(geometry.groups, radiosity, chart_s)
         save_charts(cache, pages, key)
     return pages
+
+
+# a kept file that cannot be read is a damaged kept bake, whatever the reader raised
+_DAMAGED = (OSError, ValueError, KeyError, TypeError, struct.error, zipfile.BadZipFile)
+
+
+def _kept_refusal(work: Path) -> KeptBakeError:
+    return KeptBakeError(f'{work} is not a kept bake OpenTool can write again.')
+
+
+def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
+    folder = kept.kept_dir(work)
+    try:
+        scenario_tag = read_tag(folder / kept.SCENARIO)
+        bsp_tag = read_tag(folder / kept.SOURCE)
+        template = read_tag(folder / kept.TEMPLATE) if manifest.has_template else None
+    except _DAMAGED as error:
+        raise _kept_refusal(work) from error
+    number, path = bsp_index(scenario_tag, name)
+    return scenario_tag, bsp_tag, template, number, path
+
+
+def _kept_baked(work: Path, manifest: kept.Manifest, page_count: int):
+    # everything the finish reads from the kept bake, loaded before anything is written
+    try:
+        with np.load(work / 'scene.npz') as data:
+            scene = Scene(**{f.name: data[f.name] for f in fields(Scene) if f.name in data.files})
+        job = json.loads((work / 'job.json').read_text())
+        glow = kept.load_glow(work) if manifest.glow_device != 'off' else None
+    except _DAMAGED as error:
+        raise _kept_refusal(work) from error
+    result = kept.load_result(work)
+    if len(result.pages) != page_count or (glow is not None and len(glow) != page_count):
+        raise _kept_refusal(work)
+    return scene, job, result, glow
 
 
 @dataclass
@@ -264,12 +309,15 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
-          progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False) -> BakeOutput:
+          progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False,
+          reuse: bool = False) -> BakeOutput:
     if keep and (sources != 'all' or dry_run):
         raise ValueError('a kept bake must be a full bake that writes tags')
     if keep and work is None:
         # (a kept bake in the temp folder is one latest() never finds)
         raise ValueError('a kept bake needs a work folder')
+    if reuse and (keep or sources != 'all' or dry_run or work is None):
+        raise ValueError('a kept bake is written again whole, from its own folder: no keep, dry run or partial sources')
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
@@ -293,9 +341,23 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
 
     stage('probe')
     begin('gather')
-    scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
-    input_file = resolve_reference_path(tags, 'sbsp', input_path)
-    bsp_tag = read_tag(input_file)
+    if reuse:
+        work = Path(work)
+        manifest = kept.read_manifest(work)
+        if (scenario, bsp) != (manifest.scenario, manifest.bsp):
+            raise KeptBakeError('This kept bake is of another level.')
+        differences = kept.setting_differences(manifest.settings, s)
+        if differences:
+            raise KeptBakeError("This bake was kept with other settings, so it can't be written again with these: "
+                                + '; '.join(differences) + '. Bake again, or change them back.')
+        # (the kept copies, not the tags as they are now: the pages belong to the BSP they were baked for)
+        scenario_tag, bsp_tag, template, bsp_number, input_path = _kept_sources(work, manifest, bsp)
+        input_file = kept.kept_dir(work) / kept.SOURCE
+        vertex_device = manifest.vertex_device
+    else:
+        scenario_tag, bsp_number, input_path = find_bsp(tags, scenario, bsp)
+        input_file = resolve_reference_path(tags, 'sbsp', input_path)
+        bsp_tag = read_tag(input_file)
     count = len(bsp_tag.root.block('surfaces'))
     over_cap = count > MAX_BSP_SURFACES
     if over_cap:
@@ -308,114 +370,147 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             / f'{bsp}-{datetime.now():%Y%m%d-%H%M%S}')
     work.mkdir(parents=True, exist_ok=True)
     geometry = read_geometry(bsp_tag)
-    lighting = gather_lighting(scenario_tag, tags, s.sky_grid)
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
-    classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
-    group, path = bsp_tag.root.reference('lightmaps_bitmap')
-    template = read_tag(resolve_reference_path(tags, group, path)) if group == 'bitm' and path else None
+    if not reuse:
+        lighting = gather_lighting(scenario_tag, tags, s.sky_grid)
+        classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
+        group, path = bsp_tag.root.reference('lightmaps_bitmap')
+        template = read_tag(resolve_reference_path(tags, group, path)) if group == 'bitm' and path else None
     stage('gather')
     begin('charts')
-    pages = _charts(input_file, geometry, radiosity, s,
-                    Path(charts) if charts is not None else work / 'charts.npz')
+    if reuse:
+        pages = load_charts(kept.kept_dir(work) / kept.CHARTS, chart_cache_key(input_file, _chart_settings(s), radiosity))
+        if pages is None:
+            # (the key hashes the shaders' flags, so a shader edit since the bake leaves the kept charts not fitting)
+            raise KeptBakeError("The level's shaders changed since this bake was kept, so it can't be written again. "
+                                "Bake it again.")
+    else:
+        pages = _charts(input_file, geometry, radiosity, s,
+                        Path(charts) if charts is not None else work / 'charts.npz')
     stage('charts')
     if keep:
-        # (a folder that held a kept bake must not keep any of it: a bake that fails before its manifest would otherwise
-        # leave the old manifest and result beside the new sources, and an old glow or template would outlive a bake
-        # that has none)
-        (work / kept.MANIFEST).unlink(missing_ok=True)
-        shutil.rmtree(kept.kept_dir(work), ignore_errors=True)
-        kept.kept_dir(work).mkdir()
-        template_file = resolve_reference_path(tags, group, path) if template is not None else None
-        kept.save_sources(work, input_file, template_file, resolve_reference_path(tags, 'scnr', scenario),
-                          Path(charts) if charts is not None else work / 'charts.npz')
+        charts_file = Path(charts) if charts is not None else work / 'charts.npz'
+        spare = work / 'charts-spare.npz'
+        # (a charts file inside the kept folder goes with the folder, before it can be copied back in)
+        if charts_file.resolve().is_relative_to(kept.kept_dir(work).resolve()):
+            shutil.copyfile(charts_file, spare)
+            charts_file = spare
+        try:
+            # (a folder that held a kept bake must not keep any of it: a bake that fails before its manifest would
+            # otherwise leave the old manifest and result beside the new sources, and an old glow or template would
+            # outlive a bake that has none)
+            (work / kept.MANIFEST).unlink(missing_ok=True)
+            shutil.rmtree(kept.kept_dir(work), ignore_errors=True)
+            try:
+                kept.kept_dir(work).mkdir()
+            except FileExistsError as error:
+                raise KeptBakeError(f'The old kept folder {kept.kept_dir(work)} could not be cleared '
+                                    '(a file in it may be open in another program).') from error
+            template_file = resolve_reference_path(tags, group, path) if template is not None else None
+            kept.save_sources(work, input_file, template_file, resolve_reference_path(tags, 'scnr', scenario),
+                              charts_file)
+        finally:
+            spare.unlink(missing_ok=True)
     begin('scene')
-    scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
-                                      s.scenery_emission)
-    check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
-                                     [(p.width, p.height) for p in pages], s.page_max)
-    if not check.fits:
-        logger.warning('%s', check.message)
-        warnings.append(check.message)
-    # (a calibration run bakes no lamps, so it neither reads nor counts them)
-    lights, light_counts = scene_lights(scenario_tag, tags, bsp_index, bsp_tag) if sources == 'all' else ([], {})
-    write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
-              lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
-              vertex_pass='skip', lights=lights)
+    if reuse:
+        scene, job, result, kept_glow = _kept_baked(work, manifest, len(pages))
+        inverse = scene.query_inverse
+        main_job = job
+        batches = 1 + max((light['batch'] for light in main_job['lights']), default=0)
+        check, lights, light_counts = None, [], {}
+    else:
+        scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
+                                          s.scenery_emission)
+        check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
+                                         [(p.width, p.height) for p in pages], s.page_max)
+        if not check.fits:
+            logger.warning('%s', check.message)
+            warnings.append(check.message)
+        # (a calibration run bakes no lamps, so it neither reads nor counts them)
+        lights, light_counts = scene_lights(scenario_tag, tags, bsp_number, bsp_tag) if sources == 'all' else ([], {})
+        write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
+                  lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
+                  vertex_pass='skip', lights=lights)
     stage('scene')
     # (decided here, not at the page assembly, because the app lays its progress bar out for the glow run before the
     # Blender stage starts)
     enhanced = s.ignore_normals_mode == 'enhanced' and scene.tri_ignore_normals is not None and scene.tri_ignore_normals.any()
-    glow_runs = enhanced and s.bounces > 0
-    if glow_runs:
-        begin(GLOW_PLANNED)
-    begin('blender')
-    result = run_blender(work, s)
-    stage('blender')
-    blender_stages = result.stages or {}
-    seconds['blender_start'] = blender_stages.get('start', 0.0)
-    seconds['blender_scene'] = blender_stages.get('scene', 0.0)
-    seconds['page_bake'] = blender_stages.get('pages', 0.0)
-    seconds['blender_vertex'] = blender_stages.get('vertex', 0.0)
-    if choice.cycles and result.device == 'CPU':
-        warning = 'cycles fell back to the CPU'
-        logger.warning('%s', warning)
-        warnings.append(warning)
+    glow_runs = enhanced and s.bounces > 0 and not reuse
+    if not reuse:
+        if glow_runs:
+            begin(GLOW_PLANNED)
+        begin('blender')
+        result = run_blender(work, s)
+        stage('blender')
+        blender_stages = result.stages or {}
+        seconds['blender_start'] = blender_stages.get('start', 0.0)
+        seconds['blender_scene'] = blender_stages.get('scene', 0.0)
+        seconds['page_bake'] = blender_stages.get('pages', 0.0)
+        seconds['blender_vertex'] = blender_stages.get('vertex', 0.0)
+        if choice.cycles and result.device == 'CPU':
+            warning = 'cycles fell back to the CPU'
+            logger.warning('%s', warning)
+            warnings.append(warning)
 
-    main_job = json.loads((work / 'job.json').read_text())
-    batches = 1 + max((light['batch'] for light in main_job['lights']), default=0)
-    if batches > 1:
-        # (the vertex passes read the pages: they must come after every batch, and a pass inside the main run would miss
-        # the bounce of the others)
-        assert main_job['vertex_pass'] == 'skip'
-        for k in range(1, batches):
-            begin(f'lamp batch {k} of {batches - 1}')
-            added, added_diffuse, written = run_blender_lamp_batch(work, s, k)
-            if any(not np.array_equal(a, b) for a, b in zip(written, result.written)):
-                warning = f'lamp batch {k} wrote other texels than the main bake'
+        main_job = json.loads((work / 'job.json').read_text())
+        batches = 1 + max((light['batch'] for light in main_job['lights']), default=0)
+        if batches > 1:
+            # (the vertex passes read the pages: they must come after every batch, and a pass inside the main run would miss
+            # the bounce of the others)
+            assert main_job['vertex_pass'] == 'skip'
+            for k in range(1, batches):
+                begin(f'lamp batch {k} of {batches - 1}')
+                added, added_diffuse, written = run_blender_lamp_batch(work, s, k)
+                if any(not np.array_equal(a, b) for a, b in zip(written, result.written)):
+                    warning = f'lamp batch {k} wrote other texels than the main bake'
+                    logger.warning('%s', warning)
+                    warnings.append(warning)
+                result = replace(result, pages=[a + b for a, b in zip(result.pages, added)],
+                                 diffuse_pages=[a + b for a, b in zip(result.diffuse_pages, added_diffuse)])
+            stage('blender_lamp_batches')
+
+        def cpu_pass():
+            if s.cpu_vertex_backend == 'blender':
+                return run_blender_vertex_only(work, s, result.diffuse_pages)
+            try:
+                vp, info = cpu_vertex_job.run_in_child(work, result.diffuse_pages, s.timeout_s)
+            except cpu_vertex_job.CpuPassError as error:
+                warning = f"compiled CPU vertex pass failed ({error}); falling back to Blender's"
                 logger.warning('%s', warning)
                 warnings.append(warning)
-            result = replace(result, pages=[a + b for a, b in zip(result.pages, added)],
-                             diffuse_pages=[a + b for a, b in zip(result.diffuse_pages, added_diffuse)])
-        stage('blender_lamp_batches')
+                return run_blender_vertex_only(work, s, result.diffuse_pages)
+            seconds['vertex_compile'] = info['compile']
+            logger.info('compiled CPU vertex pass: %s threads, %s layer, %.1f s compile',
+                        info['threads'], info['threading_layer'], info['compile'])
+            return vp
 
-    def cpu_pass():
-        if s.cpu_vertex_backend == 'blender':
-            return run_blender_vertex_only(work, s, result.diffuse_pages)
-        try:
-            vp, info = cpu_vertex_job.run_in_child(work, result.diffuse_pages, s.timeout_s)
-        except cpu_vertex_job.CpuPassError as error:
-            warning = f"compiled CPU vertex pass failed ({error}); falling back to Blender's"
-            logger.warning('%s', warning)
-            warnings.append(warning)
-            return run_blender_vertex_only(work, s, result.diffuse_pages)
-        seconds['vertex_compile'] = info['compile']
-        logger.info('compiled CPU vertex pass: %s threads, %s layer, %.1f s compile',
-                    info['threads'], info['threading_layer'], info['compile'])
-        return vp
-
-    begin('vertex')
-    if choice.adapter:
-        try:
-            vp = vertex_gpu.run_in_child(work, result.diffuse_pages, choice.adapter, s.timeout_s)
-        except (vertex_gpu.GpuPassError, gpu.DeviceError) as error:
-            if choice.required:
-                raise BakeError(f'{choice.vendor} vertex pass failed: {error}') from error
-            warning = f'GPU vertex pass failed ({error}); falling back to the CPU pass'
-            logger.warning('%s', warning)
-            warnings.append(warning)
-            vp = cpu_pass()
+        begin('vertex')
+        if choice.adapter:
+            try:
+                vp = vertex_gpu.run_in_child(work, result.diffuse_pages, choice.adapter, s.timeout_s)
+            except (vertex_gpu.GpuPassError, gpu.DeviceError) as error:
+                if choice.required:
+                    raise BakeError(f'{choice.vendor} vertex pass failed: {error}') from error
+                warning = f'GPU vertex pass failed ({error}); falling back to the CPU pass'
+                logger.warning('%s', warning)
+                warnings.append(warning)
+                vp = cpu_pass()
+            else:
+                vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
+            result = with_vertex_pass(result, vp)
         else:
-            vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
-        result = with_vertex_pass(result, vp)
-    else:
-        result = with_vertex_pass(result, cpu_pass())
-    stage('vertex_pass')
-    if keep:
-        kept.save_result(work, result)
+            result = with_vertex_pass(result, cpu_pass())
+        stage('vertex_pass')
+        if keep:
+            kept.save_result(work, result)
     begin('glow' if glow_runs else 'finish')
-    ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
-    job = json.loads((work / 'job.json').read_text())
+    if reuse:
+        # (the job's ambient is already weighted by w_amb)
+        ambient = {int(k): np.asarray(v) for k, v in job['ambient'].items()}
+    else:
+        ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
+        job = json.loads((work / 'job.json').read_text())
     job_suns = job['suns']
     texel_scene = None
     if enhanced:
@@ -436,7 +531,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
             raw = raw + gathered
             from .raster import flagged_source
-            glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb))
+            if not reuse:
+                glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb))
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
@@ -446,7 +542,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
-    glow_device = 'off'
+    glow_device = manifest.glow_device if reuse else 'off'
+    if reuse and kept_glow is not None:
+        raw_pages = [raw + added for raw, added in zip(raw_pages, kept_glow)]
     if glow_runs:
         # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
         # would come back off them as albedo times emission)
@@ -459,7 +557,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
         stage('glow')
         begin('finish')
-    if s.ignore_normals_mode == 'tool':
+    if reuse:
+        glow_reason = manifest.glow_reason
+    elif s.ignore_normals_mode == 'tool':
         glow_reason = 'Traditional ignore normals'
     elif not enhanced:
         glow_reason = 'no ignore-normals surfaces in this level'
@@ -523,11 +623,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         _write(tags, 'bitm', output_path, bitmap_tag, backups)
         _write(tags, 'sbsp', output_path, bsp_tag, backups)
         if out_scenario is not None:
-            scenario_tag.root.block('structure_bsps')[bsp_index].set_reference('structure_bsp', 'sbsp', output_path)
+            scenario_tag.root.block('structure_bsps')[bsp_number].set_reference('structure_bsp', 'sbsp', output_path)
             _write(tags, 'scnr', out_scenario, scenario_tag, backups)
     stage('write')
     seconds['total'] = perf_counter() - start
-    (work / 'summary.json').write_text(json.dumps({
+    (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
@@ -535,8 +635,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
                     'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
-        'memory': {'estimate_gb': round(check.estimate / memory.GB, 2),
-                   'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},
+        'memory': None if check is None else {
+            'estimate_gb': round(check.estimate / memory.GB, 2),
+            'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},
         'rays': {'samples': result.samples_used, 'texel_samples': result.texel_samples_used,
                  'vertex_rays': s.vertex_rays if vertex_device != 'cpu' else s.resolved_cpu_vertex_rays()},
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))

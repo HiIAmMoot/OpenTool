@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 import pytest
-from lightmapper import cli
+from lightmapper import cli, kept
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -109,3 +109,64 @@ def test_cli_keep_refuses_dry_runs_and_partial_sources(tmp_path, extra):
         cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--keep', *extra])
     assert stopped.value.code == 2
 
+
+
+def kept_manifest(tmp_path, **settings):
+    from dataclasses import asdict
+    from lightmapper.settings import Settings
+    work = tmp_path / 'kept'
+    kept.kept_dir(work).mkdir(parents=True)
+    for name in (kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT):
+        (kept.kept_dir(work) / name).write_bytes(b'x')
+    base = {**asdict(Settings()), **settings, 'dropped_in_a_later_release': 1}
+    kept.write_manifest(work, kept.Manifest(
+        tags=str(tmp_path / 'tags'), scenario='level', bsp='room', input_path='room', has_template=False,
+        vertex_device='cpu', glow_device='off', glow_reason='', settings=base, kept_at='now'))
+    return work
+
+
+def test_cli_write_uses_the_manifest(monkeypatch, tmp_path):
+    work = kept_manifest(tmp_path, lightmap_32bit=True)
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append((args, kwargs)) or type('O', (), {'work': work})())
+    monkeypatch.delenv('HCEEK_TAGS', raising=False)
+    assert cli.main(['write', str(work), '--out-bsp', 'copy']) == 0
+    args, kwargs = calls[0]
+    assert args[:3] == (tmp_path / 'tags', 'level', 'room')
+    assert args[3].lightmap_32bit is True and args[4] == 'copy'
+    assert kwargs['reuse'] is True and args[6] == work
+
+
+def test_cli_write_prints_the_summary_report(monkeypatch, tmp_path, capsys):
+    work = kept_manifest(tmp_path)
+    (work / 'write_summary.json').write_text('{"devices": {"denoise": "off"}, "warnings": ["a warning"]}')
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: type('O', (), {'work': work})())
+    cli.main(['write', str(work)])
+    out = capsys.readouterr().out
+    assert 'a warning' in out and f'Work: {work}' in out
+
+
+def test_cli_write_16bit_overrides(monkeypatch, tmp_path):
+    work = kept_manifest(tmp_path, lightmap_32bit=True)
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append(args[3]) or type('O', (), {'work': work})())
+    cli.main(['write', str(work), '--16bit'])
+    cli.main(['write', str(work), '--32bit'])
+    assert [s.lightmap_32bit for s in calls] == [False, True]
+
+
+def test_cli_write_refusal_exits_1(monkeypatch, tmp_path, capsys):
+    from lightmapper.errors import KeptBakeError
+    work = kept_manifest(tmp_path)
+
+    def refuse(*args, **kwargs):
+        raise KeptBakeError('This kept bake is of another level.')
+
+    monkeypatch.setattr(cli, 'bake', refuse)
+    assert cli.main(['write', str(work)]) == 1
+    assert 'This kept bake is of another level.' in capsys.readouterr().err
+
+
+def test_cli_write_refuses_a_folder_that_is_not_kept(tmp_path, capsys):
+    assert cli.main(['write', str(tmp_path)]) == 1
+    assert 'not a kept bake' in capsys.readouterr().err

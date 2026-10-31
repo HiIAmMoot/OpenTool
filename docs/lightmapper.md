@@ -108,6 +108,22 @@ python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch
 
 This example quadruples the default texel density for sharper shadows. [lightmapper-settings.md](lightmapper-settings.md) lists every setting.
 
+### Write a kept bake again
+
+A bake made with `--keep` can be written to the tags again without baking, for example after a write failed because a tag was open elsewhere, or to switch between 16-bit and 32-bit pages:
+
+```powershell
+python lightmap.py write bake\bloodgulch --32bit
+```
+
+`write <work>` takes the kept bake's folder (the `Work:` line a kept bake printed, or the `--work` folder it was kept in). Neither Blender nor the vertex pass runs, so it takes seconds.
+
+- `--tags` defaults to the tags folder the bake was kept with. The level, its BSP and the scenario written come from the kept copies, not from the tags as they are now.
+- `--settings file.json` and the `--out-bsp`, `--out-scenario` and `--no-backups` options work as for `bake`. Without `--settings`, the settings the bake was kept with are used.
+- `--32bit` or `--16bit` picks the page format. Without either, the format the bake was kept with stands.
+- It refuses, and writes nothing, when the settings differ from the kept bake's in anything that changes the pages (the refusal names them; `lightmap_32bit`, `blender` and `timeout_s` may differ), when the level's shaders changed since the bake was kept, or when the folder is not a kept bake or is damaged. Bake again in those cases.
+- The bake's own `summary.json` stays as it was; the write adds `write_summary.json` (see [lightmapper-settings.md](lightmapper-settings.md#write_summaryjson)).
+
 ### 3. Check the result
 
 ```powershell

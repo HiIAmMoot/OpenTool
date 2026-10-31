@@ -1,20 +1,23 @@
 """Command-line entry points for baking, isolated tag copies, validation, differential and calibration."""
 
 import argparse
-from dataclasses import replace
+from dataclasses import fields, replace
+import json
 import logging
 import os
 from pathlib import Path
+import sys
 
 import numpy as np
 
 from . import kept
 from .calibrate import calibrate
 from .blender_find import find_blender
+from .errors import KeptBakeError
 from .diff import load_pages, paired_samples, bitmap_pages, render_markdown, report
 from .pipeline import bake, copy_tags
 from . import settings as settings_module
-from .settings import load_settings
+from .settings import Settings, load_settings
 from .tagio.tagfile import read_tag, resolve_reference_path
 from .validate import validate_bsp
 
@@ -35,6 +38,18 @@ def _parser():
     check = commands.add_parser('check')
     check.add_argument('-v', '--verbose', action='store_true')
     check.add_argument('--skip', action='append', choices=('blender',), default=[])
+    write = commands.add_parser('write')
+    write.add_argument('-v', '--verbose', action='store_true')
+    write.add_argument('work', type=Path)
+    # (no HCEEK_TAGS default here: the kept bake knows its own tags, and the variable could name others)
+    write.add_argument('--tags', type=Path)
+    write.add_argument('--settings', type=Path)
+    write.add_argument('--out-bsp')
+    write.add_argument('--out-scenario')
+    write.add_argument('--no-backups', action='store_true')
+    wide = write.add_mutually_exclusive_group()
+    wide.add_argument('--32bit', dest='lightmap_32bit', action='store_const', const=True)
+    wide.add_argument('--16bit', dest='lightmap_32bit', action='store_const', const=False)
     for name in ('bake', 'copy', 'validate', 'diff', 'calibrate'):
         command = commands.add_parser(name)
         command.add_argument('-v', '--verbose', action='store_true')
@@ -81,9 +96,11 @@ def main(argv=None) -> int:
             label = 'skip' if detail == SKIPPED else 'ok  ' if ok else 'FAIL'
             print(f'{label} {name}: {detail}')
         return int(not all(ok for _, ok, _ in results))
+    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format='%(levelname)s: %(message)s')
+    if args.command == 'write':
+        return _write(args)
     if args.tags is None:
         parser.error('pass --tags with the editing-kit tags folder, or set HCEEK_TAGS')
-    logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format='%(levelname)s: %(message)s')
     if args.command == 'copy':
         copy_tags(args.tags, args.scenario, args.bsp, args.out_bsp, args.out_scenario,
                   backups=not args.no_backups)
@@ -120,6 +137,33 @@ def main(argv=None) -> int:
     for problem in problems:
         print(problem)
     return int(bool(problems))
+
+
+def _write(args) -> int:
+    try:
+        manifest = kept.read_manifest(args.work)
+        if args.settings is not None:
+            settings = load_settings(args.settings)
+        else:
+            known = {f.name for f in fields(Settings)}
+            settings = Settings(**{k: v for k, v in manifest.settings.items() if k in known})
+        # (without --32bit or --16bit the kept value stands: a 32-bit bake is not silently written 16-bit)
+        if args.lightmap_32bit is not None:
+            settings = replace(settings, lightmap_32bit=args.lightmap_32bit)
+        result = bake(args.tags or Path(manifest.tags), manifest.scenario, manifest.bsp, settings,
+                      args.out_bsp, args.out_scenario, args.work, reuse=True, backups=not args.no_backups)
+    except KeptBakeError as error:
+        print(error, file=sys.stderr)
+        return 1
+    summary_file = args.work / 'write_summary.json'
+    if summary_file.is_file():
+        summary = json.loads(summary_file.read_text())
+        for name, device in summary['devices'].items():
+            print(f'{name}: {device}')
+        for warning in summary['warnings']:
+            print(f'warning: {warning}')
+    print(f'Work: {result.work}')
+    return 0
 
 
 def _diff(args) -> int:

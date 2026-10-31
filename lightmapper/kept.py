@@ -208,8 +208,11 @@ def save_glow(work: Path, pages: list) -> None:
 
 
 def load_glow(work: Path) -> list[np.ndarray]:
-    with np.load(kept_dir(work) / GLOW, allow_pickle=False) as data:
-        return [data[f'page_{i}'] for i in range(len(data.files))]
+    try:
+        with np.load(kept_dir(work) / GLOW, allow_pickle=False) as data:
+            return [data[f'page_{i}'] for i in range(len(data.files))]
+    except (OSError, ValueError, KeyError, zipfile.BadZipFile) as exc:
+        raise _refusal(work) from exc
 
 
 def drop_superseded(work: Path) -> None:
