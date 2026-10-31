@@ -1723,7 +1723,7 @@ def test_empty_rays_per_texel_under_adaptive_says_how_to_fill_it(app, tiny):
 
 def test_hovering_a_row_shows_its_example(app):
     app._on_example_hover('samples')
-    assert app.example_panel.winfo_manager() == 'grid'
+    assert app.example_panel.winfo_manager() == 'place'
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     assert app.example_image_label.cget('image')
 
@@ -1749,3 +1749,40 @@ def test_row_widgets_are_bound_for_examples(app):
     entry = app.advanced_entries['samples']
     assert entry.bind('<Enter>')
     assert entry.bind('<FocusIn>')
+
+
+def test_example_rows_are_the_apps_rows(app):
+    assert examples.EXAMPLE_ROWS == app.row_order
+
+
+def test_showing_an_example_leaves_the_layout_alone(app):
+    app._toggle_advanced()
+    # (a withdrawn window is laid out at 1x1 until it has a size of its own)
+    app.window.geometry('900x700')
+    app.window.update()
+    widgets = [*app.advanced_entries.values(), app.adaptive_check, app.ignore_normals_entry,
+               app.lightmap_32bit_check, *app.row_hints.values()]
+    before = (app.advanced_frame.winfo_reqwidth(), app.advanced_frame.winfo_reqheight(),
+              app.window.winfo_reqwidth(), app.window.winfo_reqheight(),
+              [(widget.winfo_y(), widget.grid_info()) for widget in widgets])
+    app._on_example_hover('ignore_normals_mode')
+    app.window.update_idletasks()
+    after = (app.advanced_frame.winfo_reqwidth(), app.advanced_frame.winfo_reqheight(),
+             app.window.winfo_reqwidth(), app.window.winfo_reqheight(),
+             [(widget.winfo_y(), widget.grid_info()) for widget in widgets])
+    assert after == before
+    assert app.example_panel.winfo_manager() == 'place'
+    assert int(app.example_panel.place_info()['width']) > 1
+    area = app.example_panel.place_info()
+    assert 0 < app._example_shown.width() <= int(area['width'])
+    assert app._example_shown.height() <= int(area['height'])
+    app._on_example_hover(None)
+    assert app.example_panel.winfo_manager() == ''
+
+
+def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
+    (tmp_path / 'samples.png').write_bytes(b'not a png')
+    app = make_app(examples_dir=tmp_path)
+    app._on_example_hover('samples')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert not app.example_image_label.cget('image')

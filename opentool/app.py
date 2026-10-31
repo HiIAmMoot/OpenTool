@@ -217,10 +217,9 @@ class App:
             hint.grid(row=self.row_order.index(name), column=2, sticky='w', padx=(8, 0))
             self.row_hints[name] = hint
         self.page_max_hint = self.row_hints['page_max']
-        # (it covers the descriptions while it shows: both want column 2, and the example says more)
+        # (placed over column 2, never gridded: a grid child would size the rows and the uniform columns, and the window would jump on hover)
         self.example_panel = ttk.Frame(self.advanced_frame)
-        self.example_panel.grid(row=0, column=2, rowspan=len(self.row_order), sticky='nsew', padx=(8, 0))
-        self.example_panel.grid_remove()
+        self._example_shown = None
         self.example_text = ttk.Label(self.example_panel, wraplength=180, justify='left')
         self.example_text.pack(anchor='w')
         self.example_image_label = ttk.Label(self.example_panel)
@@ -578,16 +577,30 @@ class App:
     def _show_example(self):
         name = self._example_hover or self._example_focus
         if name is None:
-            self.example_panel.grid_remove()
+            self.example_panel.place_forget()
             return
-        self.example_text.configure(text=examples.EXAMPLE_TEXT[name])
         if name not in self._example_images:
             path = examples.example_image(name, self._examples_dir)
-            # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
-            self._example_images[name] = tk.PhotoImage(master=self.example_panel, data=path.read_bytes()) if path else None
+            try:
+                # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
+                self._example_images[name] = tk.PhotoImage(master=self.example_panel, data=path.read_bytes()) if path else None
+            except (OSError, tk.TclError):
+                self._example_images[name] = None
+        x, y, width, height = self.advanced_frame.grid_bbox(2, 0, 2, len(self.row_order) - 1)
+        if width < 2:
+            # (a frame not mapped yet is laid out at 1px; its requested width split over the two uniform columns is the share it will get)
+            width = self.advanced_frame.winfo_reqwidth() // 2
+        width = max(width - 8, 1)
+        self.example_text.configure(text=examples.EXAMPLE_TEXT[name], wraplength=width)
+        self.example_panel.place(x=x + 8, y=y, width=width, height=max(height, 1))
+        self.example_panel.update_idletasks()
+        room = max(height - self.example_text.winfo_reqheight() - 4, 1)
         image = self._example_images[name]
+        if image is not None:
+            step = max(-(-image.width() // width), -(-image.height() // room), 1)
+            image = image.subsample(step) if step > 1 else image
+        self._example_shown = image
         self.example_image_label.configure(image=image or '')
-        self.example_panel.grid()
         self.example_panel.lift()
 
     def _update_row_hints(self):
