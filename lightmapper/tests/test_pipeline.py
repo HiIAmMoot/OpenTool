@@ -1817,7 +1817,8 @@ def test_dark_lamps_change_nothing(tiny, monkeypatch):
         np.testing.assert_array_equal(a, b)
     np.testing.assert_array_equal(incident_vectors(plain), incident_vectors(dimmed))
     lights = json.loads((work / 'summary.json').read_text())['lights']
-    assert (lights['attached'], lights['dynamic'], lights['dark'], lights['baked']) == (2, 1, 1, 0)
+    assert (lights['attached'], lights['dynamic'], lights['dark'], lights['baked'],
+            lights['missing_model']) == (2, 1, 1, 0, 0)
 
 
 def test_summary_counts_the_lights(tiny, monkeypatch):
