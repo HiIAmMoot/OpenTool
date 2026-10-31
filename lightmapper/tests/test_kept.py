@@ -100,6 +100,8 @@ def test_latest_is_the_newest_readable_kept_bake(tmp_path):
     make_kept(level / '20260101-000000')
     make_kept(level / '20260102-000000')
     (level / '20260103-000000').mkdir()
+    make_kept(level / '20260104-000000')
+    (level / '20260104-000000' / kept.MANIFEST).write_text('[]')
     assert kept.latest(tmp_path, tmp_path, 's', 'b') == level / '20260102-000000'
 
 
@@ -117,7 +119,7 @@ def test_prune_keeps_only_this_bake(tmp_path):
     assert [p.name for p in level.iterdir()] == ['b']
 
 
-@pytest.mark.parametrize('damage', ['missing', 'garbled', 'version', 'result'])
+@pytest.mark.parametrize('damage', ['missing', 'garbled', 'version', 'result', 'list', 'null'])
 def test_read_manifest_refuses(tmp_path, damage):
     make_kept(tmp_path)
     manifest = tmp_path / kept.MANIFEST
@@ -125,6 +127,8 @@ def test_read_manifest_refuses(tmp_path, damage):
         manifest.unlink()
     elif damage == 'garbled':
         manifest.write_text('{not json')
+    elif damage in ('list', 'null'):
+        manifest.write_text({'list': '[]', 'null': 'null'}[damage])
     elif damage == 'version':
         data = json.loads(manifest.read_text())
         data['version'] = 2
@@ -172,3 +176,30 @@ def test_save_sources_copies_bytes(tmp_path):
     kept.kept_dir(work2).mkdir(parents=True)
     kept.save_sources(work2, src / 'i', None, src / 's', src / 'c')
     assert not (kept.kept_dir(work2) / 'template.bitmap').exists()
+
+
+def damaged_result(tmp_path, drop=None, raw=None):
+    kept.kept_dir(tmp_path).mkdir(parents=True)
+    kept.save_result(tmp_path, full_result())
+    path = kept.kept_dir(tmp_path) / kept.RESULT
+    if raw is not None:
+        path.write_bytes(raw)
+    elif drop:
+        with np.load(path) as data:
+            keep = {k: data[k] for k in data.files if k not in drop}
+        np.savez(path, **keep)
+
+
+@pytest.mark.parametrize('drop, raw', [
+    (('pages_count',), None), (('device',), None), (('written_count',), None), (('pages_1',), None),
+    (None, b'not a zip file'), (None, b'PKtruncated')])
+def test_load_result_refuses_a_damaged_file(tmp_path, drop, raw):
+    damaged_result(tmp_path, drop, raw)
+    with pytest.raises(KeptBakeError, match='is not a kept bake OpenTool can write again'):
+        kept.load_result(tmp_path)
+
+
+def test_load_result_keeps_optional_fields_absent(tmp_path):
+    damaged_result(tmp_path, ('vertex_vector', 'texel_rgb'))
+    loaded = kept.load_result(tmp_path)
+    assert loaded.vertex_vector is None and loaded.texel_rgb is None

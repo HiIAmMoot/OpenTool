@@ -7,6 +7,7 @@ kept/ subfolder carries the sources and results the finish needs, described by k
 import hashlib
 import json
 import shutil
+import zipfile
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
 from pathlib import Path
@@ -74,10 +75,16 @@ def write_manifest(work: Path, manifest: Manifest) -> None:
     (work / MANIFEST).write_text(json.dumps({'version': VERSION, **asdict(manifest)}, indent=1))
 
 
+def _refusal(work: Path) -> KeptBakeError:
+    return KeptBakeError(f'{work} is not a kept bake OpenTool can write again.')
+
+
 def read_manifest(work: Path) -> Manifest:
-    refusal = KeptBakeError(f'{work} is not a kept bake OpenTool can write again.')
+    refusal = _refusal(work)
     try:
         data = json.loads((work / MANIFEST).read_text())
+        if not isinstance(data, dict):
+            raise refusal
         if data.pop('version', None) != VERSION:
             raise refusal
         manifest = Manifest(**data)
@@ -138,14 +145,21 @@ def save_result(work: Path, result: BakeResult) -> None:
 
 
 def load_result(work: Path) -> BakeResult:
+    try:
+        return _load_result(work)
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
+        raise _refusal(work) from exc
+
+
+def _load_result(work: Path) -> BakeResult:
     values = {field.name: None for field in fields(BakeResult) if field.name not in _UNKEPT}
     with np.load(kept_dir(work) / RESULT, allow_pickle=False) as data:
         for field in fields(BakeResult):
             if field.name in _UNKEPT:
                 continue
             if field.name in _LISTS:
-                if f'{field.name}_count' in data:
-                    values[field.name] = [data[f'{field.name}_{i}'] for i in range(int(data[f'{field.name}_count']))]
+                # (pages and written are not optional: a missing count is a damaged file, not an empty list)
+                values[field.name] = [data[f'{field.name}_{i}'] for i in range(int(data[f'{field.name}_count']))]
             elif field.name in data:
                 value = data[field.name]
                 if field.name == 'stages':
@@ -155,6 +169,8 @@ def load_result(work: Path) -> BakeResult:
                 elif field.name in _INTS:
                     value = int(value)
                 values[field.name] = value
+    if values['device'] is None:
+        raise KeyError('device')
     return BakeResult(**values)
 
 

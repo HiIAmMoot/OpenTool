@@ -4,8 +4,8 @@ from pathlib import Path
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
 from lightmapper.charts import CapError
-from lightmapper.gpu import DeviceError
 from lightmapper.errors import KeptBakeError
+from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
 
 
