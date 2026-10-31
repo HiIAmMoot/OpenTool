@@ -692,7 +692,7 @@ def gpu_lamp_run(work, vendor, **kwargs):
 
 @pytest.mark.blender
 @pytest.mark.parametrize('mode', ['tool', 'enhanced'])
-@pytest.mark.parametrize('name', ['plane', 'wall', 'glass', 'cutout', 'own_box', 'flagged', 'spot', 'light_on_a_wall'])
+@pytest.mark.parametrize('name', ['plane', 'wall', 'glass', 'cutout', 'own_box', 'flagged', 'spot', 'light_on_a_wall', 'two_lamps'])
 def test_gpu_matches_numba_on_the_lamp_scenes(tmp_path, vendor, name, mode):
     from lightmapper import vertex_cpu
     tools = lamp_scene_tools()

@@ -901,6 +901,19 @@ def test_point_lamp_bakes_strength_over_pi_d_squared_with_the_cosine(tmp_path):
 
 
 @pytest.mark.blender
+def test_spot_lamp_with_no_falloff_band_is_a_step_at_the_cutoff(tmp_path):
+    # equal angles make the Blender tree use a GREATER_THAN step rather than a map range
+    light = lamp_light((4, 4, 4), 3, (0, 0, -1), cutoff=0.5, falloff=0.5)
+    page, distance, cosine, direction = bake_lamp(tmp_path, light)
+    angle = np.arccos(np.clip(direction @ light.axis, -1, 1))
+    margin = TEXEL / distance
+    inside, outside = angle < 0.5 - margin, angle > 0.5 + margin
+    assert inside.sum() > 20 and outside.sum() > 20
+    assert np.median(page[inside] / (cosine / (np.pi * distance ** 2))[inside]) == pytest.approx(1, rel=0.02)
+    assert page[outside].max() == 0
+
+
+@pytest.mark.blender
 def test_lamp_cutoff_ends_at_reach(tmp_path):
     page, distance, _, _ = bake_lamp(tmp_path, lamp_light((0, 0, 0.25), reach=3))
     assert (page[distance > 3 + TEXEL] == 0).all()
@@ -949,9 +962,9 @@ def bake_owned(tmp_path, receivers, occluders, owners, lights):
     return run_blender(tmp_path, s)
 
 
-def run_lamp_objects_driver(tmp_path, blender_exe, receivers, occluders, owners, lights, edit_job=None):
+def run_lamp_objects_driver(tmp_path, blender_exe, receivers, occluders, owners, lights, edit_job=None, suns=()):
     s = Settings(samples=8, vertex_rays=1)
-    write_job(tmp_path, owned_scene(receivers, occluders, owners), [(16, 16)], [], {}, s, 'all', lights=lights)
+    write_job(tmp_path, owned_scene(receivers, occluders, owners), [(16, 16)], list(suns), {}, s, 'all', lights=lights)
     if edit_job:
         job = json.loads((tmp_path / 'job.json').read_text())
         edit_job(job)
@@ -1005,10 +1018,10 @@ def test_cycles_blocker_set_excludes_only_the_owner(tmp_path):
 
 
 @pytest.mark.blender
-@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
-def test_flagged_receivers_are_not_lit_by_cycles_lamps(tmp_path, mode):
+def test_flagged_receivers_are_not_lit_by_cycles_lamps(tmp_path):
+    # (tool mode only: enhanced mode gives a flagged receiver zero albedo, which would pass whatever the links did)
     receivers = [full_quad(ignore_normals=True), dict(quad=floor(10, 14, 0, 4), page=1)]
-    s = Settings(**{**LAMP_SETTINGS, 'samples': 64, 'ignore_normals_mode': mode})
+    s = Settings(**{**LAMP_SETTINGS, 'samples': 64, 'ignore_normals_mode': 'tool'})
     write_job(tmp_path, build(receivers), [(16, 16), (16, 16)], [], {}, s, 'all',
               lights=[lamp_light((2, 2, 2)), lamp_light((12, 2, 2))])
     result = run_blender(tmp_path, s)
@@ -1046,6 +1059,24 @@ def test_link_budget_guard(tmp_path, blender_exe):
 
 
 @pytest.mark.blender
+@pytest.mark.parametrize('classes, fits', [(62, True), (63, False)])
+def test_write_job_and_blender_agree_on_the_light_side_link_budget(tmp_path, blender_exe, classes, fits):
+    # a receiver per class, each lit by its own sun: one link pattern each, plus the occluders' every-set pattern
+    receivers = [dict(quad=floor(0, 4, 0, 4), cls=n) for n in range(classes)]
+    suns = [sun(classes=(n,)) for n in range(classes)]
+    s = Settings(samples=8, vertex_rays=1)
+    write_job(tmp_path / 'parent', owned_scene(receivers, walls(1), [0]), [(16, 16)], suns, {}, s, 'all',
+              lights=[lamp_light((1, 1, 1))])
+    assert json.loads((tmp_path / 'parent' / 'job.json').read_text())['lights'][0]['batch'] == (0 if fits else 1)
+
+    def main_run(job):
+        job['lights'][0]['batch'] = 0
+    out = run_lamp_objects_driver(tmp_path / 'blender', blender_exe, receivers, walls(1), [0], [lamp_light((1, 1, 1))],
+                                  edit_job=main_run, suns=suns)
+    assert (out['error'] is None) == fits and (fits or '64 light' in out['error'])
+
+
+@pytest.mark.blender
 def test_batched_lamps_equal_one_batch(tmp_path, monkeypatch):
     from lightmapper import blender_job
     boxes = [dict(quad=q) for n in range(3) for q in box_faces((1.5 + 2 * n, 0.5, 0.2), (2.0 + 2 * n, 1.0, 0.7))]
@@ -1073,6 +1104,43 @@ def test_batched_lamps_equal_one_batch(tmp_path, monkeypatch):
     assert batched.mean() == pytest.approx(one.mean(), rel=0.02)
     noise = (one - other).std()
     assert (np.abs(batched - one) < 3 * noise).mean() > 0.97
+
+
+def split_lamp_bakes(tmp_path, monkeypatch, pane):
+    # one bake with the lamp in the main run, and the same lamp run as batch 1 of a main run that has none
+    from lightmapper import blender_job
+    s = Settings(**{**LAMP_SETTINGS, 'samples': 256})
+    scene = owned_scene([dict(quad=floor(0, LAMP_SIDE, 0, LAMP_SIDE))], pane, [-1] * len(pane))
+    lights = [lamp_light((4, 4, 3))]
+
+    def write(name, split):
+        with monkeypatch.context() as patch:
+            if split:
+                patch.setattr(blender_job, 'lamp_batches', lambda owners, room: [[], list(dict.fromkeys(owners))])
+            write_job(tmp_path / name, scene, [(LAMP_PAGE, LAMP_PAGE)], [], {}, s, 'all', lights=lights)
+        return tmp_path / name
+
+    whole = run_blender(write('whole', False), s).pages[0]
+    main = run_blender(write('split', True), s)
+    batch = blender_job.run_blender_lamp_batch(tmp_path / 'split', s, 1)[0][0]
+    return whole, main.pages[0], batch
+
+
+@pytest.mark.blender
+def test_a_lamp_batch_adds_the_lamp_only_not_the_emission_again(tmp_path, monkeypatch):
+    glow = [dict(quad=floor(-1, LAMP_SIDE + 1, -1, LAMP_SIDE + 1, z=5.0, up=False), casts=False,
+                 emission=(0.5, 0.5, 0.5))]
+    whole, main, batch = split_lamp_bakes(tmp_path, monkeypatch, glow)
+    assert main.mean() > 0.1 * whole.mean()
+    assert (main + batch).mean() == pytest.approx(whole.mean(), rel=0.03)
+
+
+@pytest.mark.blender
+def test_a_lamp_batch_takes_its_own_noise_seed(tmp_path, monkeypatch):
+    whole, _, batch = split_lamp_bakes(tmp_path, monkeypatch, [])
+    # (the same lamp on the same scene, so only the seed tells the two bakes' noise apart)
+    assert not np.array_equal(whole, batch)
+    assert batch.mean() == pytest.approx(whole.mean(), rel=0.03)
 
 
 @pytest.mark.blender

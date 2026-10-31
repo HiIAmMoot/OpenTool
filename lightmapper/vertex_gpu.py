@@ -476,9 +476,10 @@ def run_vertex_pass(scene, job, textures, pages, device):
     def on_lamp(lamp, carried, escaped):
         nonlocal lamp_rays
         rows = np.flatnonzero(escaped)
-        # (a block holds one light and distinct points, so the fancy-index += never meets a point twice)
+        # (a block holds one light and distinct points, so the fancy-index += never meets a point twice, and the light's
+        # strength is one row)
         point = lamp.point[rows]
-        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3) * carried[rows]
+        strength = np.float64(lights[int(lamp.light[0])]['strength']) * carried[rows]
         weight = (strength @ LUMA) * lamp.factor[rows]
         vector[point] += weight[:, None] * lamp.direction[rows]
         irradiance[point] += weight
@@ -530,7 +531,7 @@ def _gather_texels(scene, job, textures, pages, device):
     def on_lamp(lamp, carried, escaped):
         nonlocal lamp_rays
         rows = np.flatnonzero(escaped)
-        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3)
+        strength = np.float64(lights[int(lamp.light[0])]['strength'])
         rgb[lamp.point[rows]] += strength * carried[rows] * lamp.factor[rows, None] / np.pi
         lamp_rays += int((lamp.limit > 0).sum())
     if len(query) or lights:

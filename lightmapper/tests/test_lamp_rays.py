@@ -1,3 +1,6 @@
+import ast
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -23,6 +26,36 @@ def joined(blocks):
             ('point', 'light', 'origin', 'direction', 'limit', 'skip', 'factor')}
 
 
+def definitions(path, names):
+    found = {}
+    for node in ast.parse(Path(path).read_text(encoding='utf-8')).body:
+        if getattr(node, 'name', None) in names:
+            found[node.name] = ast.dump(node)
+    return found
+
+
+def test_blender_carries_an_exact_copy_of_the_lamp_rule():
+    # bake.py cannot import the package, so only this keeps its lamp rays from drifting from the GPU host's
+    import lightmapper
+    from lightmapper import vertex_gpu
+    names = {'_unit', 'LampRays', '_lamp_factor', 'iter_lamp_rays'}
+    bake = definitions(Path(lightmapper.__file__).parent / 'blender' / 'bake.py', names)
+    host = definitions(vertex_gpu.__file__, names)
+    assert set(bake) == set(host) == names
+    for name in names:
+        assert bake[name] == host[name], name
+
+
+@pytest.mark.parametrize('chunk', [10 ** 9, 2])
+def test_a_block_holds_one_light_and_each_point_once(chunk):
+    # the passes add a block's rows with a fancy-indexed +=, which drops a point met twice
+    points = [(x, 0, 0) for x in (0.0, 1.0, 2.0, 3.0, 4.0)]
+    blocks = rays(points, [lamp((0, 0, 2)), lamp((1, 0, 3)), lamp((5, 0, 1))], chunk=chunk)
+    assert len({int(b.light[0]) for b in blocks}) == 3
+    for block in blocks:
+        assert len(set(block.light.tolist())) == 1 and len(set(block.point.tolist())) == len(block.point)
+
+
 def test_point_factor_is_cosine_over_distance_squared():
     x = np.array([0.0, 1.0, 3.0])
     got = joined(rays([(v, 0, 0) for v in x], [lamp((0, 0, 2))]))
@@ -42,6 +75,26 @@ def test_spot_factor_uses_tools_ramp():
         d = 1 / np.cos(a)
         assert factor == pytest.approx(np.cos(a) * ramp(np.cos(a), cutoff, falloff) / d ** 2)
     assert set(got['point']) == {0, 1, 2}
+
+
+def test_spot_ramp_is_linear_in_the_cosine_between_cutoff_and_falloff():
+    light = lamp((0, 0, 1), kind=3, cos_cutoff=0.5, cos_falloff=0.9)
+    # a height of 1 makes cos(angle) the cosine to the axis and 1 / d^2 its square
+    cosines = np.array([0.6, 0.7, 0.8])
+    got = joined(rays([(np.tan(np.arccos(c)), 0, 0) for c in cosines], [light]))
+    np.testing.assert_allclose(got['factor'] / cosines ** 3, (cosines - 0.5) / 0.4)
+
+
+def test_light_exactly_at_reach_makes_no_row_and_just_inside_does():
+    assert rays([(0, 0, 0)], [lamp((0, 0, 2), reach=2.0)]) == []
+    assert len(rays([(0, 0, 0)], [lamp((0, 0, 2), reach=2.0001)])) == 1
+
+
+def test_a_falloff_not_wider_than_the_cutoff_leaves_a_step_at_the_cutoff():
+    light = lamp((0, 0, 1), kind=3, cos_cutoff=0.8, cos_falloff=0.7)
+    got = joined(rays([(np.tan(np.arccos(c)), 0, 0) for c in (0.79, 0.81)], [light]))
+    assert got['point'].tolist() == [1]
+    assert got['factor'][0] == pytest.approx(0.81 ** 3)
 
 
 def test_flagged_point_takes_a_light_from_either_side():

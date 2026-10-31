@@ -2,7 +2,7 @@
 VERTEX_PASS.SLANG
 
 The vertex pass's two ray-query kernels: gather (the luminance of what each cosine-weighted ray of a query sees)
-and shadow (the sun and edge rays, with the tint they carry through the panes they pass). Both walk the
+and shadow (the sun, edge and lamp rays, with the tint they carry through the panes they pass). Both walk the
 pass-through loop of blender/bake.py's VertexPass.cast over one acceleration structure of the receivers, then the
 occluders, so a triangle id means the same here as there. GROUP_SIZE, RAY_LENGTH, RAY_EPSILON, PASS_LIMIT, SKIP_LIMIT
 and LUMA arrive as defines from vertex_gpu.py.

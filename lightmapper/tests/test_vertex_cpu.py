@@ -1073,6 +1073,8 @@ def test_child_warm_up_compiles_every_kernel_on_one_triangle(monkeypatch):
     vertex_cpu.warm_up()
     assert seen and all(shape == (1, 3, 3) for shape in seen)
     assert not [kernel.py_func.__name__ for kernel in kernels if not kernel.nopython_signatures]
+    # (sun rays carry no skip array and lamp rays do: one signature each, or the first lamp ray pays a compile)
+    assert len(vertex_cpu._shadow.nopython_signatures) == 2
 
 
 # ---------- scenery lights (the lamp_case scenes are shared with the GPU and Blender passes' lamp tests)
@@ -1109,6 +1111,8 @@ def lamp_case(name, **extra):
                         lights=[light]),
         'spot': dict(queries=[((np.tan(a), 0, 0), UP, False) for a in np.arccos([1.0, .9, .75, .55, .4])],
                      lights=[lamp((0, 0, 1), kind=3, cos_cutoff=.5, cos_falloff=.8)]),
+        'two_lamps': dict(queries=[((0, 0, 0), UP, False), ((0, 0, 0), UP, True)],
+                          lights=[light, lamp((0, 0, 3), rgb=(PI, 0, 0))]),
         'light_on_a_wall': dict(occluders=[(wall_x(2, -3, 3, -1, 3.5), 3, {})], queries=[((0, 0, 0), UP, False)],
                                 lights=[lamp((2.01, 0, 1), owner=3)]),
     }
@@ -1149,6 +1153,14 @@ def test_point_light_on_a_plane_gives_cosine_over_distance_squared(tmp_path):
     toward = np.float64([[0, 0, 2], [-1, 0, 2], [-3, 0, 2]])
     toward /= np.linalg.norm(toward, axis=1)[:, None]
     np.testing.assert_allclose(result.vector, want[:, None] * toward, rtol=1e-4, atol=1e-7)
+
+
+def test_two_lamps_lighting_one_point_add_up(tmp_path):
+    result = run_lamp_case(tmp_path, 'two_lamps')
+    # the second lamp is red only: the irradiance takes its luma
+    want = PI / 4 + PI / 9 * vertex_cpu.LUMA[0]
+    np.testing.assert_allclose(result.irradiance, [want, want], rtol=1e-5)
+    np.testing.assert_allclose(result.light_flat[1], np.float64([1 / 4 + 1 / 9, 1 / 4, 1 / 4]), rtol=1e-5)
 
 
 def test_spot_light_lights_only_its_cone_with_tools_ramp(tmp_path):

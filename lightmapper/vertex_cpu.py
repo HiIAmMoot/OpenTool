@@ -593,7 +593,9 @@ def gather_texels(scene, job, textures, pages):
     lights = job.get('lights') or []
     for lamp, carried, escaped in _lamp_batches(cs.arrays(), bv, pos, n, np.ones(count, bool), usable, lights):
         rows = np.flatnonzero(escaped)
-        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3)
+        # (a block holds one light and distinct points, so the fancy-index += never meets a point twice, and the light's
+        # strength is one row)
+        strength = np.float64(lights[int(lamp.light[0])]['strength'])
         rgb[lamp.point[rows]] += strength * carried[rows] * lamp.factor[rows, None] / np.pi
         shadow_rays += int((lamp.limit > 0).sum())
         del lamp, carried, escaped, rows, strength
@@ -691,8 +693,9 @@ def run_vertex_pass(scene: dict, job: dict, textures: list, pages: list) -> Vert
     light_flat = np.zeros((queries, 3)) if sun_throughput is not None else None
     for lamp, carried, escaped in _lamp_batches(sc, bv, pos, n, ignore_normals, usable, lights):
         rows = np.flatnonzero(escaped)
+        # (one light and distinct points per block, as in the other passes)
         point = lamp.point[rows]
-        strength = np.float64([lights[k]['strength'] for k in lamp.light[rows]]).reshape(-1, 3) * carried[rows]
+        strength = np.float64(lights[int(lamp.light[0])]['strength']) * carried[rows]
         weight = (strength @ LUMA) * lamp.factor[rows]
         vector[point] += weight[:, None] * lamp.direction[rows]
         irradiance[point] += weight

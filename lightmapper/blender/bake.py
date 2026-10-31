@@ -891,8 +891,8 @@ def iter_lamp_rays(points, normals, flagged, usable, lights, chunk=LAMP_RAY_CHUN
 
 class VertexPass:
     """Incident radiosity at the query points as tool builds it: cosine-weighted rays over the receivers and occluders
-    (one triangle id space, receivers first), shaded from the baked pages, a shadow ray per reaching sun, and the
-    class ambient as one flat term along the normal."""
+    (one triangle id space, receivers first), shaded from the baked pages, a shadow ray per reaching sun and lamp,
+    and the class ambient as one flat term along the normal."""
 
     def __init__(self, scene, job, textures, pages):
         n_recv_vertices = len(scene['positions'])
