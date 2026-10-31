@@ -225,7 +225,9 @@ class App:
         self.example_image_label = ttk.Label(self.example_panel)
         self.example_image_label.pack(anchor='w', pady=(4, 0))
         # (the area is read from the grid at show time: a resize or maximise moves column 2 under a panel that stays up)
-        self.advanced_frame.bind('<Configure>', lambda _event: self._show_example() if self.example_panel.winfo_manager() == 'place' else None, add='+')
+        # (and after the grid has arranged its slaves, which runs idle after the frame's own Configure)
+        self._example_refit = None
+        self.advanced_frame.bind('<Configure>', lambda _event: self._refit_example_later(), add='+')
         controls = {**self.advanced_entries, 'adaptive_sampling': self.adaptive_check,
                     'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check}
         for name in self.row_order:
@@ -575,6 +577,15 @@ class App:
     def _on_example_focus(self, name: str | None):
         self._example_focus = name
         self._show_example()
+
+    def _refit_example_later(self):
+        if self._example_refit is None:
+            self._example_refit = self.advanced_frame.after_idle(self._refit_example)
+
+    def _refit_example(self):
+        self._example_refit = None
+        if self.example_panel.winfo_manager() == 'place':
+            self._show_example()
 
     def _show_example(self):
         name = self._example_hover or self._example_focus

@@ -1788,16 +1788,24 @@ def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
     assert not app.example_image_label.cget('image')
 
 
-def test_the_example_panel_follows_a_resize(app, monkeypatch):
+def test_the_example_panel_follows_a_resize(app):
+    app.window.overrideredirect(True)
+    app.window.geometry('900x700+-3000+-3000')
+    app.window.deiconify()
+    app.window.update()
     app._toggle_advanced()
+    app.window.update()
     app._on_example_focus('samples')
     app.window.update()
-    monkeypatch.setattr(app.advanced_frame, 'grid_bbox', lambda *_args: (700, 0, 500, 230))
-    app.advanced_frame.event_generate('<Configure>')
-    app.window.update()
-    info = app.example_panel.place_info()
-    assert (int(info['x']), int(info['width'])) == (708, 492)
-    assert app.example_panel.winfo_manager() == 'place'
+    for size in ('1300x700', '300x700', '1300x700'):
+        app.window.geometry(size)
+        app.window.update()
+        x, _y, width, height = app.advanced_frame.grid_bbox(2, 0, 2, len(app.row_order) - 1)
+        info = app.example_panel.place_info()
+        assert (int(info['x']), int(info['width'])) == (x + 8, width - 8)
+        assert int(info['x']) + int(info['width']) <= app.advanced_frame.winfo_width()
+        assert 0 < app._example_shown.width() <= int(info['width'])
+        assert app._example_shown.height() <= int(info['height'])
 
 
 def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
