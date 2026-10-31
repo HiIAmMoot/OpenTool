@@ -7,6 +7,7 @@ import pytest
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
 from lightmapper.charts import CapError
+from lightmapper.errors import KeptBakeError
 from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
 from opentool.errors import explain
@@ -97,3 +98,7 @@ def test_strict_oidn_gpu_failures_say_what_to_pick():
                  'OIDN CUDA startup timed out after 60 s'):
         assert explain(RuntimeError(text)) == (
             'The denoiser could not start on the GPU. Pick Auto to fall back to the CPU, or CPU only.')
+
+
+def test_kept_bake_errors_are_shown_as_written():
+    assert explain(KeptBakeError('x')) == 'x'

@@ -28,6 +28,13 @@ def bundle_dir() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
+# the folder the user unzipped OpenTool into: the one place the app may keep files that outlive a bake
+def app_dir() -> Path:
+    if is_frozen():
+        return Path(sys.executable).parent
+    return bundle_dir()
+
+
 def cli_executable() -> Path:
     return Path(sys.executable).with_name('OpenTool-cli.exe')
 

@@ -82,3 +82,15 @@ def test_child_command_when_frozen_runs_the_cpu_vertex_flag(monkeypatch, tmp_pat
 def test_every_layout_is_a_required_resource():
     from lightmapper.tagio.layout import _GROUP_FILES
     assert {f'lightmapper/tagio/layouts/{name}.xml' for name in _GROUP_FILES.values()} <= set(resources.REQUIRED)
+
+
+def test_app_dir_is_the_repo_in_source_mode(monkeypatch):
+    monkeypatch.delattr(sys, 'frozen', raising=False)
+    assert frozen.app_dir() == frozen.bundle_dir() and (frozen.app_dir() / 'lightmap.py').is_file()
+
+
+def test_app_dir_when_frozen_is_the_exe_folder(monkeypatch, tmp_path):
+    monkeypatch.setattr(sys, 'frozen', True, raising=False)
+    monkeypatch.setattr(sys, '_MEIPASS', str(tmp_path / 'bundle'), raising=False)
+    monkeypatch.setattr(sys, 'executable', str(tmp_path / 'OpenTool.exe'))
+    assert frozen.app_dir() == tmp_path

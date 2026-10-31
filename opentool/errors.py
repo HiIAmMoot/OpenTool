@@ -5,11 +5,12 @@ from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
 from lightmapper.charts import CapError
 from lightmapper.gpu import DeviceError
+from lightmapper.errors import KeptBakeError
 from lightmapper.pipeline import BakeError
 
 
 def explain(exc: BaseException, work: Path | None = None) -> str:
-    if isinstance(exc, BlenderNotFound):
+    if isinstance(exc, (BlenderNotFound, KeptBakeError)):
         return str(exc)
     if isinstance(exc, BlenderOutOfMemory):
         log_location = f'blender.log in {work}' if work is not None else "blender.log in the bake's work folder"
