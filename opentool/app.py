@@ -74,7 +74,7 @@ class App:
         self._build()
         self._restore()
         for value in (*self.advanced_vars.values(), self.preset_var, self.device_var, self.bsp_var,
-                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.verbose_var):
+                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.ignore_normals_var, self.verbose_var):
             value.trace_add('write', lambda *_args: self._reset_used_rows())
         self._set_blender_status('Looking for Blender…')
         self._discover_blender()
@@ -191,13 +191,12 @@ class App:
         self.lightmap_32bit_check = ttk.Checkbutton(
             self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
         self.lightmap_32bit_check.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w', pady=2)
-        self.ignore_normals_var = tk.StringVar(value={
-            'enhanced': 'Enhanced', 'tool': 'Tool',
-        }.get(self.settings.ignore_normals_mode, 'Enhanced'))
+        self.ignore_normals_var = tk.StringVar(
+            value={value: label for label, value in presets.IGNORE_NORMALS}[self.settings.ignore_normals_mode])
         ttk.Label(self.advanced_frame, text='Ignore-normals lighting').grid(
             row=len(presets.ADVANCED) + 1, column=0, sticky='w', padx=(0, 8), pady=2)
         self.ignore_normals_entry = ttk.Combobox(
-            self.advanced_frame, values=('Enhanced', 'Tool'), textvariable=self.ignore_normals_var,
+            self.advanced_frame, values=tuple(label for label, _ in presets.IGNORE_NORMALS), textvariable=self.ignore_normals_var,
             state='readonly')
         self.ignore_normals_entry.grid(row=len(presets.ADVANCED) + 1, column=1, sticky='ew', pady=2)
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
@@ -263,8 +262,6 @@ class App:
                     except (TypeError, ValueError):
                         pass
                 self.advanced_vars[name].set(value)
-        self.ignore_normals_var.set({'enhanced': 'Enhanced', 'tool': 'Tool'}.get(
-            self.settings.ignore_normals_mode, 'Enhanced'))
         if self.settings.advanced_open:
             self._toggle_advanced()
         if not self.settings.tags:
@@ -439,7 +436,7 @@ class App:
         settings = presets.build_settings(self.preset_var.get(), advanced, str(self.blender.path),
                                          self._device_value())
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
-        settings.ignore_normals_mode = {'Enhanced': 'enhanced', 'Tool': 'tool'}[self.ignore_normals_var.get()]
+        settings.ignore_normals_mode = dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()]
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get(),
                                   charts=runner.chart_cache_path(self._tags, self._scenario, bsp))
@@ -454,7 +451,7 @@ class App:
             blender=str(self.blender.path) if self.blender else self.settings.blender,
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
             backups=self.backups_var.get(), lightmap_32bit=self.lightmap_32bit_var.get(),
-            ignore_normals_mode={'Enhanced': 'enhanced', 'Tool': 'tool'}[self.ignore_normals_var.get()],
+            ignore_normals_mode=dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(), device=self._device_value(),
         )

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .presets import ADVANCED, CUSTOM, DEVICES, PRESET_NAMES
+from .presets import ADVANCED, CUSTOM, DEVICES, IGNORE_NORMALS, PRESET_NAMES
 
 
 @dataclass
@@ -55,6 +55,8 @@ def load(path: Path | None = None) -> UserSettings:
         values['preset'] = defaults.preset
     if values.get('device', defaults.device) not in tuple(value for _, value in DEVICES):
         values['device'] = defaults.device
+    if values.get('ignore_normals_mode', defaults.ignore_normals_mode) not in tuple(value for _, value in IGNORE_NORMALS):
+        values['ignore_normals_mode'] = defaults.ignore_normals_mode
     return UserSettings(**values)
 
 

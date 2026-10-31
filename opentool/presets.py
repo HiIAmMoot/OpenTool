@@ -13,6 +13,7 @@ CPU_PRESETS: dict[str, dict] = {
     'High': {'samples': 512, 'vertex_rays': 4096},
 }
 DEVICES: tuple[tuple[str, str], ...] = (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
+IGNORE_NORMALS: tuple[tuple[str, str], ...] = (('Enhanced', 'enhanced'), ('Traditional', 'tool'))
 GPU_NOTE = 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
 PRESET_NAMES = ('Draft', 'Normal', 'High')
 CUSTOM = 'Custom'

@@ -101,7 +101,7 @@ def test_first_screen_widgets(app):
     assert app.backups_check['text'] == 'Keep backups'
     assert app.lightmap_32bit_check.winfo_parent() == str(app.advanced_frame)
     assert app.ignore_normals_entry.winfo_parent() == str(app.advanced_frame)
-    assert tuple(app.ignore_normals_entry['values']) == ('Enhanced', 'Tool')
+    assert tuple(app.ignore_normals_entry['values']) == ('Enhanced', 'Traditional')
     assert str(app.ignore_normals_entry['state']) == 'readonly'
     assert app.ignore_normals_var.get() == 'Enhanced'
     assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
@@ -114,16 +114,16 @@ def test_first_screen_widgets(app):
 
 
 def test_ignore_normals_setting_is_independent_of_quality_preset(app):
-    app.ignore_normals_var.set('Tool')
+    app.ignore_normals_var.set('Traditional')
     assert app.preset_var.get() == 'Normal'
     app.lightmap_32bit_var.set(True)
     assert app.preset_var.get() == 'Normal'
     app._select_preset('Draft')
-    assert app.ignore_normals_var.get() == 'Tool'
+    assert app.ignore_normals_var.get() == 'Traditional'
     assert app.lightmap_32bit_var.get() is True
 
 
-@pytest.mark.parametrize('choice, mode', [('Enhanced', 'enhanced'), ('Tool', 'tool')])
+@pytest.mark.parametrize('choice, mode', [('Enhanced', 'enhanced'), ('Traditional', 'tool')])
 def test_ignore_normals_and_32bit_values_reach_bake_settings(app, tiny, choice, mode):
     tags, *_ = tiny
     (tags / 'globals').mkdir()
@@ -182,14 +182,14 @@ def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
     app = make_app(store_path=store)
     app._select_preset('Draft')
     app.advanced_vars['texels_per_unit'].set('3')
-    app.ignore_normals_var.set('Tool')
+    app.ignore_normals_var.set('Traditional')
     app.lightmap_32bit_var.set(True)
     assert app.preset_var.get() == 'Custom'
     app.remember()
     restored = make_app(store_path=store)
     assert restored.preset_var.get() == 'Custom'
     assert restored.advanced_vars['texels_per_unit'].get() == '3'
-    assert restored.ignore_normals_var.get() == 'Tool'
+    assert restored.ignore_normals_var.get() == 'Traditional'
     assert restored.lightmap_32bit_var.get() is True
 
 
@@ -931,6 +931,13 @@ def test_new_bake_resets_stage_rows_to_prediction(ready_app):
     ready_app._run_bake = lambda req, emit: None
     ready_app.start_bake()
     assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU']
+
+
+def test_changing_ignore_normals_after_a_bake_shows_the_prediction_again(ready_app):
+    ready_app._bake_done(cpu_outcome())
+    assert ready_app.stage_rows[0][1]['text'] == 'CPU'
+    ready_app.ignore_normals_var.set('Traditional')
+    assert ready_app.stage_rows[0][1]['text'] == 'GPU'
 
 
 def test_failed_bake_without_devices_resets_stage_rows(ready_app):

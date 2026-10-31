@@ -113,7 +113,7 @@ def _vertex_sums(our_bsp, work: Path):
 def calibrate(tags: Path, scenario: str, bsp: str, work: Path, s: Settings | None = None) -> dict:
     tags, work = Path(tags), Path(work)
     work.mkdir(parents=True, exist_ok=True)
-    # the fit compares against the tool's bake, regardless of the user's preview mode
+    # the fit compares against tool's own bake, so flagged surfaces must be lit as tool lights them
     unit = replace(s or Settings(), w_sun=1.0, w_emit=1.0, w_amb=1.0,
                    radiosity_mode='coherence', radiosity_scale=1.0, ignore_normals_mode='tool')
     charts = work / 'charts.npz'

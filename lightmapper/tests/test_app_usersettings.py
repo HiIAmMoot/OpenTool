@@ -27,6 +27,25 @@ def test_unknown_device_falls_back_to_auto(tmp_path, value):
     assert load(path).device == 'auto'
 
 
+def test_settings_file_without_ignore_normals_mode_loads_enhanced(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'preset': 'High'}))
+    assert load(path).ignore_normals_mode == 'enhanced'
+
+
+@pytest.mark.parametrize('value', ['bogus', 'Tool', 3, None])
+def test_unknown_ignore_normals_mode_falls_back_to_enhanced(tmp_path, value):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'ignore_normals_mode': value}))
+    assert load(path).ignore_normals_mode == 'enhanced'
+
+
+def test_known_ignore_normals_mode_is_loaded(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'ignore_normals_mode': 'tool'}))
+    assert load(path).ignore_normals_mode == 'tool'
+
+
 @pytest.mark.parametrize('device', ['auto', 'nvidia', 'amd', 'cpu'])
 def test_known_device_is_loaded(tmp_path, device):
     path = tmp_path / 's.json'

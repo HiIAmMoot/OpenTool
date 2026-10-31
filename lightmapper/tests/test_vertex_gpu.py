@@ -463,7 +463,7 @@ def scene_folder(tmp_path, queries, suns):
     positions = [[1 + 2 * (k % 7) / 7, 1 + (k % 5) * 0.4, 0] for k in range(queries)]
     scene = dataclasses.replace(scene, query_pos=np.float32(positions), query_normal=np.float32([[0, 0, 1]] * queries),
                                 query_class=np.int16([0] * queries))
-    write_job(tmp_path, scene, [(16, 16)], suns, {}, dataclasses.replace(S, vertex_rays=64), 'all')
+    write_job(tmp_path, scene, [(16, 16)], suns, {}, dataclasses.replace(S, vertex_rays=64, ignore_normals_mode='tool'), 'all')
     with np.load(tmp_path / 'scene.npz') as data:
         arrays = {key: data[key] for key in data.files}
     return arrays, json.loads((tmp_path / 'job.json').read_text())
