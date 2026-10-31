@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import kept
 from .calibrate import calibrate
 from .blender_find import find_blender
 from .diff import load_pages, paired_samples, bitmap_pages, render_markdown, report
@@ -63,6 +64,7 @@ def _parser():
             command.add_argument('--charts', type=Path)
             command.add_argument('--sources', choices=('all', 'sun', 'emit'), default='all')
             command.add_argument('--dry-run', action='store_true')
+            command.add_argument('--keep', action='store_true')
             command.add_argument('--32bit', dest='lightmap_32bit', action='store_true')
     return parser
 
@@ -70,6 +72,8 @@ def _parser():
 def main(argv=None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == 'bake' and args.keep and (args.dry_run or args.sources != 'all'):
+        parser.error('--keep needs a full bake that writes tags: drop --dry-run and --sources')
     if args.command == 'check':
         from .check import SKIPPED, run_checks
         results = run_checks(tuple(args.skip))
@@ -88,9 +92,12 @@ def main(argv=None) -> int:
         settings = _blender_fallback(load_settings(args.settings))
         if args.lightmap_32bit:
             settings.lightmap_32bit = True
+        work = args.work
+        if args.keep and work is None:
+            work = kept.create_work(kept.kept_root(), args.tags, args.scenario, args.bsp)
         result = bake(args.tags, args.scenario, args.bsp, settings,
-                      args.out_bsp, args.out_scenario, args.work, args.sources, args.charts, args.dry_run,
-                      backups=not args.no_backups)
+                      args.out_bsp, args.out_scenario, work, args.sources, args.charts, args.dry_run,
+                      backups=not args.no_backups, keep=args.keep)
         print(f'Work: {result.work}')
         return 0
     if args.command == 'calibrate':

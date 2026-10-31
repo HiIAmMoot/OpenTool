@@ -19,7 +19,7 @@ from time import perf_counter
 
 import numpy as np
 
-from . import cpu_vertex_job, gpu, memory, vertex_gpu
+from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
 from .errors import BakeError
@@ -263,7 +263,9 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
-          progress: Callable[[str], None] | None = None, backups: bool = True) -> BakeOutput:
+          progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False) -> BakeOutput:
+    if keep and (sources != 'all' or dry_run):
+        raise ValueError('a kept bake must be a full bake that writes tags')
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
@@ -312,6 +314,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     pages = _charts(input_file, geometry, radiosity, s,
                     Path(charts) if charts is not None else work / 'charts.npz')
     stage('charts')
+    if keep:
+        kept.kept_dir(work).mkdir(exist_ok=True)
+        template_file = resolve_reference_path(tags, group, path) if template is not None else None
+        kept.save_sources(work, input_file, template_file, resolve_reference_path(tags, 'scnr', scenario),
+                          Path(charts) if charts is not None else work / 'charts.npz')
     begin('scene')
     scene, inverse, textures = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                                       s.scenery_emission)
@@ -394,6 +401,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     else:
         result = with_vertex_pass(result, cpu_pass())
     stage('vertex_pass')
+    if keep:
+        kept.save_result(work, result)
     begin('glow' if glow_runs else 'finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
@@ -434,6 +443,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         # would come back off them as albedo times emission)
         started = perf_counter()
         glow, glow_device = run_blender_glow(work, s, glow_pages)
+        if keep:
+            kept.save_glow(work, glow)
         seconds['blender_glow'] = perf_counter() - started
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
@@ -447,6 +458,17 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         glow_reason = 'bounces set to 0'
     else:
         glow_reason = ''
+    if keep:
+        # (before the finish and the write: a bake that fails there is still one to write again)
+        kept.write_manifest(work, kept.Manifest(
+            tags=str(tags), scenario=scenario, bsp=bsp, input_path=input_path, has_template=template is not None,
+            vertex_device=vertex_device, glow_device=glow_device, glow_reason=glow_reason, settings=asdict(s),
+            kept_at=datetime.now().isoformat(timespec='seconds')))
+        # (only a folder inside the level's kept folder holds older kept bakes: a work folder the caller named
+        # may sit beside anything)
+        if work.parent.name == kept.level_folder(Path(), tags, scenario, bsp).name:
+            kept.prune(work)
+        kept.drop_superseded(work)
     # (OIDN's HIP device cannot open on the Radeon 680M, so AMD denoises on the CPU with a warning even when `amd` is
     # named; owner decision 2026-10-26)
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,

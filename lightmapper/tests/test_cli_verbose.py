@@ -75,3 +75,37 @@ def test_cli_32bit_flag_sets_the_setting(monkeypatch, tmp_path):
     cli.main(['bake', '--tags', str(tmp_path), 'level', 'room'])
     cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--32bit'])
     assert [s.lightmap_32bit for s in calls] == [False, True]
+
+
+def test_cli_keep_uses_the_kept_root(monkeypatch, tmp_path):
+    from lightmapper import kept
+    calls = []
+    monkeypatch.setattr(kept, 'kept_root', lambda: tmp_path / 'k')
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append((args, kwargs)) or type('O', (), {'work': 'W'})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--keep'])
+    args, kwargs = calls[0]
+    work = args[6]
+    assert kwargs['keep'] is True and work.is_dir()
+    assert work.parent == kept.level_folder(tmp_path / 'k', tmp_path, 'level', 'room')
+
+
+def test_cli_keep_with_an_explicit_work_folder_uses_it(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append((args, kwargs)) or type('O', (), {'work': 'W'})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--keep', '--work', str(tmp_path / 'w')])
+    assert calls[0][0][6] == tmp_path / 'w' and calls[0][1]['keep'] is True
+
+
+def test_cli_without_keep_keeps_nothing(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(cli, 'bake', lambda *args, **kwargs: calls.append(kwargs) or type('O', (), {'work': 'W'})())
+    cli.main(['bake', '--tags', str(tmp_path), 'level', 'room'])
+    assert calls[0]['keep'] is False
+
+
+@pytest.mark.parametrize('extra', [['--dry-run'], ['--sources', 'sun'], ['--sources', 'emit']])
+def test_cli_keep_refuses_dry_runs_and_partial_sources(tmp_path, extra):
+    with pytest.raises(SystemExit) as stopped:
+        cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--keep', *extra])
+    assert stopped.value.code == 2
+

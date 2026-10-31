@@ -6,7 +6,9 @@ kept/ subfolder carries the sources and results the finish needs, described by k
 
 import hashlib
 import json
+import logging
 import shutil
+import sys
 import zipfile
 from dataclasses import asdict, dataclass, fields
 from datetime import datetime
@@ -19,6 +21,8 @@ from .blender_job import BakeResult
 from .errors import KeptBakeError
 from .settings import Settings
 
+
+logger = logging.getLogger(__name__)
 
 KEPT_FOLDER = 'kept bakes'
 MANIFEST = 'kept.json'
@@ -67,6 +71,21 @@ def new_work(root: Path, tags: Path, scenario: str, bsp: str) -> Path:
     return level_folder(root, tags, scenario, bsp) / f'{datetime.now():%Y%m%d-%H%M%S}'
 
 
+def create_work(root: Path, tags: Path, scenario: str, bsp: str) -> Path:
+    first = new_work(root, tags, scenario, bsp)
+    first.parent.mkdir(parents=True, exist_ok=True)
+    work, number = first, 1
+    while True:
+        try:
+            work.mkdir()
+        except FileExistsError:
+            # (the folder names are timestamps by the second: a second kept bake of the level inside it must not share a folder)
+            number += 1
+            work = first.with_name(f'{first.name}-{number}')
+        else:
+            return work
+
+
 def kept_dir(work: Path) -> Path:
     return work / 'kept'
 
@@ -113,8 +132,18 @@ def latest(root: Path, tags: Path, scenario: str, bsp: str) -> Path | None:
 def prune(work: Path) -> None:
     for other in work.parent.iterdir():
         if other != work and other.is_dir():
-            # (a folder another program holds open must not fail a bake that already succeeded)
-            shutil.rmtree(other, ignore_errors=True)
+            failed = []
+
+            def note(function, path, error):
+                failed.append(path)
+
+            # (a folder another program holds open must not fail a bake that already succeeded: it stays, named in the log)
+            if sys.version_info >= (3, 12):
+                shutil.rmtree(other, onexc=note)
+            else:
+                shutil.rmtree(other, onerror=note)
+            if failed:
+                logger.warning('could not remove the older kept bake %s', other)
 
 
 def save_sources(work: Path, input_file: Path, template_file: Path | None, scenario_file: Path, charts_file: Path) -> None:

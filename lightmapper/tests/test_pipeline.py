@@ -1516,7 +1516,7 @@ def test_summary_names_the_glow_device_or_why_it_was_skipped(tiny, monkeypatch, 
     assert ('glow' in summary['seconds']) == (want[0] != 'off')
 
 
-def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=True, progress=None):
+def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=True, progress=None, bake_kwargs=None):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1564,8 +1564,8 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     monkeypatch.setattr(pipeline, 'run_blender_glow', glow)
     monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False, bounces=bounces),
-                        work=work, dry_run=True, progress=progress)
-    summary = json.loads((work / 'summary.json').read_text())
+                        progress=progress, **{'work': work, 'dry_run': True, **(bake_kwargs or {})})
+    summary = json.loads((out.work / 'summary.json').read_text())
     if not flagged:
         return summary
     want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])

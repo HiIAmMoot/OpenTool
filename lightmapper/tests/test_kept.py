@@ -203,3 +203,35 @@ def test_load_result_keeps_optional_fields_absent(tmp_path):
     damaged_result(tmp_path, ('vertex_vector', 'texel_rgb'))
     loaded = kept.load_result(tmp_path)
     assert loaded.vertex_vector is None and loaded.texel_rgb is None
+
+def test_create_work_numbers_a_clash_inside_one_second(tmp_path, monkeypatch):
+    import datetime as dt
+
+    class Frozen(dt.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 1, 2, 3, 4, 5)
+
+    monkeypatch.setattr(kept, 'datetime', Frozen)
+    works = [kept.create_work(tmp_path, tmp_path, 's', 'b') for _ in range(3)]
+    assert [w.name for w in works] == ['20260102-030405', '20260102-030405-2', '20260102-030405-3']
+    assert all(w.is_dir() and w.parent == works[0].parent for w in works)
+
+
+def test_prune_logs_a_folder_it_cannot_remove(tmp_path, monkeypatch, caplog):
+    level = tmp_path / 'level'
+    for name in ('a', 'b', 'c'):
+        (level / name).mkdir(parents=True)
+    real = kept.shutil.rmtree
+
+    def stuck(path, **handlers):
+        if path.name == 'a':
+            (handlers.get('onexc') or handlers['onerror'])(None, str(path / 'f'), PermissionError())
+        else:
+            real(path)
+
+    monkeypatch.setattr(kept.shutil, 'rmtree', stuck)
+    with caplog.at_level('WARNING', logger='lightmapper.kept'):
+        kept.prune(level / 'b')
+    assert sorted(p.name for p in level.iterdir()) == ['a', 'b']
+    assert [m.split()[-1] for m in caplog.messages] == [str(level / 'a')]
