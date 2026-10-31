@@ -33,6 +33,8 @@ def test_slangpy_collection_excludes_unused_backends_and_test_data():
         'slangpy/tests/test_device.py', 'slangpy/benchmarks/bench.py',
         'slangpy/data/test_images/test.png',
         r'C:\wheel\slangpy\optix\9_0\optix.h',
+        'slangpy/data/.git/HEAD', 'slangpy/.github/workflows/ci.yml', 'slangpy/README.md',
+        'slangpy/include/sgl/core/macros.h', 'slangpy.testing', 'slangpy/testing/helpers.py',
         'slangpy/sgl.dll', 'slangpy/slang-compiler.dll', 'slangpy/slang-glslang.dll',
         'slangpy/slang-glsl-module.dll', 'slangpy/shaders/slang-rhi/slang-rhi-device.h',
         'slangpy/slang-standard-module-2026.12/slang/neural.slang-module',
