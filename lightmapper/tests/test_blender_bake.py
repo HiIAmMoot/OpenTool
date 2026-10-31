@@ -780,7 +780,7 @@ def test_flagged_glow_lights_a_neighbour(tmp_path):
     write_job(tmp_path, scene, [(8, 8), (8, 8), (8, 8)], [], {}, s)
     bright = np.zeros((8, 8, 3), np.float32)
     bright[:4] = 4
-    glow = run_blender_glow(tmp_path, s, [bright, np.zeros((8, 8, 3), np.float32), np.zeros((8, 8, 3), np.float32)])
+    glow, _ = run_blender_glow(tmp_path, s, [bright, np.zeros((8, 8, 3), np.float32), np.zeros((8, 8, 3), np.float32)])
     np.testing.assert_array_equal(glow[0], 0)
     # (the page's first rows are the low-v side of the quad, so the neighbour on the -y side gets their light)
     assert glow[2][2:-2, 2:-2].mean() > 0.5
@@ -805,7 +805,7 @@ def test_mixed_glow_source_uses_only_flagged_samples(tmp_path, received):
     assert len(arrays['texel_pos']) == 6
     sources = [flagged_source(arrays, i, w, h, np.full((6, 3), received, np.float32))
                for i, (w, h) in enumerate([(1, 1), (8, 8)])]
-    glow = run_blender_glow(tmp_path, s, sources)
+    glow, _ = run_blender_glow(tmp_path, s, sources)
     np.testing.assert_allclose(glow[1][2:-2, 2:-2], .25 * received, atol=.01)
 
 

@@ -1505,7 +1505,18 @@ def test_zero_bounces_skips_the_terminal_glow(tiny, monkeypatch):
     run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bounces=0)
 
 
-def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
+@pytest.mark.parametrize('mode, bounces, flagged, want', [
+    ('enhanced', 1, True, ('OPTIX', '')),
+    ('tool', 1, True, ('off', 'Traditional ignore normals')),
+    ('enhanced', 1, False, ('off', 'no ignore-normals surfaces in this level')),
+    ('enhanced', 0, True, ('off', 'bounces set to 0'))])
+def test_summary_names_the_glow_device_or_why_it_was_skipped(tiny, monkeypatch, mode, bounces, flagged, want):
+    summary = run_enhanced_pipeline(tiny, monkeypatch, mode, bounces=bounces, flagged=flagged)
+    assert (summary['devices']['glow_pass'], summary['devices']['glow_reason']) == want
+    assert ('glow' in summary['seconds']) == (want[0] != 'off')
+
+
+def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=True, progress=None):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1519,13 +1530,14 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
 
     def scene(*args, **kwargs):
         value = original_scene(*args, **kwargs)
-        value[0].tri_ignore_normals = np.array([True, False])
+        if flagged:
+            value[0].tri_ignore_normals = np.array([True, False])
         return value
 
     def blender(work, s):
         with np.load(work / 'scene.npz') as arrays:
             count = len(arrays['texel_pos'])
-        assert (count > 0) == (mode == 'enhanced')
+        assert (count > 0) == (mode == 'enhanced' and flagged)
         raw = np.repeat(np.float32([[0, 1/3], [1/3, 1]])[:, :, None], 3, axis=2)
         return BakeResult([raw + emit], np.zeros((6, 3), np.float32), np.ones(6), 'test',
                           [np.ones((2, 2), bool)], diffuse_pages=[raw])
@@ -1544,7 +1556,7 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
         np.testing.assert_allclose(pages[0][2, 2], .3, rtol=1e-6)
         np.testing.assert_array_equal(pages[0][-1, -1], 0)
         unflagged = np.array([[0, 1/3], [1/3, 1]], np.float32)
-        return [np.repeat((.6 * unflagged)[:, :, None], 3, axis=2)]
+        return [np.repeat((.6 * unflagged)[:, :, None], 3, axis=2)], 'OPTIX'
 
     monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
     monkeypatch.setattr(pipeline, '_scene', scene)
@@ -1552,13 +1564,17 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1):
     monkeypatch.setattr(pipeline, 'run_blender_glow', glow)
     monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
     out = pipeline.bake(tags, 'level', 'room', replace(settings, ignore_normals_mode=mode, stitch_seams=False, bounces=bounces),
-                        work=work, dry_run=True)
+                        work=work, dry_run=True, progress=progress)
+    summary = json.loads((work / 'summary.json').read_text())
+    if not flagged:
+        return summary
     want = (np.array([[.3, 1/3 + .3*2/3 + .6/3], [1/3 + .3*2/3 + .6/3, 1.6]])
             if mode == 'enhanced' else np.array([[0, 1/3], [1/3, 1]]))
     if mode == 'enhanced' and not bounces:
         want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1.]])
     if not emit:
         np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
+    return summary
 
 
 def put_cutout_maps(tags):

@@ -30,6 +30,7 @@ from .formats.scenery import gather_lights, gather_occluders
 from .formats.vertices import ENV, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
+from .progress import GLOW_PLANNED
 from .radiosity import finalize, query_points
 from .raster import coverage, texel_contribution
 from .settings import Settings
@@ -325,6 +326,12 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
               vertex_pass='skip', lights=lights)
     stage('scene')
+    # (decided here, not at the page assembly, because the app lays its progress bar out for the glow run before the
+    # Blender stage starts)
+    enhanced = s.ignore_normals_mode == 'enhanced' and scene.tri_ignore_normals is not None and scene.tri_ignore_normals.any()
+    glow_runs = enhanced and s.bounces > 0
+    if glow_runs:
+        begin(GLOW_PLANNED)
     begin('blender')
     result = run_blender(work, s)
     stage('blender')
@@ -387,12 +394,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     else:
         result = with_vertex_pass(result, cpu_pass())
     stage('vertex_pass')
-    begin('finish')
+    begin('glow' if glow_runs else 'finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
     raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
     job = json.loads((work / 'job.json').read_text())
     job_suns = job['suns']
-    enhanced = s.ignore_normals_mode == 'enhanced' and scene.tri_ignore_normals is not None and scene.tri_ignore_normals.any()
     texel_scene = None
     if enhanced:
         with np.load(work / 'scene.npz') as data:
@@ -422,14 +428,25 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
-    if enhanced and s.bounces > 0:
+    glow_device = 'off'
+    if glow_runs:
         # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
         # would come back off them as albedo times emission)
         started = perf_counter()
-        glow = run_blender_glow(work, s, glow_pages)
+        glow, glow_device = run_blender_glow(work, s, glow_pages)
         seconds['blender_glow'] = perf_counter() - started
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
+        stage('glow')
+        begin('finish')
+    if s.ignore_normals_mode == 'tool':
+        glow_reason = 'Traditional ignore normals'
+    elif not enhanced:
+        glow_reason = 'no ignore-normals surfaces in this level'
+    elif s.bounces == 0:
+        glow_reason = 'bounces set to 0'
+    else:
+        glow_reason = ''
     # (OIDN's HIP device cannot open on the Radeon 680M, so AMD denoises on the CPU with a warning even when `amd` is
     # named; owner decision 2026-10-26)
     denoise_worker = DenoiseWorker.start(choice.oidn, s.timeout_s,
@@ -484,7 +501,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
         'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
-                    'denoise': denoise_device},
+                    'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
         'memory': {'estimate_gb': round(check.estimate / memory.GB, 2),

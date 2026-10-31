@@ -366,7 +366,7 @@ def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
                    vertex_sun_throughput=vp.sun_throughput, texel_rgb=vp.texel_rgb, light_flat=vp.light_flat)
 
 
-def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> list[np.ndarray]:
+def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[list[np.ndarray], str]:
     work = Path(work)
     np.savez(work / 'glow_pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
     job = json.loads((work / 'job.json').read_text())
@@ -375,4 +375,4 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> list[n
     (work / 'job_glow.json').write_text(json.dumps(job, indent=2))
     _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow.log')
     with np.load(out) as data:
-        return [np.array(data[f'page_{i}'], np.float32) for i in range(len(job['pages']))]
+        return [np.array(data[f'page_{i}'], np.float32) for i in range(len(job['pages']))], str(data['device'])
