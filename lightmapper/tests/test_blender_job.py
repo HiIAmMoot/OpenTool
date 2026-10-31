@@ -2,7 +2,7 @@ import json
 import os
 import stat
 import sys
-from dataclasses import fields
+from dataclasses import fields, replace
 from pathlib import Path
 
 import numpy as np
@@ -208,9 +208,9 @@ def lamp(owner, rgb=(1.0, 0.5, 0.25)):
                       np.float32(0.8), np.float32(0.9), owner, 'lamp')
 
 
-def lights_job(tmp_path, lights, sources='all', suns=None, **overrides):
-    s = Settings(w_sun=2.0, w_light=2.0, **overrides)
-    path = write_job(tmp_path, make_scene(), [(16, 8)], make_suns() if suns is None else suns, AMBIENT, s,
+def lights_job(tmp_path, lights, sources='all', suns=None, scene=None, **overrides):
+    s = Settings(**{'w_sun': 2.0, 'w_light': 2.0, **overrides})
+    path = write_job(tmp_path, scene or make_scene(), [(16, 8)], make_suns() if suns is None else suns, AMBIENT, s,
                      sources, textures=[TEXTURE], lights=lights)
     return json.loads(path.read_text())
 
@@ -255,14 +255,62 @@ def test_glow_run_has_no_lights(tmp_path, monkeypatch):
     assert json.loads((tmp_path / 'job_glow.json').read_text())['lights'] == []
 
 
-@pytest.mark.parametrize('owners, suns, want', [
-    (130, 4, [62, 62, 6]), (3, 4, [3]), (2, 63, [0, 2]), (62, 0, [62]), (63, 0, [62, 1])])
-def test_lamp_batches_fill_the_budget(owners, suns, want):
-    assert [len(b) for b in lamp_batches(list(range(owners)), suns)] == want
+@pytest.mark.parametrize('owners, room, want', [
+    (130, True, [62, 62, 6]), (3, True, [3]), (2, False, [0, 2]), (62, True, [62]), (63, True, [62, 1])])
+def test_lamp_batches_fill_the_budget(owners, room, want):
+    assert [len(b) for b in lamp_batches(list(range(owners)), room)] == want
 
 
 def test_lamp_batches_keep_first_appearance_order():
-    assert lamp_batches([9, 4, 9, 1], 0) == [[9, 4, 1]]
+    assert lamp_batches([9, 4, 9, 1], True) == [[9, 4, 1]]
+
+
+def test_negative_light_weight_is_refused():
+    with pytest.raises(ValueError, match='w_light'):
+        Settings(w_light=-0.5)
+
+
+def test_zero_light_weight_bakes_no_lamps(tmp_path):
+    assert lights_job(tmp_path, [lamp(1), lamp(2)], w_light=0)['lights'] == []
+
+
+def test_a_lamp_with_one_lit_channel_survives_a_zero_blue(tmp_path):
+    assert len(lights_job(tmp_path, [lamp(1, (1, 0, 0))])['lights']) == 1
+
+
+def classed_scene(count):
+    # one receiver triangle per class, so a sun lighting one class makes a link pattern of its own
+    base = make_scene()
+    tile = lambda a: np.tile(a, (count,) + (1,) * (a.ndim - 1))
+    tris = np.int32(np.arange(count)[:, None, None] * 3 + base.tris[None]).reshape(-1, 3)
+    return replace(base, positions=tile(base.positions), normals=tile(base.normals), lm_uv=tile(base.lm_uv),
+                   tex_uv=tile(base.tex_uv), tris=tris, tri_page=tile(base.tri_page),
+                   tri_class=np.int16(np.arange(count)), tri_casts_shadow=tile(base.tri_casts_shadow),
+                   tri_emission=tile(base.tri_emission), tri_texture=tile(base.tri_texture),
+                   tri_cutout=tile(base.tri_cutout), tri_tint=tile(base.tri_tint))
+
+
+def up_sun(classes):
+    return Sun(np.float64([0, 0, 1]), 0.1, np.float64([1, 1, 1]), 1.0, classes)
+
+
+def test_many_suns_sharing_a_receiver_set_leave_room_for_lamps_in_batch_zero(tmp_path):
+    job = lights_job(tmp_path, [lamp(1), lamp(2)], suns=[up_sun((1,)) for _ in range(64)])
+    assert len(job['suns']) == 64 and [l['batch'] for l in job['lights']] == [0, 0]
+
+
+def test_suns_that_use_up_the_link_patterns_send_the_lamps_to_extra_batches(tmp_path):
+    scene = classed_scene(70)
+    suns = [up_sun((c,)) for c in range(70)]
+    job = lights_job(tmp_path, [lamp(1), lamp(2)], suns=suns, scene=scene)
+    assert [l['batch'] for l in job['lights']] == [1, 1]
+
+
+def test_suns_at_the_link_pattern_edge_still_take_the_lamps(tmp_path):
+    # 62 receiver patterns and the occluders' every-set pattern make 63, the most Cycles keeps
+    scene = classed_scene(62)
+    job = lights_job(tmp_path, [lamp(1)], suns=[up_sun((c,)) for c in range(62)], scene=scene)
+    assert [l['batch'] for l in job['lights']] == [0]
 
 
 @pytest.fixture

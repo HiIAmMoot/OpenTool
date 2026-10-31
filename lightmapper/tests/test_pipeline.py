@@ -1680,6 +1680,33 @@ def test_bake_hands_the_lights_to_the_job(tiny, monkeypatch):
     assert [(l['owner'], l['batch']) for l in job['lights']] == [(4, 0)]
 
 
+def summary_of(work):
+    return json.loads((work / 'summary.json').read_text())
+
+
+def test_a_zero_light_weight_bakes_without_lamps(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 3)
+    calls = batch_runs(monkeypatch)
+    api().bake(tags, 'level', 'room', replace(settings, w_light=0.0), work=work)
+    assert json.loads((work / 'job.json').read_text())['lights'] == [] and calls == []
+    assert summary_of(work)['lights'] == {'baked': 0, 'batches': 1}
+
+
+def test_calibration_sources_report_no_lights_baked(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 3)
+    api().bake(tags, 'level', 'room', settings, work=work, sources='sun', dry_run=True)
+    assert summary_of(work)['lights'] == {'baked': 0, 'batches': 1}
+
+
+def test_the_summary_counts_the_lights_the_job_baked(tiny, monkeypatch):
+    tags, settings, work = tiny
+    many_lamps(monkeypatch, 3)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert summary_of(work)['lights'] == {'baked': 3, 'batches': 1}
+
+
 def lamps_of_owners(count):
     return [scenery_lamp(owner, 0.1 * owner) for owner in range(count)]
 

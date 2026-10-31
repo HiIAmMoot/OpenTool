@@ -62,7 +62,7 @@ The bake does not read these scenery flags and fields:
 
 Skipping shadows for "does not cast shadow" would make the bake diverge from tool.
 
-Lights attached to scenery (`formats/lights.py`, `formats/scenery.py`) bake too, always (there is no setting for it). A light bakes when its tag is not dynamic, its radiosity intensity is above zero, its radiosity colour is not black and its position lies inside a cluster of the BSP being baked (tool drops the others). The summary's `lights` counts what was attached, left out and baked. Tool reads only these fields of a light, whatever the light looks like in the game:
+Lights attached to scenery (`formats/lights.py`, `formats/scenery.py`) bake too, always (there is no setting for it; a `w_light` of 0 leaves them out). Their weight `w_light` is the one fitted value among the source weights: 2.4319, which is π × 0.774, fitted to tool's bakes in release 0.2.1's validation. A light bakes when its tag is not dynamic, its radiosity intensity is above zero, its radiosity colour is not black and its position lies inside a cluster of the BSP being baked (tool drops the others). The summary's `lights` counts what was attached, left out and baked. Tool reads only these fields of a light, whatever the light looks like in the game:
 
 | Record field | Where it comes from |
 |---|---|
@@ -84,7 +84,7 @@ The bake differs from tool in these ways:
 - There is no lamp term at shadow terminators.
 - Animated scenery sits at its default node transforms.
 
-Lamps are Cycles lights, and Cycles limits how many distinct light-linking sets one bake holds: one blocker set per lamp-owning placement allows 62 owners per run. Past that the lamps bake in extra runs (batches), each added to the main pages, which is exact because light adds linearly and the sun and other sources run in the first batch only. The vertex passes start after every batch. The summary's `lights.batches` says how many ran.
+Lamps are Cycles lights, and Cycles limits how many distinct light-linking sets one bake holds: each lamp-owning placement needs a blocker set of its own, which allows 62 owners per run, and the lamps' receiver set joins the suns' sets in the first run only while all the patterns together stay within Cycles' 63 (a map with many distinct sun receiver sets sends every lamp to extra runs). Past that the lamps bake in extra runs (batches), each added to the main pages, which is exact because light adds linearly and the sun and other sources run in the first batch only. The vertex passes start after every batch. The summary's `lights.batches` says how many ran.
 
 Cycles' indirect sample clamp is off for every bake. With the default of 10 a bright emitter or lamp bounce would be clipped, and summed batches would no longer equal one bake.
 

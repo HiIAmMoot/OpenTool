@@ -319,7 +319,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     if not check.fits:
         logger.warning('%s', check.message)
         warnings.append(check.message)
-    lights, light_counts = scene_lights(scenario_tag, tags, bsp_index, bsp_tag)
+    # (a calibration run bakes no lamps, so it neither reads nor counts them)
+    lights, light_counts = scene_lights(scenario_tag, tags, bsp_index, bsp_tag) if sources == 'all' else ([], {})
     write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
               lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
               vertex_pass='skip', lights=lights)
@@ -484,7 +485,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds,
         'devices': {**choice.summary(), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device},
-        'lights': {**light_counts, 'batches': batches},
+        'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
         'memory': {'estimate_gb': round(check.estimate / memory.GB, 2),
                    'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},

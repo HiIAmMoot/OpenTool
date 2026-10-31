@@ -86,6 +86,8 @@ class Settings(ChartSettings):
             raise ValueError(f'seed must be between 0 and 999, not {self.seed}')
         if self.sky_grid < 1:
             raise ValueError(f'sky_grid must be at least 1, not {self.sky_grid}')
+        if not self.w_light >= 0:
+            raise ValueError(f'w_light must not be negative, not {self.w_light}')
         if not self.reach > 0:
             raise ValueError(f'reach must be positive, not {self.reach}')
         if self.radiosity_mode not in RADIOSITY_MODES:

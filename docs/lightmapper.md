@@ -13,7 +13,7 @@ Tool stores a level's lighting in two tags: the lightmap pages in a `bitmap` tag
 - It lays out the lightmap UVs with [xatlas](https://github.com/jpcy/xatlas). Charts split at hard creases, and the texels on either side of a chart seam are stitched so the seam is hard to see.
 - It renders the light with Blender's Cycles path tracer and works out the per-vertex light on the GPU too, when you have an NVIDIA or AMD one.
 - It denoises the pages with Intel Open Image Denoise and keeps the light in floating point until the final 16-bit encode.
-- It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap. Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
+- It uses the light sources tool uses: the sky's lights and ambient, and emissive shaders, including emitters on surfaces that have no lightmap, and the lights attached to scenery (always baked; a `w_light` of 0 turns them off). Scenery shaders can also give off light, which tool never allows; this is on by default and `scenery_emission` turns it off.
 
 ## How close it gets to tool
 
@@ -87,7 +87,7 @@ Other options:
 - `--dry-run` runs the whole bake but writes no tags.
 - `--32bit` writes 32-bit (x8r8g8b8) lightmap pages instead of 16-bit (r5g6b5). They show no banding and take twice the space. The settings key is `lightmap_32bit`.
 - `--charts file.npz` points at a saved chart layout. It is reused only when the input BSP, the chart settings and the shaders' radiosity fields are unchanged. A normal bake rewrites its BSP, so the next bake of that level charts it again.
-- `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and write no tags. The default is `--sources all`.
+- `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and scenery lights and write no tags. The default is `--sources all`.
 
 ### Settings
 

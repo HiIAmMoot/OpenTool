@@ -53,12 +53,12 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 
 ## Light-source weights
 
-These seven default to `lightmapper/calibration.json`. The shipped values use an analytic model of tool's lighting. `calibrate` can fit them to a tool bake for experiments.
+These seven default to `lightmapper/calibration.json`. All but `w_light` use an analytic model of tool's lighting; `w_light` is the one fitted value, matched to tool's own bakes of scenery lights. `calibrate` can fit them to a tool bake for experiments.
 
 | Setting | Default | What it does |
 |---|---|---|
 | `w_sun` | π | Weight on sky lights. Cycles bakes irradiance divided by π, so π brings sky lights back to tool's units. |
-| `w_light` | π | Weight on scenery lights; π brings Cycles' bake back to tool's units. |
+| `w_light` | 2.43 | Weight on scenery lights, fitted to tool's lamp bakes (π × 0.774; π alone would be the analytic conversion from Cycles' units to tool's). Must not be negative. 0 bakes the map without scenery lights. |
 | `w_emit` | 1.0 | Weight on emissive shaders. |
 | `w_amb` | 1.0 | Weight on the sky's ambient light. |
 | `gamma` | 1.0 | Tone curve exponent. Tool applies none. |
@@ -76,4 +76,5 @@ Every successful bake writes `summary.json` into its work folder. Besides the se
 | `memory` | The memory check made before Blender started: `estimate_gb` (what the bake is expected to need) and `free_gb` (free physical memory then, or `null` when it could not be read). |
 | `rays` | The counts the bake used: `samples` per texel, `texel_samples` for chart edges and `vertex_rays` per vertex query. They are the CPU counts for a stage that ran on the CPU. |
 | `vertex_rays_cast` | How many rays the vertex pass cast in all. |
-| `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex` (and `blender_glow` when enhanced normals ran a second Blender run), then `vertex_pass`, `denoise`, `finish`, `write` and `total`. |
+| `seconds` | Seconds per stage: `probe`, `gather`, `charts`, `scene`, `blender` and inside it `blender_start`, `blender_scene`, `page_bake` and `blender_vertex` (and `blender_glow` when enhanced normals ran a second Blender run), then `blender_lamp_batches` (only when scenery lights needed extra runs), `vertex_pass`, `denoise`, `finish`, `write` and `total`. |
+| `lights` | What the scenery lights came to: `attached` (lights found on scenery), `dynamic` and `dark` (left out because the light is dynamic or has no radiosity intensity or colour), `missing_light`, `missing_model` and `missing_marker` (left out because the light, model or marker tag could not be found), `placed` (positions found), `outside_bsp` (outside every cluster of the BSP), `baked` (lights in the bake: 0 for `--sources sun` and `emit` runs, which leave scenery lights out, and when `w_light` is 0) and `batches` (Cycles runs the lights took, 1 unless there were many). |

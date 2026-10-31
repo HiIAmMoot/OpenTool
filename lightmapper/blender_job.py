@@ -19,6 +19,7 @@ from .formats.lights import SceneLight
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
 from .vertex_gpu import VertexPassResult
+from .sun_facing import sun_facing_planes
 from .twins import reversed_twins
 from . import frozen
 
@@ -28,8 +29,11 @@ LOG_TAIL_LINES = 40
 SOURCES = ('all', 'sun', 'emit')
 # what Windows reports when Blender dies on a failed allocation: unsigned, or signed as Python sees it elsewhere
 ACCESS_VIOLATION = (3221225477, -1073741819)
-# Cycles' light-link sets are a 64-bit mask, of which this many bits go to owners
+# Cycles keeps 63 non-default link patterns per side (bake.py's MAX_LINK_SETS). On the shadow side every object but an
+# owner's own is in that owner's blocker set, so the pattern shared by receivers and plain occluders takes one of the 63
+# and each owner with geometry one more: this many owners per batch
 LINK_BITS = 62
+LINK_PATTERNS = 63
 
 
 @dataclass
@@ -116,11 +120,28 @@ class BakeResult:
     light_flat: np.ndarray | None = None
 
 
+# whether the lamp receiver set can join the suns' link sets in the main run without passing Cycles' pattern budget:
+# bake.py's receiver_sun_bits and link_patterns, worked out here from the arrays (a receiver is in a sun's set when
+# the sun lights its class and plane, and in the lamp set unless flagged; every occluder is in all of them)
+def lamps_fit_main_run(arrays: dict, job_suns: list[dict]) -> bool:
+    facing = sun_facing_planes(arrays, job_suns)
+    for n, sun in enumerate(job_suns):
+        facing[:, n] &= np.isin(arrays['tri_class'], sun['classes'])
+    flagged = arrays['tri_ignore_normals']
+    facing[flagged] = False
+    rows = np.column_stack([facing, ~flagged])
+    patterns = {tuple(row) for row in np.unique(rows, axis=0)} if len(rows) else set()
+    if len(arrays['occ_tris']):
+        patterns.add((True,) * rows.shape[1])
+    patterns.discard((False,) * rows.shape[1])
+    return len(patterns) <= LINK_PATTERNS
+
+
 # the owners of each batch of lamps: a batch is one bake of all lamps whose owners are in it, so that no lamp's link set
 # outgrows Cycles' budget. Batch 0 shares the suns' link sets, so it takes owners only while the suns leave room
-def lamp_batches(owners: list[int], sun_count: int) -> list[list[int]]:
+def lamp_batches(owners: list[int], main_has_room: bool) -> list[list[int]]:
     owners = list(dict.fromkeys(owners))
-    first = owners[:LINK_BITS] if sun_count <= LINK_BITS else []
+    first = owners[:LINK_BITS] if main_has_room else []
     rest = owners[len(first):]
     return [first] + [rest[i:i + LINK_BITS] for i in range(0, len(rest), LINK_BITS)]
 
@@ -188,7 +209,10 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
 
     job_lights = []
     if sources == 'all':
-        batch_of = {owner: b for b, owners in enumerate(lamp_batches([l.owner for l in lights], len(job_suns)))
+        # (a weight of 0 turns the lamps off: Blender's lamp colour divides by the strength, and a zero lamp lights nothing)
+        lights = [l for l in lights if any(float(v) * s.w_light > 0 for v in l.rgb)]
+        room = lamps_fit_main_run(arrays, job_suns) if lights else True
+        batch_of = {owner: b for b, owners in enumerate(lamp_batches([l.owner for l in lights], room))
                     for owner in owners}
         job_lights = [{
             'position': [float(v) for v in light.position],
