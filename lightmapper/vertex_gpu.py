@@ -426,7 +426,9 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, 
             carried[chunk], escaped[chunk] = result[:, :3], result[:, 3] > 0.5
         return carried, escaped
 
-    carried, escaped = cast_shadows(origins, dirs, np.full(len(origins), RAY_LENGTH), np.full(len(origins), -1))
+    # (broadcast views: every sun and edge ray has the one limit and no skip, and a full array of each costs 16 bytes a ray)
+    carried, escaped = cast_shadows(origins, dirs, np.broadcast_to(np.float64(RAY_LENGTH), len(origins)),
+                                    np.broadcast_to(np.int64(-1), len(origins)))
     for block in lamps:
         on_lamp(block, *cast_shadows(block.origin, block.direction, block.limit, block.skip))
     del keep

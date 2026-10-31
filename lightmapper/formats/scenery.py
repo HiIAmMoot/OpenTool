@@ -96,6 +96,10 @@ def placement_rotation(yaw: float, pitch: float, roll: float) -> np.ndarray:
 def quaternion_matrix(q) -> np.ndarray:
     # columns forward, left, up; the engine turns the opposite way to the textbook quaternion matrix
     x, y, z, w = (float(v) for v in q)
+    # (the engine normalises, so an exporter's non-unit quaternion still turns pure)
+    length = math.sqrt(x * x + y * y + z * z + w * w)
+    if length > 0:
+        x, y, z, w = x / length, y / length, z / length, w / length
     return np.array([
         [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
         [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
@@ -331,7 +335,8 @@ def iter_placements(scenario: Tag, tags_root: Path, bsp_index: int, cache: dict 
 
 
 def iter_placed(scenario: Tag, tags_root: Path, bsp_index: int, owners: list[int] | None = None):
-    # owners, when given, collects the scenario index of each placement yielded
+    # owners lines up with the yielded geometry, which skips placements whose model has no triangles: the index of a
+    # yielded one is how a light or occluder is tied back to its scenario placement
     cache = {}
     for placement in iter_placements(scenario, tags_root, bsp_index, cache):
         geometry = _load_model(tags_root, placement.definition.model, placement.desired, cache)
@@ -394,8 +399,9 @@ def gather_lights(scenario: Tag, tags_root: Path, bsp_index: int) -> tuple[list[
             position, forward, found = marker_frame(geometry.markers, marker)
             if not found:
                 counts['missing_marker'] += 1
-                if (placement.definition.model, marker) not in warned:
-                    warned.add((placement.definition.model, marker))
+                # (marker names match without case, so one model's spellings of a missing marker are one warning)
+                if (placement.definition.model, marker.lower()) not in warned:
+                    warned.add((placement.definition.model, marker.lower()))
                     logger.warning('model %s has no marker %r, its light sits on node 0',
                                    placement.definition.model[1], marker)
             rotation = placement_rotation(*placement.rotation)

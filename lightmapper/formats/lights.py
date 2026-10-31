@@ -62,7 +62,7 @@ def read_light(tags_root: Path, path: str, cache: dict) -> LightDefinition | Non
 
 
 def light_kind(falloff: float, cutoff: float) -> int:
-    # a record is a point light when both angles reach pi or the cutoff is not positive
+    # tool's record rule (found in the executable): a cutoff that is not positive, or both angles at pi, is a point light
     return POINT if cutoff <= 0 or (falloff >= PI and cutoff >= PI) else SPOT
 
 

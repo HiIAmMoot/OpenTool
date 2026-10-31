@@ -118,6 +118,11 @@ def test_halo_quaternion_turns_forward_the_engines_way():
     np.testing.assert_allclose(quaternion_matrix((0, s, 0, c))[:, 0], (0, 0, 1), atol=1e-12)
 
 
+def test_a_quaternion_that_is_not_unit_length_turns_like_its_unit_one():
+    s = c = math.sqrt(.5)
+    np.testing.assert_allclose(quaternion_matrix((0, 0, 3 * s, 3 * c)), quaternion_matrix((0, 0, s, c)), atol=1e-12)
+
+
 def test_light_is_placed_at_its_marker_with_the_origin_offset_at_yaw_90(tmp_path):
     scn, tags = lamp_scene(tmp_path, markers=[(0, '', 'light', 0, (1, 0, 0), IDENTITY)], origin_offset=(0, 0, 2),
                            placements=[dict(placement__position=(10, 20, 30), placement__rotation=(math.pi / 2, 0, 0))])
@@ -140,6 +145,13 @@ def test_missing_marker_falls_back_to_node_0_with_one_warning(tmp_path, caplog):
     lights, counts = gather_lights(scn, tags, 0)
     assert [tuple(l.position) for l in lights] == [(5, 0, 1), (9, 0, 1)]
     assert counts['missing_marker'] == 2 and caplog.text.count('nope') == 1
+
+
+def test_a_marker_missing_in_two_cases_warns_once(tmp_path, caplog):
+    scn, tags = lamp_scene(tmp_path, attachments=[('lamp', 'Nope'), ('lamp', 'nope')],
+                           placements=[dict(placement__position=(5, 0, 0))])
+    _, counts = gather_lights(scn, tags, 0)
+    assert counts['missing_marker'] == 2 and caplog.text.lower().count('nope') == 1
 
 
 def test_empty_marker_name_is_node_0(tmp_path, caplog):
