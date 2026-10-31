@@ -76,9 +76,9 @@ A lamp lights every class of receiver, not only those a sun reaches.
 
 The bake differs from tool in these ways:
 
-- Receivers take the cosine of the angle between their normal and the lamp. Tool has none for a point light (only 1/d squared). This is a deliberate choice (owner), so pages and vertices agree with Cycles' physical lamps.
-- A lamp's own placement never shadows it (decision 8), so a lamp inside its fixture's model is not blocked by it.
-- Ignore-normals receivers keep the spot cone but take no cosine, as tool does.
+- Receivers take the cosine of the angle between their normal and the lamp. Tool has none for a point light (only 1/d squared). This is a deliberate choice, so pages and vertices agree with Cycles' physical lamps.
+- A lamp's own placement never shadows it, so a lamp inside its fixture's model is not blocked by it (tool likely lets a fixture shadow its own lamp).
+- Ignore-normals receivers take no cosine, as in tool, but keep a spot's cone; tool drops the cone there as well.
 - In tool mode the light on ignore-normals triangles comes from the vertex pass (`light_flat`, added by `flat_light_term`), interpolated from the triangle's vertices like the flat sun term. A lamp over the middle of a large flagged triangle therefore reads coarse. Enhanced mode gathers it per texel.
 - Occlusion is a shadow ray, not tool's PVS.
 - There is no lamp term at shadow terminators.
@@ -86,7 +86,7 @@ The bake differs from tool in these ways:
 
 Lamps are Cycles lights, and Cycles limits how many distinct light-linking sets one bake holds: one blocker set per lamp-owning placement allows 62 owners per run. Past that the lamps bake in extra runs (batches), each added to the main pages, which is exact because light adds linearly and the sun and other sources run in the first batch only. The vertex passes start after every batch. The summary's `lights.batches` says how many ran.
 
-Cycles' indirect sample clamp is off for every bake (owner). With the default of 10 a bright emitter or lamp bounce would be clipped, and summed batches would no longer equal one bake.
+Cycles' indirect sample clamp is off for every bake. With the default of 10 a bright emitter or lamp bounce would be clipped, and summed batches would no longer equal one bake.
 
 These are written into the work folder as `job.json`, `scene.npz` and `textures.npz` (`blender_job.py`).
 

@@ -1778,13 +1778,23 @@ def test_dark_lamps_change_nothing(tiny, monkeypatch):
     tags, settings, work = tiny
     calls = batch_runs(monkeypatch)
     plain = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
-    counts = {'attached': 2, 'dynamic': 1, 'dark': 1, 'placed': 0}
-    monkeypatch.setattr(api(), 'gather_lights', lambda *args: ([], counts))
+    from types import SimpleNamespace
+    from lightmapper.formats import scenery
+    from lightmapper.formats.lights import LightDefinition
+    placement = SimpleNamespace(definition=SimpleNamespace(model=None, lights=[('dynamic', ''), ('black', '')]),
+                                index=0, desired=0)
+    definitions = {'dynamic': LightDefinition(True, 5., (1., 1., 1.), 0., 0.),
+                   'black': LightDefinition(False, 5., (0., 0., 0.), 0., 0.)}
+    monkeypatch.setattr(scenery, 'iter_placements', lambda *args: [placement])
+    monkeypatch.setattr(scenery, '_load_model', lambda *args: None)
+    monkeypatch.setattr(scenery, 'read_light', lambda tags_root, path, cache: definitions[path])
     dimmed = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     assert json.loads((work / 'job.json').read_text())['lights'] == [] and calls == []
     for a, b in zip(plain.float_pages, dimmed.float_pages):
         np.testing.assert_array_equal(a, b)
     np.testing.assert_array_equal(incident_vectors(plain), incident_vectors(dimmed))
+    lights = json.loads((work / 'summary.json').read_text())['lights']
+    assert (lights['attached'], lights['dynamic'], lights['dark'], lights['baked']) == (2, 1, 1, 0)
 
 
 def test_summary_counts_the_lights(tiny, monkeypatch):
