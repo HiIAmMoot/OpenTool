@@ -3,6 +3,7 @@ import time
 
 import pytest
 
+from lightmapper.progress import GLOW_PLANNED
 from test_pipeline import tiny, api
 
 
@@ -20,6 +21,16 @@ def test_pipeline_reports_each_stage_in_order(tiny):
     seen = []
     api().bake(tags, 'level', 'room', settings, work=work, progress=seen.append)
     assert seen == ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write']
+
+
+@pytest.mark.parametrize('bounces, want', [
+    (1, ['gather', 'charts', 'scene', GLOW_PLANNED, 'blender', 'vertex', 'glow', 'finish', 'write']),
+    (0, ['gather', 'charts', 'scene', 'blender', 'vertex', 'finish', 'write'])])
+def test_enhanced_pipeline_plans_and_reports_the_glow_stage(tiny, monkeypatch, bounces, want):
+    from test_pipeline import run_enhanced_pipeline
+    seen = []
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bounces=bounces, progress=seen.append)
+    assert seen == want
 
 
 def test_pipeline_logs_stage_starts(tiny, caplog):
@@ -48,10 +59,21 @@ def test_fraction_spans():
     assert fraction('finish') == .9 and fraction('validate') == .98 and fraction('done') == 1
 
 
+def test_fraction_spans_with_glow():
+    from lightmapper.progress import STAGE_LABELS, fraction
+    assert STAGE_LABELS['glow'] == 'Baking light from ignore-normals surfaces'
+    assert [fraction(s, glow=True) for s in ('blender', 'vertex', 'glow', 'finish')] == [.20, .55, .62, .88]
+    assert fraction('glow') == .62 and fraction('gather', glow=True) == 0 and fraction('write', glow=True) == .95
+    assert fraction('glow', 1, 2, glow=True) == pytest.approx(.75)
+    assert fraction('blender', 2, 4, glow=True) == pytest.approx(.375)
+
+
 def test_fraction_never_goes_back():
     from lightmapper.progress import STAGES, fraction
-    points = [fraction(s) for s in STAGES]
+    points = [fraction(s, glow=True) for s in STAGES]
     assert points == sorted(points)
+    plain = [fraction(s) for s in STAGES if s != 'glow']
+    assert plain == sorted(plain)
 
 
 def test_follower_delivers_complete_lines_only(tmp_path):

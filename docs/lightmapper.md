@@ -87,6 +87,7 @@ Other options:
 - `--dry-run` runs the whole bake but writes no tags.
 - `--32bit` writes 32-bit (x8r8g8b8) lightmap pages instead of 16-bit (r5g6b5). They show no banding and take twice the space. The settings key is `lightmap_32bit`.
 - `--charts file.npz` points at a saved chart layout. It is reused only when the input BSP, the chart settings and the shaders' radiosity fields are unchanged. A normal bake rewrites its BSP, so the next bake of that level charts it again.
+- `--keep` stores what the finish needs (the BSP, scenario and charts, and the bake's results) in the app's `kept bakes` folder, one folder per level, so the tags can be written again later without baking. A new kept bake of a level replaces the last one. It needs a full bake that writes tags: it cannot be combined with `--dry-run` or `--sources sun` or `emit` (`--sources all` is fine). Given `--work`, the bake is kept in that folder instead. The bake still deletes the superseded outputs in that folder, and it prunes older kept bakes only when the folder sits in a kept level folder.
 - `--sources sun` bakes the sky lights alone and `--sources emit` the shader emission alone, for testing. Both leave out ambient and scenery lights and write no tags. The default is `--sources all`.
 
 ### Settings
@@ -106,6 +107,22 @@ python lightmap.py bake --tags "C:\HCEEK\tags" levels\test\bloodgulch\bloodgulch
 ```
 
 This example quadruples the default texel density for sharper shadows. [lightmapper-settings.md](lightmapper-settings.md) lists every setting.
+
+### Write a kept bake again
+
+A bake made with `--keep` can be written to the tags again without baking, for example after a write failed because a tag was open elsewhere, or to switch between 16-bit and 32-bit pages:
+
+```powershell
+python lightmap.py write bake\bloodgulch --32bit
+```
+
+`write <work>` takes the kept bake's folder (the `Work:` line a kept bake printed, or the `--work` folder it was kept in). Neither Blender nor the vertex pass runs, so it takes seconds.
+
+- `--tags` defaults to the tags folder the bake was kept with. The level, its BSP and the scenario written come from the kept copies, not from the tags as they are now.
+- `--settings file.json` and the `--out-bsp`, `--out-scenario` and `--no-backups` options work as for `bake`. Without `--settings`, the settings the bake was kept with are used.
+- `--32bit` or `--16bit` picks the page format. Without either, the format the bake was kept with stands.
+- It refuses, and writes nothing, when the settings differ from the kept bake's in anything that changes the pages (the refusal names them; `lightmap_32bit`, `blender` and `timeout_s` may differ), when the level's shaders changed since the bake was kept, or when the folder is not a kept bake or is damaged. Bake again in those cases.
+- The bake's own `summary.json` stays as it was; the write adds `write_summary.json` (see [lightmapper-settings.md](lightmapper-settings.md#write_summaryjson)).
 
 ### 3. Check the result
 

@@ -366,6 +366,15 @@ def test_run_blender_returns_arrays(tmp_path, fake):
     assert args[4] == '--python' and args[5].endswith('bake.py') and args[6:] == ['--', str(work / 'job.json')]
 
 
+def test_glow_run_returns_its_device(tmp_path, fake):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8), (4, 4)], make_suns(), AMBIENT, s)
+    pages, device = blender_job.run_blender_glow(work, s, [np.zeros((8, 16, 3), np.float32), np.zeros((4, 4, 3), np.float32)])
+    assert [p.shape for p in pages] == [(8, 16, 3), (4, 4, 3)]
+    assert device == 'OPTIX+CUDA+HIP+ONEAPI-FAKE'
+
+
 def test_run_blender_accepts_results_without_used_counts(tmp_path, fake, monkeypatch):
     from lightmapper import blender_job
 
