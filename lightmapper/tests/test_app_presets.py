@@ -2,14 +2,13 @@ from dataclasses import replace
 
 import pytest
 
+from lightmapper import memory
 from lightmapper.settings import Settings
 from opentool import presets
-from opentool.presets import ADVANCED, CUSTOM, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, build_settings, parse_advanced
+from opentool.presets import ADVANCED, CPU_PRESETS, CUSTOM, DEVICES, GPU_NOTE, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, build_settings, parse_advanced
 
 
 def test_page_max_choices_are_the_memory_page_sides():
-    from lightmapper import memory
-
     assert PAGE_MAX_CHOICES == memory.PAGE_SIDES == (256, 512, 1024, 2048, 4096)
 
 
@@ -21,8 +20,6 @@ def test_gpu_preset_values():
 
 
 def test_cpu_preset_values_are_0_1_0s():
-    from opentool.presets import CPU_PRESETS
-
     assert CPU_PRESETS == {'Draft': dict(samples=64, vertex_rays=256), 'Normal': dict(samples=256, vertex_rays=1024),
                            'High': dict(samples=512, vertex_rays=4096)}
 
@@ -73,8 +70,6 @@ def test_an_overridden_vertex_count_is_used_on_every_device():
 
 
 def test_exact_preset_interface_values():
-    from opentool.presets import DEVICES, GPU_NOTE
-
     assert DEVICES == (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
     assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
     assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')

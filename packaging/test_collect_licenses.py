@@ -15,13 +15,16 @@ spec.loader.exec_module(collector)
 BUILD_PYTHON = Path(__file__).resolve().parents[1] / 'build/venv/Scripts/python.exe'
 
 
-def test_slangpy_collection_excludes_unused_backends_and_test_data():
+def spec_functions(*names):
     tree = ast.parse(Path(__file__).with_name('opentool.spec').read_text())
-    function = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
-                    and node.name == 'include_slangpy')
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
     namespace = {'Path': Path}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), 'opentool.spec', 'exec'), namespace)
-    include = namespace['include_slangpy']
+    exec(compile(ast.Module(body=functions, type_ignores=[]), 'opentool.spec', 'exec'), namespace)
+    return namespace
+
+
+def test_slangpy_collection_excludes_unused_backends_and_test_data():
+    include = spec_functions('include_slangpy')['include_slangpy']
     candidates = [
         'slangpy/optix/8_0/optix.h', 'slangpy/optix/8_1/optix.h',
         'slangpy/optix/9_0/optix.h', 'slangpy/D3D12/D3D12Core.dll',
@@ -36,6 +39,14 @@ def test_slangpy_collection_excludes_unused_backends_and_test_data():
         'slangpy.shaders', 'slangpy.torchintegration',
     ]
     assert [name for name in candidates if include(name)] == candidates[-8:]
+
+
+def test_in_slangpy_tests_the_bundle_destination_not_the_source():
+    in_slangpy = spec_functions('include_slangpy', 'in_slangpy')['in_slangpy']
+    assert in_slangpy((r'C:\work\tests\venv\Lib\site-packages\slangpy\sgl.dll', 'slangpy'))
+    assert in_slangpy((r'C:\optix\venv\slangpy\shaders\a.slang', 'slangpy/shaders'))
+    assert not in_slangpy((r'C:\venv\slangpy\tests\test_device.py', 'slangpy/tests'))
+    assert not in_slangpy((r'C:\venv\slangpy\optix\9_0\optix.h', 'slangpy/optix/9_0'))
 
 
 def test_slangpy_and_its_components_are_collected(tmp_path, monkeypatch):
