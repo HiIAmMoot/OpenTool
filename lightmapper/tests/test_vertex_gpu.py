@@ -4,6 +4,7 @@ Blender (vertex_driver.py)."""
 import ast
 import dataclasses
 import json
+import subprocess
 import sys
 
 import numpy as np
@@ -739,6 +740,26 @@ def test_gpu_owner_skips_stop_at_the_skip_limit(tmp_path, vendor, stack, lit):
     result = gpu_lamp_run(tmp_path, vendor, occluders=panes + [(floor(-1, 1, -1, 1, z=1.0), 1, {})],
                           queries=[((.3, .2, 0), UP, False)], lights=[tools.lamp((.3, .2, 2), owner=0)])
     assert (result.irradiance[0] > 0) == lit
+
+
+def test_gpu_parent_refuses_a_missing_light_throughput_when_lamps_need_it(tmp_path, monkeypatch):
+    from test_pipeline import NV
+    np.savez(tmp_path / 'scene.npz', query_pos=np.zeros((2, 3)), edge_pos=np.zeros((0, 3)),
+             query_ignore_normals=np.array([True, False]))
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}], 'ignore_normals_mode': 'tool',
+                                                   'lights': [{}]}))
+    arrays = dict(vector=np.zeros((2, 3)), irradiance=np.zeros(2), sun_lit=np.zeros((2, 1), bool),
+                  edge_sun_lit=np.zeros((0, 1), bool), rays=np.int64(0), vertex_sun_throughput=np.zeros((2, 1, 3)))
+
+    def child(*args, **kwargs):
+        np.savez(tmp_path / 'gpu_out.npz', **arrays)
+        return subprocess.CompletedProcess(args[0], 0, b'', b'')
+
+    monkeypatch.setattr(subprocess, 'run', child)
+    with pytest.raises(GpuPassError, match='short vertex arrays'):
+        vertex_gpu.run_in_child(tmp_path, [], NV, 60)
+    arrays['vertex_light_flat'] = np.zeros((2, 3))
+    assert vertex_gpu.run_in_child(tmp_path, [], NV, 60).light_flat.shape == (2, 3)
 
 
 def test_skip_limit_reaches_the_shader():

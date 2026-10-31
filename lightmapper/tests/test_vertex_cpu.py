@@ -1306,6 +1306,11 @@ def test_cpu_child_refuses_light_throughput_of_the_wrong_shape_or_without_flagge
     arrays['vertex_light_flat'] = np.zeros((1, 3))
     with pytest.raises(vertex_cpu.CpuPassError, match='short vertex arrays'):
         vertex_cpu.run_in_child(tmp_path, [], 60)
+    (tmp_path / 'job.json').write_text(json.dumps({'scene': 'scene.npz', 'suns': [{}], 'ignore_normals_mode': 'tool',
+                                                   'lights': [{}]}))
+    del arrays['vertex_light_flat']
+    with pytest.raises(vertex_cpu.CpuPassError, match='short vertex arrays'):
+        vertex_cpu.run_in_child(tmp_path, [], 60)
 
 
 # ---------- scenery lights in the Blender pass

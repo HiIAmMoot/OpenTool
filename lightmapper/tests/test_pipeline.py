@@ -1729,7 +1729,7 @@ def test_lamp_batches_reach_the_vertex_pass_pages(tiny, monkeypatch):
     assert len(passed) == 1 and all((page == 1).all() for page in passed[0])
 
 
-def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=()):
+def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=(), route='cpu'):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1746,14 +1746,21 @@ def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=()):
         value[0].tri_ignore_normals = np.array([True, False])
         return value
 
-    def compiled(work, pages, timeout):
+    def vertex_pass():
         return vertex_gpu.VertexPassResult(np.zeros((6, 3), np.float32), np.ones(6), None, None, 0,
-                                           light_flat=light_flat), cpu_info()
+                                           light_flat=light_flat)
 
     monkeypatch.setattr(pipeline, 'chart_and_pack', chart)
     monkeypatch.setattr(pipeline, '_scene', scene)
     monkeypatch.setattr(pipeline, 'scene_lights', lambda *args: (list(lamps), {'baked': len(lamps)}))
-    monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
+    monkeypatch.setattr(vertex_cpu, 'run_in_child', lambda *args: (vertex_pass(), cpu_info()))
+    monkeypatch.setattr(vertex_gpu, 'run_in_child', lambda *args: vertex_pass(), raising=False)
+    monkeypatch.setattr(pipeline, 'run_blender_vertex_only', lambda *args: vertex_pass())
+    if route == 'gpu':
+        monkeypatch.setattr(gpu, 'probe_choice', lambda setting: GPU_CHOICE)
+    elif route == 'relaunch':
+        monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose(setting, []))
+        settings = replace(settings, device='cpu', cpu_vertex_backend='blender')
     return pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False), work=work, dry_run=True)
 
 
@@ -1772,6 +1779,22 @@ def incident_vectors(out):
                                         m.get('rendered_vertices.vertex_count'), m.get('lightmap_vertices.vertex_count'))
             vectors.append(lm['incident_radiosity'])
     return np.concatenate(vectors)
+
+
+@pytest.mark.parametrize('route', ['gpu', 'cpu', 'relaunch'])
+def test_light_flat_reaches_the_finish_on_every_route(tiny, monkeypatch, route):
+    lamps = []
+    if route == 'relaunch':
+        # (a lamp in batch 1 makes the relaunch read pages that were summed over the batches)
+        lamps = lamps_of_owners(70)
+
+        def nothing(work, s, k):
+            pages = [np.zeros((2, 2, 3), np.float32)]
+            return pages, pages, [np.ones((2, 2), bool)]
+
+        batch_runs(monkeypatch, nothing)
+    out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32), lamps, route)
+    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * np.array([[1, 2/3], [2/3, 0]]), rtol=1e-6)
 
 
 def test_dark_lamps_change_nothing(tiny, monkeypatch):

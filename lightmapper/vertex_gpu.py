@@ -644,7 +644,9 @@ def run_in_child(work: Path, pages: list[np.ndarray], adapter, timeout: float) -
             needs_throughput = (job.get('ignore_normals_mode', 'tool') == 'tool'
                                 and 'query_ignore_normals' in data and data['query_ignore_normals'].any())
         suns = len(job['suns'])
-        if (result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
+        # (a child that dropped the flat lamp light would make the finish bake none, with no error)
+        if (needs_throughput and job.get('lights') and result.light_flat is None
+                or result.vector.shape != (q, 3) or result.irradiance.shape != (q,)
                 or result.sun_lit.shape != (q, suns) or result.edge_sun_lit.shape != (edges, suns)
                 or (result.sun_throughput is not None and result.sun_throughput.shape != (q, suns, 3))
                 or (needs_throughput and result.sun_throughput is None)

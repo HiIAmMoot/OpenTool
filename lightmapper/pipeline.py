@@ -384,8 +384,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             vertex_device = f'{choice.adapter.name} ({choice.adapter.backend})'
         result = with_vertex_pass(result, vp)
     else:
-        vp = cpu_pass()
-        result = with_vertex_pass(result, vp)
+        result = with_vertex_pass(result, cpu_pass())
     stage('vertex_pass')
     begin('finish')
     ambient = {k: np.asarray(v) * s.w_amb for k, v in lighting.ambient.items()} if sources == 'all' else {}
@@ -416,8 +415,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
-            if vp.light_flat is not None:
-                raw = raw + flat_light_term(scene, vp.light_flat, i, page.width, page.height)
+            if result.light_flat is not None:
+                raw = raw + flat_light_term(scene, result.light_flat, i, page.width, page.height)
         raw_pages.append(raw)
         masks.append(mask)
         class_maps.append(cls)
