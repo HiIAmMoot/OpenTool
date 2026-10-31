@@ -22,8 +22,9 @@ binaries += [(str(path), 'pyoidn/oidn/bin') for path in sorted(oidn_bin.glob('*.
 
 def include_slangpy(name):
     parts = name.replace('\\', '/').replace('.', '/').lower().split('/')
-    return (not {'d3d12', 'optix', 'tests', 'benchmarks'} & set(parts)
+    return (not {'d3d12', 'optix', 'tests', 'benchmarks', 'git', 'github', 'testing', 'include'} & set(parts)
             and 'data/test_images' not in '/'.join(parts)
+            and not name.lower().endswith('.md')
             and Path(name).name.lower() not in {
                 'd3d12core.dll', 'd3d12sdklayers.dll', 'dxcompiler.dll', 'dxil.dll',
                 'winpixeventruntime.dll', 'slang-llvm.dll'})
