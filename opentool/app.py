@@ -12,7 +12,7 @@ from tkinter.scrolledtext import ScrolledText
 from lightmapper import blender_find, gpu
 from lightmapper.memory import free_physical_bytes
 from lightmapper.progress import STAGE_LABELS, fraction
-from . import devices, errors, estimate as estimate_module, form, jobobject, presets, runner, usersettings
+from . import devices, errors, estimate as estimate_module, examples, form, jobobject, presets, runner, usersettings
 from .estimate import EstimateInputs
 
 
@@ -30,7 +30,7 @@ class App:
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
                  log_path: Path | None = None, probe_gpu=gpu.probe_adapters,
                  probe_denoiser=devices.probe_denoiser,
-                 estimate=estimate_module.run_estimate):
+                 estimate=estimate_module.run_estimate, examples_dir: Path | None = None):
         self.root = root
         self.window = root.winfo_toplevel()
         self.tk_root = root._root()
@@ -43,6 +43,10 @@ class App:
         self._denoiser = None
         self._using_stage_rows = False
         self._estimate = estimate
+        self._examples_dir = examples_dir
+        self._example_images = {}
+        self._example_hover = None
+        self._example_focus = None
         self.generation = 0
         self.estimate_state = 'idle'
         self._estimate_inputs: EstimateInputs | None = None
@@ -168,13 +172,15 @@ class App:
         self.advanced_entries = {}
         self._advanced_open = False
         self.row_hints = {}
+        row_labels = {}
         self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
         self.adaptive_var = tk.BooleanVar(value=self.settings.adaptive_sampling)
         self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
         self.ignore_normals_var = tk.StringVar(
             value=self._ignore_normals_label(self.settings.ignore_normals_mode))
         for index, name in enumerate(presets.ADVANCED):
-            ttk.Label(self.advanced_frame, text=presets.LABELS[name]).grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
+            row_labels[name] = ttk.Label(self.advanced_frame, text=presets.LABELS[name])
+            row_labels[name].grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
             value = tk.StringVar()
             self.advanced_vars[name] = value
             if name in ('bounces', 'samples', 'vertex_rays', 'sky_grid'):
@@ -195,7 +201,8 @@ class App:
         self.adaptive_check = ttk.Checkbutton(
             self.advanced_frame, text='Adaptive sampling', variable=self.adaptive_var)
         self.adaptive_check.grid(row=self.row_order.index('adaptive_sampling'), column=1, sticky='w', pady=2)
-        ttk.Label(self.advanced_frame, text='Ignore-normals lighting').grid(
+        row_labels['ignore_normals_mode'] = ttk.Label(self.advanced_frame, text='Ignore-normals lighting')
+        row_labels['ignore_normals_mode'].grid(
             row=self.row_order.index('ignore_normals_mode'), column=0, sticky='w', padx=(0, 8), pady=2)
         self.ignore_normals_entry = ttk.Combobox(
             self.advanced_frame, values=tuple(label for label, _ in presets.IGNORE_NORMALS), textvariable=self.ignore_normals_var,
@@ -210,6 +217,24 @@ class App:
             hint.grid(row=self.row_order.index(name), column=2, sticky='w', padx=(8, 0))
             self.row_hints[name] = hint
         self.page_max_hint = self.row_hints['page_max']
+        # (it covers the descriptions while it shows: both want column 2, and the example says more)
+        self.example_panel = ttk.Frame(self.advanced_frame)
+        self.example_panel.grid(row=0, column=2, rowspan=len(self.row_order), sticky='nsew', padx=(8, 0))
+        self.example_panel.grid_remove()
+        self.example_text = ttk.Label(self.example_panel, wraplength=180, justify='left')
+        self.example_text.pack(anchor='w')
+        self.example_image_label = ttk.Label(self.example_panel)
+        self.example_image_label.pack(anchor='w', pady=(4, 0))
+        controls = {**self.advanced_entries, 'adaptive_sampling': self.adaptive_check,
+                    'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check}
+        for name in self.row_order:
+            for widget in (row_labels.get(name), controls[name]):
+                if widget is None:
+                    continue
+                widget.bind('<Enter>', lambda _event, name=name: self._on_example_hover(name), add='+')
+                widget.bind('<Leave>', lambda _event: self._on_example_hover(None), add='+')
+            controls[name].bind('<FocusIn>', lambda _event, name=name: self._on_example_focus(name), add='+')
+            controls[name].bind('<FocusOut>', lambda _event: self._on_example_focus(None), add='+')
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
         for value in (self.adaptive_var, self.ignore_normals_var):
@@ -541,6 +566,29 @@ class App:
         finally:
             self._setting_preset = False
         self._inputs_changed()
+
+    def _on_example_hover(self, name: str | None):
+        self._example_hover = name
+        self._show_example()
+
+    def _on_example_focus(self, name: str | None):
+        self._example_focus = name
+        self._show_example()
+
+    def _show_example(self):
+        name = self._example_hover or self._example_focus
+        if name is None:
+            self.example_panel.grid_remove()
+            return
+        self.example_text.configure(text=examples.EXAMPLE_TEXT[name])
+        if name not in self._example_images:
+            path = examples.example_image(name, self._examples_dir)
+            # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
+            self._example_images[name] = tk.PhotoImage(master=self.example_panel, data=path.read_bytes()) if path else None
+        image = self._example_images[name]
+        self.example_image_label.configure(image=image or '')
+        self.example_panel.grid()
+        self.example_panel.lift()
 
     def _update_row_hints(self):
         adaptive = self.adaptive_var.get()

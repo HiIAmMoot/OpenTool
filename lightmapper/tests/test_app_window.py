@@ -18,6 +18,7 @@ from opentool.app import App
 from opentool.devices import result_line
 from opentool.runner import BakeOutcome
 from opentool import app as app_module
+from opentool import examples
 from opentool import presets
 from opentool import usersettings
 from opentool import form as form_module
@@ -1718,3 +1719,33 @@ def test_empty_rays_per_texel_under_adaptive_says_how_to_fill_it(app, tiny):
         app.request()
     assert str(caught.value) == message
     assert app.advanced_error['text'] == message
+
+
+def test_hovering_a_row_shows_its_example(app):
+    app._on_example_hover('samples')
+    assert app.example_panel.winfo_manager() == 'grid'
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert app.example_image_label.cget('image')
+
+
+def test_hover_wins_over_focus_and_leaving_falls_back(app):
+    app._on_example_focus('samples')
+    app._on_example_hover('bounces')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
+    app._on_example_hover(None)
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    app._on_example_focus(None)
+    assert app.example_panel.winfo_manager() == ''
+
+
+def test_missing_example_image_shows_text_only(make_app, tmp_path):
+    app = make_app(examples_dir=tmp_path)
+    app._on_example_hover('samples')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert not app.example_image_label.cget('image')
+
+
+def test_row_widgets_are_bound_for_examples(app):
+    entry = app.advanced_entries['samples']
+    assert entry.bind('<Enter>')
+    assert entry.bind('<FocusIn>')

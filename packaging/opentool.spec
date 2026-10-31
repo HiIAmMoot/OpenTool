@@ -12,6 +12,7 @@ from lightmapper.resources import REQUIRED
 gui_script = root / 'packaging' / 'opentool_gui.py'
 cli_script = root / 'packaging' / 'opentool_cli.py'
 datas = [(str(root / name), str(Path(name).parent)) for name in REQUIRED]
+datas += [(str(path), 'opentool/examples') for path in sorted((root / 'opentool' / 'examples').glob('*.png'))]
 oidn_bin = Path(metadata.distribution('pyoidn').locate_file('pyoidn/oidn/bin'))
 binaries = [(str(root / 'lightmapper/vendor/xatlas/build/xatlas.dll'),
              'lightmapper/vendor/xatlas/build')]
