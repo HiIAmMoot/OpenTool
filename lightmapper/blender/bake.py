@@ -13,6 +13,7 @@ The two-closure diffuse bake is restored on flagged sub-texels before averaging,
 The vertex pass still receives the uncorrected diffuse page; mixed texels never scale a neighbour's light.
 """
 
+from dataclasses import dataclass
 import json
 import math
 import os
@@ -35,6 +36,10 @@ TWIN_SEPARATION = 1e-4
 # the dominant normal axis carries at least 1/sqrt(3) of the move, giving over two float32 steps of rounding margin
 TWIN_SEPARATION_STEPS = 4
 PASS_LIMIT = 8
+# owner triangles a lamp's shadow ray walks through before the ray ends as a miss
+SKIP_LIMIT = 256
+# lamp shadow rays are cast one by one here, so a block is small
+LAMP_RAY_CHUNK = 2 ** 14
 LUMA = np.float64([0.2126, 0.7152, 0.0722])
 GOLDEN_FRACTION = 0.618034
 SEED_STRIDE = 1000
@@ -830,6 +835,60 @@ def radical_inverse(i):
     return result
 
 
+# the lamp rays are a copy of vertex_gpu's (this script cannot import the package); the Blender parity tests hold
+# the two passes equal
+def _unit(direction):
+    d = np.float64(direction)
+    return d / np.linalg.norm(d)
+
+
+@dataclass
+class LampRays:
+    point: np.ndarray
+    light: np.ndarray
+    origin: np.ndarray
+    direction: np.ndarray
+    limit: np.ndarray
+    skip: np.ndarray
+    factor: np.ndarray
+
+
+def _lamp_factor(light, d, to_light, normals, flagged):
+    cosine = np.where(flagged, 1.0, np.einsum('ij,ij->i', normals, to_light))
+    if light['kind'] != 3:
+        return cosine / (d * d)
+    s = -(to_light @ _unit(light['axis']))
+    cutoff, falloff = float(light['cos_cutoff']), float(light['cos_falloff'])
+    # the cutoff test comes first, as in lights.ramp: a falloff wider than the cutoff leaves a step at the cutoff
+    width = np.where(falloff > cutoff, falloff - cutoff, 1.0)
+    ramp = np.where(s <= cutoff, 0.0, np.where(s >= falloff, 1.0, (s - cutoff) / width))
+    return cosine * ramp / (d * d)
+
+
+def iter_lamp_rays(points, normals, flagged, usable, lights, chunk=LAMP_RAY_CHUNK):
+    """The shadow rays of every lamp to every point it lights, ordered by light then point, in blocks of at most chunk rows."""
+    points, normals = np.asarray(points, np.float64), np.asarray(normals, np.float64)
+    flagged, usable = np.asarray(flagged, bool), np.asarray(usable, bool)
+    for k, light in enumerate(lights):
+        position = np.float64(light['position'])
+        for start in range(0, len(points), chunk):
+            rows = np.arange(start, min(start + chunk, len(points)))
+            offset = position - points[rows]
+            d = np.linalg.norm(offset, axis=1)
+            near = (d >= 1e-4) & (d < float(light['reach'])) & usable[rows]
+            rows, offset, d = rows[near], offset[near], d[near]
+            direction = offset / d[:, None]
+            factor = _lamp_factor(light, d, direction, normals[rows], flagged[rows])
+            lit = factor > 0
+            rows, direction, d, factor = rows[lit], direction[lit], d[lit], factor[lit]
+            if not len(rows):
+                continue
+            yield LampRays(rows.astype(np.int64), np.full(len(rows), k, np.int64),
+                           points[rows] + RAY_EPSILON * direction, direction,
+                           np.maximum(0.0, d - 2 * RAY_EPSILON), np.full(len(rows), int(light['owner']), np.int64),
+                           factor)
+
+
 class VertexPass:
     """Incident radiosity at the query points as tool builds it: cosine-weighted rays over the receivers and occluders
     (one triangle id space, receivers first), shaded from the baked pages, a shadow ray per reaching sun, and the
@@ -859,8 +918,11 @@ class VertexPass:
         # a see-through emitter among the occluders is still seen by the rays that gather light (a shadow ray passes it)
         self.glows = np.concatenate([np.zeros(self.n_recv, np.bool_), self.emission[self.n_recv:].any(axis=1)])
         self.normals = np.cross(self.corners[:, 1] - self.corners[:, 0], self.corners[:, 2] - self.corners[:, 0])
+        self.owner = np.concatenate([np.full(self.n_recv, -1),
+                                     scene.get('occ_tri_owner', np.full(n_occ, -1))]).astype(np.int64)
         self.scene = scene
         self.job = job
+        self.light_flat = None
         self.pages = [np.asarray(p, np.float64) for p in pages]
         # per page, the flagged samples' own light that the reflected stages read on flagged hits (None outside them)
         self.flagged_pages = None
@@ -914,16 +976,27 @@ class VertexPass:
     def faces(self, index, heading):
         return float(np.dot(self.normals[index], heading)) < 0
 
-    def cast(self, origin, direction, carried=None):
+    def cast(self, origin, direction, carried=None, limit=RAY_LENGTH, skip=-1):
         """First solid hit (triangle, point) or (-1, None); cut-out holes and non-casting triangles are passed,
-        and a passed triangle's tint multiplies carried (a length 3 array) when one is given."""
+        and a passed triangle's tint multiplies carried (a length 3 array) when one is given. A hit on a triangle
+        of owner skip (skip >= 0) is passed without tint, and SKIP_LIMIT of them end the ray as a miss."""
         start = mathutils.Vector(origin)
         heading = mathutils.Vector(direction)
-        remaining = RAY_LENGTH
-        for _ in range(PASS_LIMIT + 1):
+        remaining = limit
+        passes = skips = 0
+        while passes <= PASS_LIMIT and remaining > 0:
             location, _, index, distance = self.bvh.ray_cast(start, heading, remaining)
             if index is None:
                 return -1, None
+            if skip >= 0 and self.owner[index] == skip:
+                # a lamp's own placement never blocks it; the cap ends a stack of owner triangles as a miss
+                skips += 1
+                if skips >= SKIP_LIMIT:
+                    return -1, None
+                start = location + heading * RAY_EPSILON
+                remaining -= distance + RAY_EPSILON
+                continue
+            passes += 1
             twin = int(self.twin[index])
             if twin >= 0 and not self.faces(index, heading) and self.faces(twin, heading):
                 # the hit point stays put; interpolation recomputes weights in the facing twin's corner order
@@ -937,6 +1010,19 @@ class VertexPass:
             start = location + heading * RAY_EPSILON
             remaining -= distance + RAY_EPSILON
         return -1, None
+
+    def lamp_rays(self, points, normals, flagged, usable):
+        """(point, light, direction, factor, carried tint, cast) of every lamp ray that is not blocked, in the order of
+        iter_lamp_rays; cast is whether a shadow ray was traced (a limit of 0 is unoccluded without one)."""
+        for lamp in iter_lamp_rays(points, normals, flagged, usable, self.job.get('lights') or [], LAMP_RAY_CHUNK):
+            for i in range(len(lamp.point)):
+                carried = np.ones(3)
+                cast = bool(lamp.limit[i] > 0)
+                if cast and self.cast(lamp.origin[i].tolist(), lamp.direction[i].tolist(), carried, lamp.limit[i],
+                                      lamp.skip[i])[0] >= 0:
+                    yield None, None, None, None, None, True
+                    continue
+                yield lamp.point[i], lamp.light[i], lamp.direction[i], lamp.factor[i], carried, cast
 
     def _shade(self, tri, loc, direction, cls, with_ambient=True, rgb=False, with_pages=True, with_emission=True):
         """Radiance arriving along each ray: tri (n,) with -1 for a miss, loc (n,3), direction (n,3), cls (n,) of the query."""
@@ -1096,6 +1182,19 @@ class VertexPass:
                         self.sun_lit[ids[a], sun_index] = True
                         if self.sun_throughput is not None:
                             self.sun_throughput[ids[a], sun_index] = carried
+        lights = job.get('lights') or []
+        if self.sun_throughput is not None:
+            self.light_flat = np.zeros((queries, 3))
+        for point, light, direction, factor, carried, cast in self.lamp_rays(pos, nrm, ignore_normals, usable):
+            cast_count += cast
+            if point is None:
+                continue
+            strength = np.float64(lights[light]['strength']) * carried
+            weight = float(strength @ LUMA) * factor
+            vector[point] += weight * direction
+            irradiance[point] += weight
+            if self.light_flat is not None and ignore_normals[point]:
+                self.light_flat[point] += strength * factor / np.pi
         edge_pos = scene.get('edge_pos', np.empty((0, 3), np.float32))
         self.edge_sun_lit = np.zeros((len(edge_pos), len(job['suns'])), np.bool_)
         for first in range(0, len(edge_pos), QUERY_CHUNK):
@@ -1113,6 +1212,8 @@ class VertexPass:
                     cast_count += 1
                     self.edge_sun_lit[i, k] = self.cast(
                         (edge_pos[i].astype(np.float64) + RAY_EPSILON * d).tolist(), d.tolist(), np.ones(3))[0] < 0
+        if self.light_flat is not None:
+            self.light_flat = self.light_flat.astype(np.float32)
         return vector.astype(np.float32), irradiance.astype(np.float32), cast_count
 
     def gather_texels(self):
@@ -1133,6 +1234,12 @@ class VertexPass:
                 casts += 1
                 if self.cast((pos[a] + RAY_EPSILON * d).tolist(), d.tolist(), carried)[0] < 0:
                     self.texel_rgb[a] += np.float64(sun['color']) * sun['strength'] / np.pi * carried
+        lights = job.get('lights') or []
+        normals = scene['texel_normal'].astype(np.float64) / np.where(usable, length, 1)[:, None]
+        for point, light, _, factor, carried, cast in self.lamp_rays(pos, normals, np.ones(count, bool), usable):
+            casts += cast
+            if point is not None:
+                self.texel_rgb[point] += np.float64(lights[light]['strength']) * carried * factor / np.pi
         sun_rgb, base = self.texel_rgb, self.pages
         # original emission is direct reception like the sun, so it is in place before the first reflected stage
         # (gathered inside stage zero, a flagged sheet it lights could pass that light on only a stage later)
@@ -1321,6 +1428,8 @@ def main():
             out['vertex_sun_throughput'] = vertex_pass.sun_throughput
         out['texel_rgb'] = vertex_pass.texel_rgb
         out['edge_sun_lit'] = vertex_pass.edge_sun_lit
+        if vertex_pass.light_flat is not None:
+            out['vertex_light_flat'] = vertex_pass.light_flat
         out['vertex_rays_cast'] = np.int64(rays)
         out['vertex_rays_used'] = np.int64(vertex_pass.rays_used)
         elapsed = time.perf_counter() - began

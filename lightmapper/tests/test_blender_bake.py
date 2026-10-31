@@ -1073,3 +1073,17 @@ def test_batched_lamps_equal_one_batch(tmp_path, monkeypatch):
     assert batched.mean() == pytest.approx(one.mean(), rel=0.02)
     noise = (one - other).std()
     assert (np.abs(batched - one) < 3 * noise).mean() > 0.97
+
+
+@pytest.mark.blender
+def test_page_bake_point_light_matches_the_vertex_pass_on_a_plane(tmp_path):
+    # the page bakes strength cos / (pi d^2) and the vertex pass irradiance strength cos / d^2 (the pass works in pi x
+    # page units), so a page texel times pi is the irradiance at the same point
+    point = ((16 + .5) * TEXEL, (16 + .5) * TEXEL, 0)
+    scene = replace(build([dict(quad=floor(0, LAMP_SIDE, 0, LAMP_SIDE))]), query_pos=np.float32([point]))
+    s = Settings(**LAMP_SETTINGS)
+    write_job(tmp_path, scene, [(LAMP_PAGE, LAMP_PAGE)], [], {}, s, 'all', lights=[lamp_light((4, 4, 1))])
+    result = run_blender(tmp_path, s)
+    assert result.vertex_irradiance[0] == pytest.approx(
+        np.pi * result.pages[0][16, 16, 0], rel=0.05)
+    assert result.vertex_irradiance[0] > 0.3

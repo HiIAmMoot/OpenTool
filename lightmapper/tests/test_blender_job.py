@@ -492,6 +492,24 @@ def test_vertex_only_relaunch_equals_the_in_blender_pass(tmp_path):
 
 
 @pytest.mark.blender
+def test_vertex_only_relaunch_returns_the_lamp_throughput(tmp_path):
+    from dataclasses import replace
+    from conftest import LIGHTMAPPER_BLENDER
+    from test_blender_bake import build, floor, lamp_light
+    scene = replace(build([dict(quad=floor(-4, 4, -4, 4))]), query_pos=np.float32([[0, 0, 0], [1, 0, 0]]),
+                    query_normal=np.float32([[0, 0, 1]] * 2), query_class=np.int16([0, 0]),
+                    query_ignore_normals=np.bool_([True, False]))
+    s = Settings(samples=4, vertex_rays=1, w_light=1.0, blender=str(LIGHTMAPPER_BLENDER))
+    write_job(tmp_path, scene, [(8, 8)], [], {}, s, lights=[lamp_light((0, 0, 2))])
+    first = run_blender(tmp_path, s)
+    relaunch = blender_job.run_blender_vertex_only(tmp_path, s, first.diffuse_pages)
+    assert relaunch.light_flat.shape == (2, 3) and relaunch.light_flat[0].min() > 0
+    np.testing.assert_array_equal(relaunch.light_flat[1], 0)
+    np.testing.assert_array_equal(first.light_flat, relaunch.light_flat)
+    assert blender_job.with_vertex_pass(first, relaunch).light_flat is relaunch.light_flat
+
+
+@pytest.mark.blender
 def test_skip_returns_diffuse_pages_and_no_vector(tmp_path):
     s = Settings(samples=4, vertex_rays=16)
     write_job(tmp_path, make_scene(), [(8, 8)], make_suns(), AMBIENT, s, textures=[TEXTURE], vertex_pass='skip')

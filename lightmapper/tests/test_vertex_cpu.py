@@ -12,10 +12,11 @@ import pytest
 
 from lightmapper import entry, frozen, vertex_cpu, vertex_gpu
 from lightmapper.formats.lights import SceneLight, ramp
-from lightmapper.blender_job import write_job
+from lightmapper.blender_job import BAKE_SCRIPT, write_job
 from test_blender_bake import UP, build, floor, full_quad, quad, sun, wall_x
 from test_vertex_gpu import CASES, edge_receivers, textured_room, write_bare_scene
-from test_vertex_pass import (S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene, roof,
+from conftest import LIGHTMAPPER_BLENDER
+from test_vertex_pass import (DRIVER, S, assert_asymmetric_twin, assert_twin_light, asymmetric_twin_scene, roof,
                               run_driver, twin_scene, unpaired_back_face_scene, wall_facing_minus_x,
                               texel_scene, mixed_scene, assert_flagged_bounce, assert_emission_relay, assert_mixed)
 
@@ -275,7 +276,7 @@ def test_closest_hit_matches_blender_on_a_random_soup(tmp_path, blender_exe):
 def test_copied_constants_equal_bake_py():
     source = Path(vertex_cpu.__file__).parent / 'blender' / 'bake.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
-    names = ('RAY_LENGTH', 'RAY_EPSILON', 'PASS_LIMIT', 'LUMA', 'GOLDEN_FRACTION', 'SEED_SPIN')
+    names = ('RAY_LENGTH', 'RAY_EPSILON', 'PASS_LIMIT', 'SKIP_LIMIT', 'LUMA', 'GOLDEN_FRACTION', 'SEED_SPIN')
     namespace = {'np': np}
     for node in tree.body:
         if isinstance(node, ast.Assign) and len(node.targets) == 1 and getattr(node.targets[0], 'id', None) in names:
@@ -1305,3 +1306,69 @@ def test_cpu_child_refuses_light_throughput_of_the_wrong_shape_or_without_flagge
     arrays['vertex_light_flat'] = np.zeros((1, 3))
     with pytest.raises(vertex_cpu.CpuPassError, match='short vertex arrays'):
         vertex_cpu.run_in_child(tmp_path, [], 60)
+
+
+# ---------- scenery lights in the Blender pass
+
+LAMP_CASES = ['plane', 'wall', 'glass', 'cutout', 'own_box', 'flagged', 'spot', 'light_on_a_wall']
+
+
+def blender_lamp_pass(work):
+    env = dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent))
+    done = subprocess.run([str(LIGHTMAPPER_BLENDER), '-b', '--factory-startup', '--python-exit-code', '1',
+                           '--python', DRIVER, '--', str(work)], capture_output=True, text=True, env=env,
+                          stdin=subprocess.DEVNULL)
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return np.load(work / 'vp.npz')
+
+
+def assert_lamp_parity(blender, ours):
+    assert_parity(blender, ours)
+    np.testing.assert_allclose(ours.texel_rgb, blender['texel_rgb'], rtol=1e-4, atol=1e-6)
+    if 'light_flat' in blender.files:
+        np.testing.assert_allclose(ours.light_flat, blender['light_flat'], rtol=1e-4, atol=1e-6)
+    else:
+        assert ours.light_flat is None
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('name', LAMP_CASES)
+def test_numba_matches_blender_pass_on_the_lamp_scenes(tmp_path, name):
+    case = lamp_case(name)
+    textures = [np.full((1, 1, 4), 0, np.uint8)] if name == 'cutout' else None
+    pages = write_lamp_case(tmp_path, textures=textures, **case)
+    ours = vertex_cpu.load_and_run(tmp_path, pages)
+    blender = blender_lamp_pass(tmp_path)
+    assert ours.irradiance.max() > 0 or name == 'wall'
+    assert_lamp_parity(blender, ours)
+
+
+@pytest.mark.blender
+def test_numba_matches_blender_pass_on_the_lamp_throughput(tmp_path):
+    case = lamp_case('glass', queries=[((0, 0, 0), UP, True), ((1, 0, 0), UP, False)])
+    pages = write_lamp_case(tmp_path, **case)
+    ours = vertex_cpu.load_and_run(tmp_path, pages)
+    blender = blender_lamp_pass(tmp_path)
+    assert ours.light_flat[0].max() > 0
+    assert_lamp_parity(blender, ours)
+
+
+@pytest.mark.blender
+def test_numba_matches_blender_pass_on_the_owner_skip_limit(tmp_path):
+    panes = [(floor(-1, 1, -1, 1, z=.1 + .002 * k), 0, {}) for k in range(300)]
+    pages = write_lamp_case(tmp_path, occluders=panes + [(floor(-1, 1, -1, 1, z=1.0), 1, {})],
+                            queries=[((.3, .2, 0), UP, False)], lights=[lamp((.3, .2, 2), owner=0)])
+    ours = vertex_cpu.load_and_run(tmp_path, pages)
+    assert ours.irradiance[0] > 0
+    assert_lamp_parity(blender_lamp_pass(tmp_path), ours)
+
+
+@pytest.mark.blender
+def test_numba_matches_blender_pass_on_the_enhanced_lamp_texels(tmp_path):
+    sheets = [floor(-20, 20, -20, 20, z=0), floor(-20, 20, -20, 20, z=-1)]
+    pages = write_lamp_case(tmp_path, receivers=sheets, flagged_receivers=(0, 1), pages=2, mode='enhanced',
+                            albedo_fallback=.5, queries=[((0, 0, 0), (0, 0, 0), False)],
+                            lights=[lamp((0, 0, 2))])
+    ours = vertex_cpu.load_and_run(tmp_path, pages)
+    assert ours.texel_rgb.max() > 0
+    assert_lamp_parity(blender_lamp_pass(tmp_path), ours)

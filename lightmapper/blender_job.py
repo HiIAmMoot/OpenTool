@@ -113,6 +113,7 @@ class BakeResult:
     texel_samples_used: int | None = None
     vertex_sun_throughput: np.ndarray | None = None
     texel_rgb: np.ndarray | None = None
+    light_flat: np.ndarray | None = None
 
 
 # the owners of each batch of lamps: a batch is one bake of all lamps whose owners are in it, so that no lamp's link set
@@ -297,7 +298,9 @@ def run_blender(work: Path, s: Settings) -> BakeResult:
                            int(data['texel_samples_used']) if 'texel_samples_used' in data.files else None,
                            np.array(data['vertex_sun_throughput'], np.float32)
                             if 'vertex_sun_throughput' in data.files else None,
-                            np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
+                            np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None,
+                            np.array(data['vertex_light_flat'], np.float32)
+                            if 'vertex_light_flat' in data.files else None)
 
 
 def run_blender_lamp_batch(work: Path, s: Settings, batch: int):
@@ -327,13 +330,15 @@ def run_blender_vertex_only(work: Path, s: Settings, pages: list[np.ndarray]) ->
                                 np.array(data['edge_sun_lit'], bool), int(data['vertex_rays_cast']),
                                 np.array(data['vertex_sun_throughput'], np.float32)
                                  if 'vertex_sun_throughput' in data.files else None,
-                                np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None)
+                                np.array(data['texel_rgb'], np.float32) if 'texel_rgb' in data.files else None,
+                                np.array(data['vertex_light_flat'], np.float32)
+                                if 'vertex_light_flat' in data.files else None)
 
 
 def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
     return replace(result, vertex_vector=vp.vector, vertex_irradiance=vp.irradiance,
                    vertex_sun_lit=vp.sun_lit, edge_sun_lit=vp.edge_sun_lit, vertex_rays_cast=vp.rays,
-                   vertex_sun_throughput=vp.sun_throughput, texel_rgb=vp.texel_rgb)
+                   vertex_sun_throughput=vp.sun_throughput, texel_rgb=vp.texel_rgb, light_flat=vp.light_flat)
 
 
 def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> list[np.ndarray]:
