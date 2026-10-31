@@ -156,7 +156,7 @@ The Windows app's presets, timed on Blood Gulch with the RTX 4060 and the device
 | Normal | 29 s | 70 s |
 | High | 67 s | 220 s |
 
-Rat Race at the default settings takes 17 s on the NVIDIA GPU, 35 s on the AMD Radeon 680M (where the denoiser runs on the CPU) and 181 s on the CPU only in 0.2.0 and 31 s in 0.2.1, whose CPU vertex pass is compiled. Rat Race at Normal on the CPU only took 57 s in 0.2.0 and takes 23 s in 0.2.1, with the CPU counts of 256 rays per texel and 1024 per vertex. The first CPU bake on a computer compiles the pass once, which takes about a minute; later bakes load it from a cache. These CPU times were measured with `ignore_normals_mode` set to `tool`.
+Rat Race at the default settings takes 17 s on the NVIDIA GPU, 35 s on the AMD Radeon 680M (where the denoiser runs on the CPU) and 181 s on the CPU only in 0.2.0 and 31 s in 0.2.1, whose CPU vertex pass is compiled. Rat Race at Normal on the CPU only took 57 s in 0.2.0 and takes 23 s in 0.2.1, with the CPU counts of 256 rays per texel and 1024 per vertex. The first CPU bake on a computer compiles the pass once, which takes about a minute; later bakes load it from a cache. These CPU times were measured with `ignore_normals_mode` set to `tool`, which is now the default, so the CLI bakes Traditional unless a settings file sets `"enhanced"`.
 
 `summary.json` records how long each stage took on your machine, and which device ran each one.
 

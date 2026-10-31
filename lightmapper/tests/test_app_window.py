@@ -1,3 +1,4 @@
+import json
 import threading
 import time
 from pathlib import Path
@@ -5,6 +6,7 @@ from pathlib import Path
 import pytest
 
 tk = pytest.importorskip('tkinter')
+from tkinter import ttk
 
 from test_pipeline import tiny
 from lightmapper.blender_find import Blender, BlenderNotFound
@@ -103,7 +105,7 @@ def test_first_screen_widgets(app):
     assert app.ignore_normals_entry.winfo_parent() == str(app.advanced_frame)
     assert tuple(app.ignore_normals_entry['values']) == ('Enhanced', 'Traditional')
     assert str(app.ignore_normals_entry['state']) == 'readonly'
-    assert app.ignore_normals_var.get() == 'Enhanced'
+    assert app.ignore_normals_var.get() == 'Traditional'
     assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
     assert app.tags_label['text'] == 'HCEK tags folder'
     assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
@@ -113,14 +115,68 @@ def test_first_screen_widgets(app):
     assert app.advanced_frame.winfo_manager() == 'grid'
 
 
-def test_ignore_normals_setting_is_independent_of_quality_preset(app):
-    app.ignore_normals_var.set('Traditional')
-    assert app.preset_var.get() == 'Normal'
-    app.lightmap_32bit_var.set(True)
-    assert app.preset_var.get() == 'Normal'
+def test_presets_set_ignore_normals_and_a_change_keeps_the_preset(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
     app._select_preset('Draft')
     assert app.ignore_normals_var.get() == 'Traditional'
+    app._select_preset('Ultra')
+    assert app.ignore_normals_var.get() == 'Enhanced'
+    app._select_preset('Normal')
+    assert app.ignore_normals_var.get() == 'Traditional'
+    app.ignore_normals_var.set('Enhanced')
+    assert app.preset_var.get() == 'Normal'
+    assert app.request().settings.ignore_normals_mode == 'enhanced'
+    app.lightmap_32bit_var.set(True)
+    assert app.preset_var.get() == 'Normal'
     assert app.lightmap_32bit_var.get() is True
+
+
+def test_ultra_is_a_preset_button(app):
+    def radiobuttons(widget):
+        found = [widget] if isinstance(widget, ttk.Radiobutton) else []
+        for child in widget.winfo_children():
+            found += radiobuttons(child)
+        return found
+    ultra = [button for button in radiobuttons(app.root) if button['text'] == 'Ultra']
+    assert len(ultra) == 1
+    ultra[0].invoke()
+    assert app.preset_var.get() == 'Ultra'
+    assert app.advanced_vars['texels_per_unit'].get() == '8'
+    assert app.advanced_vars['page_max'].get() == '2048'
+
+
+def test_a_0_2_2_settings_file_keeps_enhanced_on_a_named_preset(tmp_path, make_app):
+    (tmp_path / 's.json').write_text(json.dumps({
+        'preset': 'Normal', 'ignore_normals_mode': 'enhanced', 'adaptive_sampling': True}))
+    a = make_app(store_path=tmp_path / 's.json')
+    assert a.preset_var.get() == 'Normal'
+    assert a.ignore_normals_var.get() == 'Enhanced'
+
+
+def test_a_0_2_1_settings_file_opens_on_its_preset_with_the_new_values(tmp_path, make_app):
+    (tmp_path / 's.json').write_text(json.dumps({
+        'preset': 'Normal', 'ignore_normals_mode': 'enhanced',
+        'advanced': {'texels_per_unit': '2', 'samples': '1024', 'vertex_rays': '4096',
+                     'sky_grid': '4', 'bounces': '1', 'page_max': '512'}}))
+    a = make_app(store_path=tmp_path / 's.json')
+    assert a.preset_var.get() == 'Normal'
+    assert a.advanced_vars['vertex_rays'].get() == '1024'
+    assert a.ignore_normals_var.get() == 'Traditional'
+
+
+def test_a_saved_custom_form_keeps_its_values_and_mode(tmp_path, make_app):
+    (tmp_path / 's.json').write_text(json.dumps({
+        'preset': 'Custom', 'ignore_normals_mode': 'enhanced',
+        'advanced': {'texels_per_unit': '2', 'samples': '1024', 'vertex_rays': '300',
+                     'sky_grid': '4', 'bounces': '1', 'page_max': '512'}}))
+    a = make_app(store_path=tmp_path / 's.json')
+    assert a.preset_var.get() == 'Custom'
+    assert a.advanced_vars['vertex_rays'].get() == '300'
+    assert a.ignore_normals_var.get() == 'Enhanced'
 
 
 @pytest.mark.parametrize('choice, mode', [('Enhanced', 'enhanced'), ('Traditional', 'tool')])
@@ -174,7 +230,7 @@ def test_request_carries_the_form(app, tiny):
 
 def test_draft_fills_all_advanced_fields(app):
     app._select_preset('Draft')
-    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='256', sky_grid='2', bounces='1', page_max='512')
 
 
 def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
@@ -1052,11 +1108,11 @@ def test_missing_vendor_hint_updates_on_selection(make_app):
     a.device_box.set('CPU only')
     a.device_box.event_generate('<<ComboboxSelected>>')
     a.root.update()
-    assert a.device_hint['text'] == 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'
+    assert a.device_hint['text'] == 'Bakes on the CPU, with fewer rays per texel for the presets.'
 
 
 def test_gpu_note_shows_for_named_presets_only(app):
-    note = 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
+    note = 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
     assert app.preset_note['text'] == note
     app._select_preset('Custom')
     assert app.preset_note['text'] == '' and app.preset_note.winfo_manager() == ''

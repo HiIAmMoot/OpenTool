@@ -4,7 +4,7 @@ import subprocess
 
 from lightmapper import denoise_worker, frozen, gpu
 
-CPU_HINT = 'Bakes on the CPU, with fewer rays for Draft, Normal and High.'
+CPU_HINT = 'Bakes on the CPU, with fewer rays per texel for the presets.'
 
 
 def probe_denoiser():

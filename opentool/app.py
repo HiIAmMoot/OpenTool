@@ -133,10 +133,10 @@ class App:
         for name in (*presets.PRESET_NAMES, presets.CUSTOM):
             ttk.Radiobutton(quality, text=name, value=name, variable=self.preset_var,
                             command=lambda selected=name: self._select_preset(selected)).pack(side='left', padx=(8, 0))
-        self.preset_hint = ttk.Label(quality, text=presets.PRESET_HINTS['Normal'])
-        self.preset_hint.pack(side='left', padx=(12, 0))
+        self.preset_hint = ttk.Label(quality_block, text=presets.PRESET_HINTS['Normal'])
+        self.preset_hint.grid(row=1, column=0, sticky='w')
         self.preset_note = ttk.Label(quality_block)
-        self.preset_note.grid(row=1, column=0, sticky='w')
+        self.preset_note.grid(row=2, column=0, sticky='w')
 
         self.new_names_var = tk.BooleanVar(value=self.settings.new_names)
         options = ttk.Frame(self.frame)
@@ -192,7 +192,7 @@ class App:
             self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
         self.lightmap_32bit_check.grid(row=len(presets.ADVANCED), column=0, columnspan=2, sticky='w', pady=2)
         self.ignore_normals_var = tk.StringVar(
-            value={value: label for label, value in presets.IGNORE_NORMALS}[self.settings.ignore_normals_mode])
+            value=self._ignore_normals_label(self.settings.ignore_normals_mode))
         ttk.Label(self.advanced_frame, text='Ignore-normals lighting').grid(
             row=len(presets.ADVANCED) + 1, column=0, sticky='w', padx=(0, 8), pady=2)
         self.ignore_normals_entry = ttk.Combobox(
@@ -253,8 +253,10 @@ class App:
         ttk.Checkbutton(self.frame, text='Detailed log', variable=self.verbose_var).grid(row=19, column=0, sticky='w')
 
     def _restore(self):
+        custom = self.settings.preset == presets.CUSTOM
         self._select_preset(self.settings.preset)
-        for name, value in self.settings.advanced.items():
+        # (a named preset's saved counts are its own, and 0.1.x-0.2.1 saved the old ones)
+        for name, value in self.settings.advanced.items() if custom else ():
             if name in self.advanced_vars:
                 if name == 'texels_per_unit':
                     try:
@@ -262,6 +264,9 @@ class App:
                     except (TypeError, ValueError):
                         pass
                 self.advanced_vars[name].set(value)
+        # after the preset, which sets its own lighting; 0.2.1 saved 'enhanced' for everyone, so there a preset keeps its own
+        if custom or not self.settings.legacy_0_2_1:
+            self.ignore_normals_var.set(self._ignore_normals_label(self.settings.ignore_normals_mode))
         if self.settings.advanced_open:
             self._toggle_advanced()
         if not self.settings.tags:
@@ -476,6 +481,10 @@ class App:
         self._set_optional_label(self.preset_note, presets.GPU_NOTE if self.preset_var.get() in presets.PRESET_NAMES else '')
 
     @staticmethod
+    def _ignore_normals_label(mode):
+        return next(label for label, value in presets.IGNORE_NORMALS if value == mode)
+
+    @staticmethod
     def _device_label(value):
         return next((label for label, setting in presets.DEVICES if setting == value), presets.DEVICES[0][0])
 
@@ -506,8 +515,10 @@ class App:
             self.preset_var.set(name)
             self._update_hint()
             if name in presets.PRESET_NAMES:
-                for field, value in presets.PRESETS[name].items():
+                for field in presets.ADVANCED:
+                    value = presets.PRESETS[name][field]
                     self.advanced_vars[field].set(presets.format_density(value) if field == 'texels_per_unit' else str(value))
+                self.ignore_normals_var.set(self._ignore_normals_label(presets.PRESETS[name]['ignore_normals_mode']))
         finally:
             self._setting_preset = False
         self._inputs_changed()

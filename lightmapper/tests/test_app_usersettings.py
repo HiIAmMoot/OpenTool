@@ -27,17 +27,33 @@ def test_unknown_device_falls_back_to_auto(tmp_path, value):
     assert load(path).device == 'auto'
 
 
-def test_settings_file_without_ignore_normals_mode_loads_enhanced(tmp_path):
+def test_settings_file_without_ignore_normals_mode_loads_tool(tmp_path):
     path = tmp_path / 's.json'
     path.write_text(json.dumps({'preset': 'High'}))
-    assert load(path).ignore_normals_mode == 'enhanced'
+    assert load(path).ignore_normals_mode == 'tool'
 
 
 @pytest.mark.parametrize('value', ['bogus', 'Tool', 3, None])
-def test_unknown_ignore_normals_mode_falls_back_to_enhanced(tmp_path, value):
+def test_unknown_ignore_normals_mode_falls_back_to_tool(tmp_path, value):
     path = tmp_path / 's.json'
     path.write_text(json.dumps({'ignore_normals_mode': value}))
-    assert load(path).ignore_normals_mode == 'enhanced'
+    assert load(path).ignore_normals_mode == 'tool'
+
+
+def test_a_file_without_adaptive_sampling_is_a_0_2_1_file(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text(json.dumps({'preset': 'High'}))
+    assert load(path).legacy_0_2_1 is True
+    path.write_text(json.dumps({'preset': 'High', 'adaptive_sampling': True}))
+    assert load(path).legacy_0_2_1 is False
+    assert load(tmp_path / 'missing.json').legacy_0_2_1 is False
+
+
+def test_a_saved_file_is_not_taken_for_a_0_2_1_file(tmp_path):
+    path = tmp_path / 's.json'
+    save(UserSettings(preset='High'), path)
+    assert 'legacy_0_2_1' not in json.loads(path.read_text())
+    assert load(path).legacy_0_2_1 is False
 
 
 def test_known_ignore_normals_mode_is_loaded(tmp_path):
@@ -54,7 +70,7 @@ def test_known_device_is_loaded(tmp_path, device):
 
 
 def test_round_trip(tmp_path):
-    us = UserSettings(tags='D:\\t', scenario='levels\\a\\a', bsp='a', preset='High', new_names=False, advanced={'bounces': '2'}, ignore_normals_mode='tool')
+    us = UserSettings(tags='D:\\t', scenario='levels\\a\\a', bsp='a', preset='High', new_names=False, advanced={'bounces': '2'}, ignore_normals_mode='enhanced')
     save(us, tmp_path / 's.json')
     assert load(tmp_path / 's.json') == us
 
@@ -104,7 +120,7 @@ def test_unknown_keys_and_wrong_types_are_dropped(tmp_path):
 
 def test_unknown_preset_falls_back_to_normal(tmp_path):
     p = tmp_path / 's.json'
-    p.write_text('{"preset": "Ultra"}')
+    p.write_text('{"preset": "Bogus"}')
     assert load(p).preset == 'Normal'
 
 

@@ -4,8 +4,8 @@ import pytest
 
 from lightmapper import memory
 from lightmapper.settings import Settings
-from opentool import presets
-from opentool.presets import ADVANCED, CPU_PRESETS, CUSTOM, DEVICES, GPU_NOTE, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, build_settings, parse_advanced
+from opentool import devices, presets
+from opentool.presets import ADVANCED, CPU_PRESETS, CUSTOM, DEVICES, GPU_NOTE, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, PRESET_NAMES, build_settings, parse_advanced
 
 
 def test_page_max_choices_are_the_memory_page_sides():
@@ -14,34 +14,52 @@ def test_page_max_choices_are_the_memory_page_sides():
 
 def test_gpu_preset_values():
     assert PRESETS == {
-        'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=1024, sky_grid=2, bounces=1, page_max=512),
-        'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=4096, sky_grid=4, bounces=1, page_max=512),
-        'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=1024)}
+        'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=256, sky_grid=2, bounces=1, page_max=512, ignore_normals_mode='tool'),
+        'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=1024, sky_grid=4, bounces=1, page_max=512, ignore_normals_mode='tool'),
+        'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=4096, sky_grid=4, bounces=1, page_max=1024, ignore_normals_mode='tool'),
+        'Ultra': dict(texels_per_unit=8.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=2048, ignore_normals_mode='enhanced')}
+    assert PRESET_NAMES == ('Draft', 'Normal', 'High', 'Ultra')
 
 
-def test_cpu_preset_values_are_0_1_0s():
-    assert CPU_PRESETS == {'Draft': dict(samples=64, vertex_rays=256), 'Normal': dict(samples=256, vertex_rays=1024),
-                           'High': dict(samples=512, vertex_rays=4096)}
+def test_cpu_preset_values():
+    assert CPU_PRESETS == {'Draft': dict(samples=64), 'Normal': dict(samples=256), 'High': dict(samples=512),
+                           'Ultra': dict(samples=512)}
+
+
+@pytest.mark.parametrize('name, mode', [('Draft', 'tool'), ('Normal', 'tool'), ('High', 'tool'), ('Ultra', 'enhanced')])
+def test_presets_carry_ignore_normals(name, mode):
+    assert build_settings(name, {}, 'b').ignore_normals_mode == mode
+
+
+def test_ultra_hint_and_gpu_note():
+    assert PRESET_HINTS['Ultra'] == 'Sharpest. Slow and memory-hungry; for a final bake.'
+    assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
+    assert devices.CPU_HINT == 'Bakes on the CPU, with fewer rays per texel for the presets.'
+
+
+def test_custom_bakes_traditional_by_default():
+    values = {field: PRESETS['Ultra'][field] for field in ADVANCED}
+    assert build_settings(CUSTOM, values, 'b').ignore_normals_mode == 'tool'
 
 
 def test_normal_is_the_defaults_with_gpu_counts():
     s = build_settings('Normal', {}, 'b.exe')
     assert replace(s, blender=Settings().blender, timeout_s=7200) == replace(
-        Settings(), page_max=512, samples=1024, vertex_rays=4096, cpu_samples=256, cpu_vertex_rays=1024)
+        Settings(), page_max=512, samples=1024, vertex_rays=1024, cpu_samples=256, cpu_vertex_rays=None)
 
 
 def test_named_preset_with_the_apps_filled_fields_keeps_its_cpu_counts():
     s = build_settings('High', dict(PRESETS['High']), 'b')
-    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (2048, 16384, 512, 4096)
+    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (2048, 4096, 512, None)
 
 
 def test_an_overridden_count_is_used_on_every_device():
     s = build_settings('Normal', {'samples': 300}, 'b')
-    assert (s.samples, s.cpu_samples, s.vertex_rays, s.cpu_vertex_rays) == (300, None, 4096, 1024)
+    assert (s.samples, s.cpu_samples, s.vertex_rays, s.cpu_vertex_rays) == (300, None, 1024, None)
 
 
 def test_custom_keeps_its_values_on_every_device():
-    s = build_settings(CUSTOM, dict(PRESETS['Draft']), 'b')
+    s = build_settings(CUSTOM, {field: PRESETS['Draft'][field] for field in ADVANCED}, 'b')
     assert (s.cpu_samples, s.cpu_vertex_rays) == (None, None)
 
 
@@ -54,14 +72,16 @@ def test_app_settings_have_no_timeout():
     assert build_settings('Normal', {}, 'b').timeout_s is None
 
 
-@pytest.mark.parametrize('preset, samples, vertex_rays, cpu_samples, cpu_vertex_rays', [
-    ('Draft', 256, 1024, 64, 256),
-    ('Normal', 1024, 4096, 256, 1024),
-    ('High', 2048, 16384, 512, 4096),
+@pytest.mark.parametrize('preset, samples, vertex_rays, cpu_samples', [
+    ('Draft', 256, 256, 64),
+    ('Normal', 1024, 1024, 256),
+    ('High', 2048, 4096, 512),
+    ('Ultra', 2048, 16384, 512),
 ])
-def test_named_preset_counts(preset, samples, vertex_rays, cpu_samples, cpu_vertex_rays):
+def test_named_preset_counts(preset, samples, vertex_rays, cpu_samples):
     s = build_settings(preset, {}, 'b')
-    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (samples, vertex_rays, cpu_samples, cpu_vertex_rays)
+    assert (s.samples, s.vertex_rays, s.cpu_samples, s.cpu_vertex_rays) == (samples, vertex_rays, cpu_samples, None)
+    assert s.resolved_cpu_vertex_rays() == vertex_rays
 
 
 def test_an_overridden_vertex_count_is_used_on_every_device():
@@ -71,7 +91,7 @@ def test_an_overridden_vertex_count_is_used_on_every_device():
 
 def test_exact_preset_interface_values():
     assert DEVICES == (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
-    assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, Draft, Normal and High use fewer rays, as in 0.1.0.'
+    assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
     assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
     assert PAGE_MAX_CHOICES == (256, 512, 1024, 2048, 4096)
     assert LABELS == dict(texels_per_unit='Texel density', samples='Rays per texel', vertex_rays='Rays per vertex', sky_grid='Suns per sky light', bounces='Bounces', page_max='Max resolution')
