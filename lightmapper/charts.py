@@ -86,8 +86,8 @@ class CapError(ValueError):
 
 class TriangleTooWide(CapError):
     def __init__(self, shader: str, width: int, page_max: int):
-        super().__init__(f'shader {shader} has a triangle {width} texels wide with padding, over page_max '
-                         f'({page_max}): lower texels_per_unit')
+        super().__init__(f'shader {shader} has a triangle {width} texels wide with padding, over the largest '
+                         f'page side ({page_max}): lower texels_per_unit')
         self.shader, self.width, self.page_max = shader, width, page_max
 
 
@@ -141,19 +141,24 @@ def _in_triangle(px, py, a, b, c):
     return ((d1 > 0) & (d2 > 0) & (d3 > 0)) | ((d1 < 0) & (d2 < 0) & (d3 < 0))
 
 
+def _texel_cover(texels: np.ndarray, tri: np.ndarray, low: np.ndarray):
+    # the (rows, columns) of the texels whose centre a triangle holds, counted from `low`
+    a, b, c = texels[tri[0]] - low, texels[tri[1]] - low, texels[tri[2]] - low
+    x0, y0 = np.floor(np.minimum(np.minimum(a, b), c)).astype(np.int64)
+    x1, y1 = np.ceil(np.maximum(np.maximum(a, b), c)).astype(np.int64)
+    px, py = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
+    ys, xs = np.nonzero(_in_triangle(px, py, a, b, c))
+    return ys + y0, xs + x0
+
+
 def _island_overlaps(texels: np.ndarray, own: np.ndarray, tris: np.ndarray) -> bool:
     # one grid per island, sized to the island, so tiling uvs cost nothing extra
     low = np.floor(texels[own].min(axis=0)).astype(np.int64)
     size = np.ceil(texels[own].max(axis=0)).astype(np.int64) - low + 1
     grid = np.zeros((size[1], size[0]), np.uint8)
     for tri in tris:
-        a, b, c = texels[tri[0]] - low, texels[tri[1]] - low, texels[tri[2]] - low
-        x0, y0 = np.floor(np.minimum(np.minimum(a, b), c)).astype(np.int64)
-        x1, y1 = np.ceil(np.maximum(np.maximum(a, b), c)).astype(np.int64)
-        px, py = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
-        inside = _in_triangle(px, py, a, b, c)
-        cell = grid[y0:y1, x0:x1]
-        cell[inside] = np.minimum(cell[inside] + 1, 2)
+        ys, xs = _texel_cover(texels, tri, low)
+        grid[ys, xs] = np.minimum(grid[ys, xs] + 1, 2)
     return bool(grid.max() > 1)
 
 
@@ -214,7 +219,7 @@ def _simple_layout(group: SourceGroup, density: float, s: ChartSettings) -> Simp
         kept_tris.append(local_tris.astype(np.int32) + offset)
         kept_ids.append(group.surface_ids[rows])
         offset += len(mine)
-        cursor += np.ptp(uv_scaled[:, 0]) + 1.0
+        cursor = uv_scaled[:, 0].max() + 1.0
 
     for island in np.flatnonzero(used):
         rows = np.flatnonzero(tri_island == island)
@@ -242,7 +247,7 @@ def _simple_layout(group: SourceGroup, density: float, s: ChartSettings) -> Simp
                     verts = np.unique(local[part])
                     piece = texels[verts]
                     # (a cut piece moves by whole texels, so the coverage test that cut it still holds where it lands)
-                    shift = [round(cursor * tpu) - np.floor(piece[:, 0].min()), -np.floor(piece[:, 1].min())]
+                    shift = [np.ceil(cursor * tpu) - np.floor(piece[:, 0].min()), -np.floor(piece[:, 1].min())]
                     place(rows[part], np.searchsorted(verts, local[part]), mine[verts], (piece + shift) / tpu)
                 continue
         recharted.append(rows)
@@ -420,12 +425,8 @@ def _split_self_overlap(texels: np.ndarray, tris: np.ndarray) -> list[np.ndarray
     size = np.ceil(corners.max(axis=0)).astype(np.int64) - low + 1
     cover = []
     for tri in tris:
-        a, b, c = texels[tri[0]] - low, texels[tri[1]] - low, texels[tri[2]] - low
-        x0, y0 = np.floor(np.minimum(np.minimum(a, b), c)).astype(np.int64)
-        x1, y1 = np.ceil(np.maximum(np.maximum(a, b), c)).astype(np.int64)
-        px, py = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
-        ys, xs = np.nonzero(_in_triangle(px, py, a, b, c))
-        cover.append((ys + y0) * size[0] + xs + x0)
+        ys, xs = _texel_cover(texels, tri, low)
+        cover.append(ys * size[0] + xs)
     taken = np.zeros(size[0] * size[1], bool)
     node = _uv_nodes(texels)[tris]
     flat = node.reshape(-1)
@@ -487,11 +488,11 @@ def _finish(pages, extent, s: ChartSettings) -> list[OutPage]:
 def _check_caps(pages, s):
     if len(pages) > s.max_pages:
         raise CapError(f'{len(pages)} lightmap pages needed, over max_pages ({s.max_pages}): '
-                       'lower texels_per_unit or raise page_max')
+                       'lower texels_per_unit or allow a larger page_max')
     for page in pages:
         if len(page.materials) > s.max_materials_per_page:
             raise CapError(f'{len(page.materials)} materials on one page, over max_materials_per_page '
-                           f'({s.max_materials_per_page}): lower texels_per_unit or raise page_max')
+                           f'({s.max_materials_per_page}): lower texels_per_unit or allow a larger page_max')
 
 
 def _packing_areas(pages):

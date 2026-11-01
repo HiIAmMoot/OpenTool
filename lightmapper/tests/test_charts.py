@@ -158,7 +158,7 @@ def test_simple_param_overlap_falls_back(caplog):
     with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
         pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
     # (both triangles share their uv values, so they are one island that overlaps itself)
-    assert 'overlapper' in caplog.text and 'overlap' in caplog.text
+    assert 'overlapper' in caplog.text and '1 island(s) split where they overlap themselves, 0 island(s) charted normally (none)' in caplog.text
     assert sum(len(m.tris) for p in pages for m in p.materials) == 2
     for page in pages:
         assert rasterise(page).max() <= 1
@@ -989,7 +989,7 @@ def test_zero_texture_area_island_is_recharted_alone(caplog):
     group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], uvs=uvs, name='flat')
     with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
         pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
-    assert 'flat' in caplog.text and 'no texture area' in caplog.text
+    assert '0 island(s) split' in caplog.text and '1 island(s) charted normally (no texture area)' in caplog.text
     assert island_fit_residual(pages, 5, 20) < 1e-3
     for page in pages:
         for m in page.materials:
@@ -1092,3 +1092,15 @@ def test_charting_does_not_depend_on_page_max(monkeypatch):
         assert {r for r in seen if r} == {4096 - 2 * 4}
         results[page_max] = sorted(area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m))
     np.testing.assert_allclose(results[256], results['auto'], rtol=1e-5)
+
+
+def test_island_with_no_world_area_is_recharted_alone(caplog):
+    # the second island has texture area but its three positions are on a line
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [12, 0, 0], [14, 0, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [1, 1], [0, 1], [10, 0], [11, 0], [10, 1]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6]], uvs=uvs, name='sliver')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert '0 island(s) split' in caplog.text and '1 island(s) charted normally (no texture or world area)' in caplog.text
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2]
