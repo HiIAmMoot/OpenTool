@@ -27,7 +27,7 @@ The BSP may hold at most 131,072 surfaces, the stock limit. A larger BSP is refu
 
 Every lightmapped surface needs its own place on a page (`charts.py`). For each shader group:
 
-- Shaders that ask for simple parameterization keep their texture UVs as the lightmap layout, scaled to the right density. If those texture UVs overlap, which would make two faces share texels, the group is charted normally and a warning says so.
+- Shaders that ask for simple parameterization keep their texture UVs as the lightmap layout, scaled to the right density. The check is per island: an island whose texture UVs overlap themselves, which would make two faces share texels, is cut into pieces that do not (or charted normally when that costs more), and an island with no texture area is charted normally. The other islands keep their layout, and a warning names what was split or charted normally.
 - Every other group goes to [xatlas](https://github.com/jpcy/xatlas), which cuts the surfaces into charts and unfolds them. Charts are cut at hard creases (where the vertex normals on either side differ), because a crease shares no lighting. Rock and terrain shaders that ask for simple parameterization stay joined across their creases, as they do in tool.
 - Texel density is `texels_per_unit`, scaled per shader detail level by `detail_level_scale`.
 

@@ -139,13 +139,32 @@ def _island_overlaps(texels: np.ndarray, own: np.ndarray, tris: np.ndarray) -> b
     return bool(grid.max() > 1)
 
 
-def _simple_layout(group: SourceGroup, texels_per_unit: float, density: float):
-    """Island uvs at world scale laid out in a row, or the reason the group cannot keep its layout."""
+def _subgroup(group: SourceGroup, rows: np.ndarray) -> SourceGroup:
+    used = np.unique(group.tris[rows])
+    return SourceGroup(group.key, group.template, group.env[used].copy(),
+                       np.searchsorted(used, group.tris[rows]).astype(np.int32), group.surface_ids[rows])
+
+
+@dataclass
+class SimpleLayout:
+    kept: SourceGroup | None
+    uvs: np.ndarray | None
+    recharted: SourceGroup | None
+    split: int
+    recharted_islands: int
+    reasons: list[str]
+
+
+def _padded_area(sizes) -> int:
+    return sum(int(w) * int(h) for w, h in sizes)
+
+
+def _simple_layout(group: SourceGroup, density: float, s: ChartSettings) -> SimpleLayout:
+    """Island uvs at world scale in a row of their own, per island; those that cannot keep a layout are charted normally."""
     uv = group.env['texcoord'].astype(np.float64)
     tris = group.tris
     # xatlas joins uv-mesh faces that share a uv value, not only a vertex index
-    _, node = np.unique(uv, axis=0, return_inverse=True)
-    node = node.reshape(-1)
+    node = _uv_nodes(uv)
     count = node.max() + 1
     edges = np.concatenate([node[tris[:, [0, 1]]], node[tris[:, [1, 2]]]])
     graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(count, count))
@@ -155,27 +174,69 @@ def _simple_layout(group: SourceGroup, texels_per_unit: float, density: float):
     uv_area = 0.5 * np.abs((b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0]))
     p, q, r = (group.env['position'][tris[:, k]].astype(np.float64) for k in range(3))
     world_area = 0.5 * np.linalg.norm(np.cross(q - p, r - p), axis=1)
-    if np.any((world_area > 1e-12) & (uv_area <= 1e-12)):
-        return None, 'it has triangles with no texture area'
     tri_island = labels[tris[:, 0]]
+    flat = np.bincount(tri_island, (world_area > 1e-12) & (uv_area <= 1e-12), islands) > 0
     uv_sum = np.bincount(tri_island, uv_area, islands)
     world_sum = np.bincount(tri_island, world_area, islands)
     used = np.bincount(tri_island, minlength=islands) > 0
-    if np.any(uv_sum[used] <= 0) or np.any(world_sum[used] <= 0):
-        return None, 'it has islands with no texture or world area'
+    empty = used & ~flat & ((uv_sum <= 0) | (world_sum <= 0))
     scale = np.ones(islands)
-    scale[used] = density * np.sqrt(world_sum[used] / uv_sum[used])
+    good = used & ~flat & ~empty
+    scale[good] = density * np.sqrt(world_sum[good] / uv_sum[good])
     scaled = uv * scale[labels][:, None]
-    # (each island moves into a row of its own so no two share a uv value or overlap by accident)
-    cursor = 0.0
+    tpu = s.texels_per_unit
+    reasons, split, recharted = [], 0, []
+    kept_env, kept_tris, kept_ids, kept_uv = [], [], [], []
+    cursor, offset = 0.0, 0
+
+    def place(rows, local_tris, mine, uv_scaled):
+        nonlocal cursor, offset
+        kept_uv.append(uv_scaled)
+        kept_env.append(group.env[mine])
+        kept_tris.append(local_tris.astype(np.int32) + offset)
+        kept_ids.append(group.surface_ids[rows])
+        offset += len(mine)
+        cursor += np.ptp(uv_scaled[:, 0]) + 1.0
+
     for island in np.flatnonzero(used):
-        mine = labels == island
-        low, high = scaled[mine].min(axis=0), scaled[mine].max(axis=0)
-        scaled[mine] += [cursor - low[0], -low[1]]
-        cursor += high[0] - low[0] + 1.0
-        if _island_overlaps(scaled * texels_per_unit, mine, tris[tri_island == island]):
-            return None, 'its texture layout overlaps'
-    return scaled.astype(np.float32), None
+        rows = np.flatnonzero(tri_island == island)
+        mine = np.unique(tris[rows])
+        local = np.searchsorted(mine, tris[rows])
+        reason = ('no texture area' if flat[island] else
+                  'no texture or world area' if empty[island] else None)
+        if reason is None:
+            # (each island moves into a row of its own so no two share a uv value or overlap by accident)
+            low = scaled[mine].min(axis=0)
+            row_uv = scaled[mine] + [cursor - low[0], -low[1]]
+            if not _island_overlaps(row_uv * tpu, np.arange(len(mine)), local):
+                place(rows, local, mine, row_uv)
+                continue
+            texels = row_uv * tpu
+            cut = _split_self_overlap(texels, local)
+            sizes = [_padded_size(texels[np.unique(local[part])], s.padding) for part in cut]
+            alone = _density_checked_pieces([(0, _subgroup(group, rows), None, density)], False, s, join_creases=True)
+            rechart = [_padded_size(piece[3], s.padding) for piece in alone]
+            if _padded_area(sizes) > _padded_area(rechart) or len(cut) > len(rechart):
+                reason = 'it overlaps itself'
+            else:
+                split += 1
+                for part in cut:
+                    verts = np.unique(local[part])
+                    piece = texels[verts]
+                    # (a cut piece moves by whole texels, so the coverage test that cut it still holds where it lands)
+                    shift = [round(cursor * tpu) - np.floor(piece[:, 0].min()), -np.floor(piece[:, 1].min())]
+                    place(rows[part], np.searchsorted(verts, local[part]), mine[verts], (piece + shift) / tpu)
+                continue
+        recharted.append(rows)
+        if reason not in reasons:
+            reasons.append(reason)
+    kept = uvs = None
+    if kept_uv:
+        kept = SourceGroup(group.key, group.template, np.concatenate(kept_env), np.concatenate(kept_tris),
+                           np.concatenate(kept_ids))
+        uvs = np.concatenate(kept_uv).astype(np.float32)
+    again = _subgroup(group, np.sort(np.concatenate(recharted))) if recharted else None
+    return SimpleLayout(kept, uvs, again, split, len(recharted), reasons)
 
 
 def _split(vertex_count: int, tris: np.ndarray, s: ChartSettings):
@@ -619,13 +680,15 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
             continue
         density = s.density_scale(shader)
         if shader.flags & SIMPLE_PARAMETERIZATION:
-            uvs, reason = _simple_layout(group, s.texels_per_unit, density)
-            if uvs is not None:
-                simple.append((index, group, uvs, density))
-                continue
-            logger.warning('shader %s asks for simple parameterization but %s; charting it normally',
-                           group.key[1], reason)
-            fallback.append((index, group, None, density))
+            layout = _simple_layout(group, density, s)
+            if layout.kept is not None:
+                simple.append((index, layout.kept, layout.uvs, density))
+            if layout.recharted is not None:
+                fallback.append((index, layout.recharted, None, density))
+            if layout.split or layout.recharted_islands:
+                logger.warning('shader %s asks for simple parameterization: %d island(s) split where they overlap '
+                               'themselves, %d island(s) charted normally (%s)', group.key[1], layout.split,
+                               layout.recharted_islands, ', '.join(layout.reasons) or 'none')
             continue
         ordinary.append((index, group, None, density))
     pieces = []

@@ -157,6 +157,7 @@ def test_simple_param_overlap_falls_back(caplog):
     group = make_group(pos, [[0, 1, 2], [3, 4, 5]], uvs=uvs, name='overlapper')
     with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
         pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    # (both triangles share their uv values, so they are one island that overlaps itself)
     assert 'overlapper' in caplog.text and 'overlap' in caplog.text
     assert sum(len(m.tris) for p in pages for m in p.materials) == 2
     for page in pages:
@@ -353,19 +354,6 @@ def test_huge_tiling_uvs_are_bounded():
     tracemalloc.stop()
     assert elapsed < 5 and peak < 100e6
     assert sum(len(m.tris) for p in pages for m in p.materials) == 2
-
-
-def test_zero_uv_area_falls_back(caplog):
-    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0]], np.float32)
-    uvs = [[0, 0], [1, 0], [2, 0], [0, 1]]
-    group = make_group(pos, [[0, 1, 2], [0, 2, 3]], uvs=uvs, name='flat')
-    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
-        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
-    assert 'flat' in caplog.text and 'no texture area' in caplog.text
-    for page in pages:
-        for m in page.materials:
-            for tri in texel_triangles(page, m):
-                assert area(*tri) > 0.5
 
 
 def test_chart_settings_validation():
@@ -903,3 +891,95 @@ def test_self_overlap_split_keeps_non_colliding_neighbours_together():
     tris = np.concatenate([tris, [[n, n + 1, n + 2]]])
     found = _split_self_overlap(texels, tris)
     assert sorted(len(rows) for rows in found) == [1, 16]
+
+
+def island_fit_residual(pages, low, high):
+    # worst deviation of the vertices whose world x lies in [low, high) from one affine map of their texture uvs to the page texels
+    source, target = [], []
+    for page in pages:
+        for m in page.materials:
+            pick = (m.env['position'][:, 0] >= low) & (m.env['position'][:, 0] < high)
+            source.append(m.env['texcoord'][pick].astype(np.float64))
+            target.append(m.lm['texcoord'][pick].astype(np.float64) * [page.width, page.height])
+    source, target = np.concatenate(source), np.concatenate(target)
+    design = np.hstack([source, np.ones((len(source), 1))])
+    fit, *_ = np.linalg.lstsq(design, target, rcond=None)
+    return np.abs(design @ fit - target).max()
+
+
+def two_strips_group(name):
+    # three islands: a quad at texture u 0-1, two world-apart strips whose texture uvs coincide (one island
+    # that overlaps itself) at u 10-11, and a quad at u 20-21
+    pos, uvs, tris = [], [], []
+
+    def quad(x0, y0, w, h, u0, v0):
+        base = len(pos)
+        pos.extend([[x0, y0, 0], [x0 + w, y0, 0], [x0 + w, y0 + h, 0], [x0, y0 + h, 0]])
+        uvs.extend([[u0, v0], [u0 + 1, v0], [u0 + 1, v0 + 1], [u0, v0 + 1]])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    quad(0, 0, 4, 4, 0, 0)
+    quad(20, 0, 4, 4, 10, 0)
+    quad(20, 10, 4, 4, 10, 0)
+    quad(40, 0, 4, 4, 20, 0)
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name)
+
+
+def test_only_the_self_overlapping_island_is_split(caplog):
+    group = two_strips_group('threeway')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert island_fit_residual(pages, 40, 50) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == list(range(8))
+    warnings = [r.getMessage() for r in caplog.records if r.name == 'lightmapper.charts' and r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and 'threeway' in warnings[0] and '1 island(s) split' in warnings[0]
+    for page in pages:
+        assert rasterise(page).max() <= 1
+
+
+def test_overlapping_islands_keep_their_stitching(caplog):
+    # two islands whose texture uvs overlap each other, with no uv value in common, are two islands
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [14, 0, 0], [14, 4, 0], [10, 4, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], uvs=uvs, name='nested')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert caplog.text == ''
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert island_fit_residual(pages, 5, 20) < 1e-3
+
+
+def test_split_worse_than_a_rechart_is_recharted(caplog):
+    # twelve triangles of one flat strip, every one with the same three uvs: the split makes twelve pieces
+    pos, uvs, tris = [], [], []
+    for x in range(6):
+        for corners in ([[x, 0], [x + 1, 0], [x + 1, 1]], [[x, 0], [x + 1, 1], [x, 1]]):
+            tris.append([len(pos), len(pos) + 1, len(pos) + 2])
+            pos.extend([[cx, cy, 0] for cx, cy in corners])
+            uvs.extend([[0, 0], [1, 0], [0, 1]])
+    good = len(pos)
+    pos.extend([[20, 0, 0], [24, 0, 0], [24, 4, 0], [20, 4, 0]])
+    uvs.extend([[10, 0], [11, 0], [11, 1], [10, 1]])
+    tris.extend([[good, good + 1, good + 2], [good, good + 2, good + 3]])
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs, name='stack')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert '1 island(s) charted normally (it overlaps itself)' in caplog.text
+    assert '0 island(s) split' in caplog.text
+    assert island_fit_residual(pages, 15, 30) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == list(range(14))
+
+
+def test_zero_texture_area_island_is_recharted_alone(caplog):
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [14, 0, 0], [14, 4, 0], [10, 4, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [2, 0], [0, 1], [10, 0], [11, 0], [11, 1], [10, 1]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], uvs=uvs, name='flat')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert 'flat' in caplog.text and 'no texture area' in caplog.text
+    assert island_fit_residual(pages, 5, 20) < 1e-3
+    for page in pages:
+        for m in page.materials:
+            for tri in texel_triangles(page, m):
+                assert area(*tri) > 0.5
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2, 3]
