@@ -1223,6 +1223,8 @@ def test_flag_stays_in_the_object_key_when_the_job_has_lamps(tmp_path, blender_e
 def test_glow_run_merges_flagged_receivers(tmp_path, blender_exe):
     s = Settings(samples=8, vertex_rays=1, ignore_normals_mode='enhanced')
     write_job(tmp_path, build(flagged_and_plain_floors()), [(16, 16)], [], {}, s)
+    np.savez(tmp_path / 'glow_pages.npz', page_0=np.ones((2, 2, 3), np.float32),
+             box_0=np.array([0, 0, 2, 2, 16, 16], np.int32))
 
     def as_glow_run(job):
         job.update(glow=True, glow_pages='glow_pages.npz', suns=[], lights=[])
@@ -1231,6 +1233,21 @@ def test_glow_run_merges_flagged_receivers(tmp_path, blender_exe):
     assert len(groups) == 1 and groups[0]['triangles'] == 4
     flagged, plain = slot_of(groups[0], True), slot_of(groups[0], False)
     assert flagged['glow_image'] == 'glow_0' and plain['glow_image'] is None
+
+
+@pytest.mark.blender
+def test_flagged_slot_of_a_page_without_glow_holds_the_black_image(tmp_path, blender_exe):
+    s = Settings(samples=8, vertex_rays=1, ignore_normals_mode='enhanced')
+    write_job(tmp_path, build(flagged_and_plain_floors()), [(16, 16)], [], {}, s)
+    # (no entry for page 0: the page gathered nothing)
+    np.savez(tmp_path / 'glow_pages.npz')
+
+    def as_glow_run(job):
+        job.update(glow=True, glow_pages='glow_pages.npz', suns=[], lights=[])
+
+    groups = run_receiver_groups(tmp_path, blender_exe, as_glow_run)
+    flagged = slot_of(groups[0], True)
+    assert flagged['glow_image'] == 'glow_black' and flagged['pure_emission'] and not flagged['zero_albedo']
 
 
 @pytest.mark.blender

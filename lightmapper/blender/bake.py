@@ -406,6 +406,30 @@ def new_glow_image(name, source):
     return image
 
 
+def load_glow_images(path, page_count, uncropped=False):
+    images, transforms = [], []
+    black = None
+    with np.load(path) as data:
+        for i in range(page_count):
+            if f'page_{i}' not in data.files:
+                if black is None:
+                    black = new_glow_image('glow_black', np.zeros((1, 1, 3), np.float32))
+                images.append(black)
+                transforms.append(None)
+                continue
+            source, box = data[f'page_{i}'], data[f'box_{i}'].tolist()
+            if uncropped:
+                # (test-only, never written by write_job: the page as a full image, as before cropping)
+                full = np.zeros((box[5], box[4], 3), np.float32)
+                full[box[1]:box[3], box[0]:box[2]] = source
+                images.append(new_glow_image(f'glow_{i}', full))
+                transforms.append(None)
+                continue
+            images.append(new_glow_image(f'glow_{i}', source))
+            transforms.append(glow_uv_transform(box))
+    return images, transforms
+
+
 def lamp_free_run(job):
     # the glow run has no lamps in its job (blender_job.run_blender_glow)
     return bool(job.get('glow')) or not job['lights']
@@ -1469,25 +1493,8 @@ def main():
             scene_data['tri_emission'] = np.zeros_like(scene_data['tri_emission'])
             scene_data['occ_tri_emission'] = np.zeros_like(scene_data['occ_tri_emission'])
         if job.get('glow'):
-            with np.load(os.path.join(root, job['glow_pages'])) as data:
-                black = None
-                for i in range(len(job['pages'])):
-                    if f'page_{i}' not in data.files:
-                        if black is None:
-                            black = new_glow_image('glow_black', np.zeros((1, 1, 3), np.float32))
-                        glow_images.append(black)
-                        glow_transforms.append(None)
-                        continue
-                    source, box = data[f'page_{i}'], data[f'box_{i}'].tolist()
-                    if job.get('test_glow_uncropped'):
-                        # (test-only, never written by write_job: the page as a full image, as before cropping)
-                        full = np.zeros((box[5], box[4], 3), np.float32)
-                        full[box[1]:box[3], box[0]:box[2]] = source
-                        glow_images.append(new_glow_image(f'glow_{i}', full))
-                        glow_transforms.append(None)
-                        continue
-                    glow_images.append(new_glow_image(f'glow_{i}', source))
-                    glow_transforms.append(glow_uv_transform(box))
+            glow_images, glow_transforms = load_glow_images(os.path.join(root, job['glow_pages']), len(job['pages']),
+                                                            job.get('test_glow_uncropped'))
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images,
                                              glow_transforms)
         if not job.get('lamps_only'):
