@@ -1162,3 +1162,92 @@ def test_page_bake_point_light_matches_the_vertex_pass_on_a_plane(tmp_path):
     assert result.vertex_irradiance[0] == pytest.approx(
         np.pi * result.pages[0][16, 16, 0], rel=0.05)
     assert result.vertex_irradiance[0] > 0.3
+
+
+def run_receiver_groups(root, blender_exe, edit_job=None):
+    job = json.loads((root / 'job.json').read_text())
+    if edit_job:
+        edit_job(job)
+        (root / 'job.json').write_text(json.dumps(job))
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('receiver_groups_driver.py')), '--', str(root)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return json.loads((root / 'groups.json').read_text())
+
+
+def flagged_and_plain_floors():
+    # (side by side on the page: texels they would share resolve by object order or by the rasterizer)
+    left = ((0, 0), (0.5, 0), (0.5, 1), (0, 1))
+    right = ((0.5, 0), (1, 0), (1, 1), (0.5, 1))
+    return [dict(quad=floor(0, 4, 0, 4, lm=left), ignore_normals=True), dict(quad=floor(10, 14, 0, 4, lm=right))]
+
+
+def slot_of(group, flagged_triangle):
+    # (the flagged floor is the scene's first two triangles)
+    return group['slots'][group['slot_of_triangle'][0 if flagged_triangle else 2]]
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('mode, choice', [('enhanced', 'zero_albedo'), ('tool', 'translucent')])
+def test_flagged_and_unflagged_share_an_object_without_lamps(tmp_path, blender_exe, mode, choice):
+    # (the only sun lights class 1, so no receiver here has a sun bit)
+    s = Settings(samples=8, vertex_rays=1, ignore_normals_mode=mode)
+    write_job(tmp_path, build(flagged_and_plain_floors()), [(16, 16)], [sun(classes=(1,))], {}, s)
+    groups = run_receiver_groups(tmp_path, blender_exe)
+    assert len(groups) == 1 and groups[0]['triangles'] == 4 and groups[0]['flagged']
+    flagged, plain = slot_of(groups[0], True), slot_of(groups[0], False)
+    assert flagged[choice] and flagged['glow_image'] is None
+    assert not any(plain.values())
+
+
+@pytest.mark.blender
+def test_flag_stays_in_the_object_key_when_the_job_has_lamps(tmp_path, blender_exe):
+    s = Settings(samples=8, vertex_rays=1, w_light=1.0, ignore_normals_mode='enhanced')
+    write_job(tmp_path, build(flagged_and_plain_floors()), [(16, 16)], [sun(classes=(1,))], {}, s, 'all',
+              lights=[lamp_light((2, 2, 3))])
+
+    def lamp_in_batch_one(job):
+        job['lights'][0]['batch'] = 1
+
+    groups = run_receiver_groups(tmp_path, blender_exe, lamp_in_batch_one)
+    assert sorted((g['flagged'], g['triangles']) for g in groups) == [(False, 2), (True, 2)]
+    for group in groups:
+        assert group['slots'][0]['zero_albedo'] == group['flagged']
+
+
+@pytest.mark.blender
+def test_glow_run_merges_flagged_receivers(tmp_path, blender_exe):
+    s = Settings(samples=8, vertex_rays=1, ignore_normals_mode='enhanced')
+    write_job(tmp_path, build(flagged_and_plain_floors()), [(16, 16)], [], {}, s)
+
+    def as_glow_run(job):
+        job.update(glow=True, glow_pages='glow_pages.npz', suns=[], lights=[])
+
+    groups = run_receiver_groups(tmp_path, blender_exe, as_glow_run)
+    assert len(groups) == 1 and groups[0]['triangles'] == 4
+    flagged, plain = slot_of(groups[0], True), slot_of(groups[0], False)
+    assert flagged['glow_image'] == 'glow_0' and plain['glow_image'] is None
+
+
+@pytest.mark.blender
+def test_merged_object_bakes_what_two_objects_baked(tmp_path):
+    s = Settings(samples=64, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, vertex_rays=1, device='cpu',
+                 albedo_fallback=0.5, ignore_normals_mode='tool')
+    panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(4, 4, 4), casts=False)]
+
+    def baked(name, split):
+        root = tmp_path / name
+        write_job(root, build(flagged_and_plain_floors(), panels), [(16, 16)], [sun(classes=(1,))], {}, s)
+        if split:
+            job = json.loads((root / 'job.json').read_text())
+            job['test_split_flagged'] = True
+            (root / 'job.json').write_text(json.dumps(job))
+        return run_blender(root, s)
+
+    two, one = baked('two', True), baked('one', False)
+    assert two.written[0].any()
+    np.testing.assert_array_equal(one.written[0], two.written[0])
+    np.testing.assert_allclose(one.pages[0], two.pages[0], atol=1e-6, rtol=0)

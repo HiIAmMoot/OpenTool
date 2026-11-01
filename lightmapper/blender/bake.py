@@ -378,15 +378,25 @@ def receiver_sun_bits(scene, suns):
     return facing
 
 
+def lamp_free_run(job):
+    # the glow run has no lamps in its job (blender_job.run_blender_glow)
+    return bool(job.get('glow')) or not job['lights']
+
+
 def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=()):
     """Receivers per page, class, shadow and sun visibility; occluders per material and shadow."""
     positions, tris = scene_data['positions'], scene_data['tris']
     receivers = []
+    flags = scene_data.get('tri_ignore_normals', np.zeros(len(tris), bool))
+    # only add_lamps tells flagged receivers apart (it keeps Cycles lamps off them), so a run without lamps
+    # shades the flag per triangle and shares one object; test_split_flagged is a test-only override, never written by write_job
+    split = not lamp_free_run(job) or bool(job.get('test_split_flagged'))
+    sun_from = 4 if split else 3
     # a see-through triangle still has to meet shadow rays when its tint dims them
     tinted = ~scene_data['tri_casts_shadow'] & (scene_data['tri_tint'] < 1).any(axis=1)
     keys = np.column_stack([scene_data['tri_page'], scene_data['tri_class'],
                             scene_data['tri_casts_shadow'] | tinted,
-                            scene_data.get('tri_ignore_normals', np.zeros(len(tris), bool)),
+                            *([flags] if split else []),
                             receiver_sun_bits(scene_data, job['suns'])])
     distinct_keys, labels = np.unique(keys, axis=0, return_inverse=True)
     order = np.argsort(labels, kind='stable')
@@ -409,22 +419,23 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
         used = np.concatenate([used, copied])
         tri_props = [(int(scene_data['tri_texture'][t]), bool(scene_data['tri_cutout'][t]),
                       tuple(float(c) for c in scene_data['tri_emission'][t]),
-                      tuple(float(c) for c in scene_data['tri_tint'][t]) if tinted[t] else ()) for t in picked]
+                      tuple(float(c) for c in scene_data['tri_tint'][t]) if tinted[t] else (), bool(flags[t]))
+                     for t in picked]
         distinct = sorted(set(tri_props))
         materials = [make_material(f'recv_{page}_{cls}_{n}', textures[tex] if tex >= 0 else None, cut, emit,
                                    job, page_images[page], tint,
                                    mask_image=mask_images[page] if mask_images else None,
-                                   both_sides=bool(key[3]) and job.get('ignore_normals_mode') != 'enhanced',
-                                   zero_albedo=bool(key[3]) and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
-                                   glow_image=glow_images[page] if glow_images and bool(key[3]) else None)
-                     for n, (tex, cut, emit, tint) in enumerate(distinct)]
+                                   both_sides=flagged and job.get('ignore_normals_mode') != 'enhanced',
+                                   zero_albedo=flagged and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
+                                   glow_image=glow_images[page] if glow_images and flagged else None)
+                     for n, (tex, cut, emit, tint, flagged) in enumerate(distinct)]
         obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
                            UV_LIGHTMAP: flip_v(scene_data['lm_uv'][used])},
                           local, materials, [distinct.index(p) for p in tri_props], casts,
                           scene_data['normals'][used])
-        obj['sun_facing'] = key[4:].tolist()
-        obj['flagged'] = bool(key[3])
+        obj['sun_facing'] = key[sun_from:].tolist()
+        obj['flagged'] = bool(flags[picked].any())
         receivers.append((obj, page, cls))
 
     occluders = []
