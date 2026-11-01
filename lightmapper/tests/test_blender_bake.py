@@ -1301,7 +1301,8 @@ def glow_run(work, scene, pages, sources, uncropped):
     from lightmapper.blender_job import _run_blender, run_blender_glow
     s = Settings(samples=256, vertex_rays=1, albedo_fallback=.25, device='cpu', ignore_normals_mode='enhanced')
     write_job(work, scene, pages, [], {}, s)
-    glow, _ = run_blender_glow(work, s, sources)
+    # (the glow run empties the list it is given, and the uncropped run below reads the same sources)
+    glow, _ = run_blender_glow(work, s, list(sources))
     if not uncropped:
         return glow
     # (the test-only key makes the run read each page as a full image, as it did before cropping)
