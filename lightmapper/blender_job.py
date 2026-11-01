@@ -366,9 +366,26 @@ def with_vertex_pass(result: BakeResult, vp: VertexPassResult) -> BakeResult:
                    vertex_sun_throughput=vp.sun_throughput, texel_rgb=vp.texel_rgb, light_flat=vp.light_flat)
 
 
+def glow_box(source: np.ndarray) -> tuple[int, int, int, int] | None:
+    # (x0, y0, x1, y1) with the end exclusive, in the page's row order
+    lit = source.any(axis=2)
+    columns, rows = np.flatnonzero(lit.any(axis=0)), np.flatnonzero(lit.any(axis=1))
+    if not len(columns):
+        return None
+    return int(columns[0]), int(rows[0]), int(columns[-1]) + 1, int(rows[-1]) + 1
+
+
 def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[list[np.ndarray], str]:
     work = Path(work)
-    np.savez(work / 'glow_pages.npz', **{f'page_{i}': p for i, p in enumerate(pages)})
+    cropped = {}
+    for i, page in enumerate(pages):
+        box = glow_box(page)
+        # (a page without glow has no entry: Blender gives it one shared black texel instead of a page-sized image)
+        if box is not None:
+            x0, y0, x1, y1 = box
+            cropped[f'page_{i}'] = page[y0:y1, x0:x1]
+            cropped[f'box_{i}'] = np.array([x0, y0, x1, y1, page.shape[1], page.shape[0]], np.int32)
+    np.savez(work / 'glow_pages.npz', **cropped)
     job = json.loads((work / 'job.json').read_text())
     job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')

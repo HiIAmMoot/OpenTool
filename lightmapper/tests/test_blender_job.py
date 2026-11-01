@@ -586,3 +586,30 @@ def test_skip_returns_diffuse_pages_and_no_vector(tmp_path):
     assert len(result.diffuse_pages) == 1 and result.vertex_rays_cast == 0
     assert result.pages[0].mean() >= result.diffuse_pages[0].mean()
     assert 'vertex pass:' not in (tmp_path / 'blender.log').read_text()
+
+
+def test_glow_box_is_the_non_zero_sub_texels():
+    page = np.zeros((6, 8, 3), np.float32)
+    assert blender_job.glow_box(page) is None
+    page[4, 2, 1] = 0.5
+    assert blender_job.glow_box(page) == (2, 4, 3, 5)
+    page[1, 6, 2] = 1
+    page[2, 0, 0] = 1
+    assert blender_job.glow_box(page) == (0, 1, 7, 5)
+
+
+def test_glow_job_holds_only_cropped_pages(tmp_path, fake):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8), (4, 4), (4, 4)], make_suns(), AMBIENT, s)
+    lit = np.zeros((8, 16, 3), np.float32)
+    lit[2:5, 3:9] = 1
+    odd = np.zeros((4, 4, 3), np.float32)
+    odd[3, 3, 2] = 2
+    blender_job.run_blender_glow(work, s, [lit, np.zeros((4, 4, 3), np.float32), odd])
+    with np.load(work / 'glow_pages.npz') as data:
+        assert sorted(data.files) == ['box_0', 'box_2', 'page_0', 'page_2']
+        np.testing.assert_array_equal(data['page_0'], lit[2:5, 3:9])
+        assert data['box_0'].dtype == np.int32 and data['box_0'].tolist() == [3, 2, 9, 5, 16, 8]
+        np.testing.assert_array_equal(data['page_2'], odd[3:4, 3:4])
+        assert data['box_2'].tolist() == [3, 3, 4, 4, 4, 4]

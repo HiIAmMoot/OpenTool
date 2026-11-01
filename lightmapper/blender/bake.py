@@ -170,7 +170,7 @@ def reset_mask(image):
 
 
 def make_material(name, texture, cutout, emission, job, page_image, tint=(), emit_only=False, mask_image=None,
-                  both_sides=False, zero_albedo=False, glow_image=None):
+                  both_sides=False, zero_albedo=False, glow_image=None, glow_transform=None):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     nodes, links = material.node_tree.nodes, material.node_tree.links
@@ -231,10 +231,19 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
         uv.uv_map = UV_LIGHTMAP
         image = nodes.new('ShaderNodeTexImage')
         image.image = glow_image
-        image.extension = 'EXTEND'
+        # (outside the crop the page held zeros, which the cropped image must read as black)
+        image.extension = 'CLIP'
         # each source pixel is one receiver sample, not a mixture of the materials next to it
         image.interpolation = 'Closest'
-        links.new(uv.outputs['UV'], image.inputs['Vector'])
+        if glow_transform is None:
+            links.new(uv.outputs['UV'], image.inputs['Vector'])
+        else:
+            mapping = nodes.new('ShaderNodeMapping')
+            mapping.vector_type = 'POINT'
+            mapping.inputs['Scale'].default_value = (*glow_transform[0], 1)
+            mapping.inputs['Location'].default_value = (*glow_transform[1], 0)
+            links.new(uv.outputs['UV'], mapping.inputs['Vector'])
+            links.new(mapping.outputs['Vector'], image.inputs['Vector'])
         multiply = nodes.new('ShaderNodeVectorMath')
         multiply.operation = 'MULTIPLY'
         links.new(image.outputs['Color'], multiply.inputs[0])
@@ -378,12 +387,31 @@ def receiver_sun_bits(scene, suns):
     return facing
 
 
+def glow_uv_transform(box):
+    x0, y0, x1, y1, w, h = (int(v) for v in box)
+    cw, ch = x1 - x0, y1 - y0
+    # (the page's v runs up, its rows down: the crop's top edge is row y0 and the page's is row 0)
+    return (w / cw, h / ch), (-x0 / cw, (y1 - h) / ch)
+
+
+def new_glow_image(name, source):
+    h, w = source.shape[:2]
+    image = bpy.data.images.new(name, w, h, alpha=False, float_buffer=True, is_data=True)
+    image.colorspace_settings.name = 'Non-Color'
+    # (built per image and dropped here: the temporary is as large as the image itself)
+    rgba = np.ones((h, w, 4), np.float32)
+    rgba[..., :3] = source[::-1]
+    image.pixels.foreach_set(rgba.ravel())
+    del rgba
+    return image
+
+
 def lamp_free_run(job):
     # the glow run has no lamps in its job (blender_job.run_blender_glow)
     return bool(job.get('glow')) or not job['lights']
 
 
-def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=()):
+def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=(), glow_transforms=()):
     """Receivers per page, class, shadow and sun visibility; occluders per material and shadow."""
     positions, tris = scene_data['positions'], scene_data['tris']
     receivers = []
@@ -427,7 +455,8 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
                                    mask_image=mask_images[page] if mask_images else None,
                                    both_sides=flagged and job.get('ignore_normals_mode') != 'enhanced',
                                    zero_albedo=flagged and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
-                                   glow_image=glow_images[page] if glow_images and flagged else None)
+                                   glow_image=glow_images[page] if glow_images and flagged else None,
+                                   glow_transform=glow_transforms[page] if glow_transforms and flagged else None)
                      for n, (tex, cut, emit, tint, flagged) in enumerate(distinct)]
         obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
@@ -1434,23 +1463,33 @@ def main():
         log(f'device {device}')
         textures, page_images, mask_images = make_images(os.path.join(root, 'textures.npz'), job['pages'],
                                                         job['texel_samples'] > 0)
-        glow_images = []
+        glow_images, glow_transforms = [], []
         # (a lamps-only run adds to pages that already hold the emission)
         if job.get('glow') or job.get('lamps_only'):
             scene_data['tri_emission'] = np.zeros_like(scene_data['tri_emission'])
             scene_data['occ_tri_emission'] = np.zeros_like(scene_data['occ_tri_emission'])
         if job.get('glow'):
             with np.load(os.path.join(root, job['glow_pages'])) as data:
+                black = None
                 for i in range(len(job['pages'])):
-                    source = data[f'page_{i}']
-                    h, w = source.shape[:2]
-                    image = bpy.data.images.new(f'glow_{i}', w, h, alpha=False, float_buffer=True, is_data=True)
-                    image.colorspace_settings.name = 'Non-Color'
-                    rgba = np.ones((h, w, 4), np.float32)
-                    rgba[..., :3] = source[::-1]
-                    image.pixels.foreach_set(rgba.ravel())
-                    glow_images.append(image)
-        receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images)
+                    if f'page_{i}' not in data.files:
+                        if black is None:
+                            black = new_glow_image('glow_black', np.zeros((1, 1, 3), np.float32))
+                        glow_images.append(black)
+                        glow_transforms.append(None)
+                        continue
+                    source, box = data[f'page_{i}'], data[f'box_{i}'].tolist()
+                    if job.get('test_glow_uncropped'):
+                        # (test-only, never written by write_job: the page as a full image, as before cropping)
+                        full = np.zeros((box[5], box[4], 3), np.float32)
+                        full[box[1]:box[3], box[0]:box[2]] = source
+                        glow_images.append(new_glow_image(f'glow_{i}', full))
+                        glow_transforms.append(None)
+                        continue
+                    glow_images.append(new_glow_image(f'glow_{i}', source))
+                    glow_transforms.append(glow_uv_transform(box))
+        receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images,
+                                             glow_transforms)
         if not job.get('lamps_only'):
             add_suns(job, receivers, occluders)
         add_lamps(job, receivers, occluders, job.get('lamp_batch', 0))

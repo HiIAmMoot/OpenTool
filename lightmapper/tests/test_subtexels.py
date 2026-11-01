@@ -280,3 +280,18 @@ def test_merge_is_bit_identical(bake_module, rows):
     got = bake_module.merge_extra(base, owned, 28, tiers, extra)
     want = reference_merge(bake_module, base, owned, 28, tiers, extra)
     assert got.dtype == np.float32 and got.tobytes() == want.tobytes()
+
+
+@pytest.mark.parametrize('w, h, box', [
+    (8, 8, [0, 0, 3, 5]), (8, 8, [5, 2, 8, 8]), (8, 8, [0, 0, 8, 8]), (9, 7, [2, 1, 7, 6]), (16, 4, [3, 3, 4, 4]),
+    (8, 8, [0, 7, 1, 8]), (8, 8, [7, 0, 8, 1])])
+def test_glow_uv_transform_maps_box_corners(bake_module, w, h, box):
+    x0, y0, x1, y1 = box
+    cw, ch = x1 - x0, y1 - y0
+    scale, offset = bake_module.glow_uv_transform(box + [w, h])
+    for x, y in [(x0, y0), (x1 - 1, y0), (x0, y1 - 1), (x1 - 1, y1 - 1)]:
+        # (Blender's v runs up the page: row y of the page sits at v = (h - 1 - y + .5) / h)
+        u, v = (x + .5) / w, (h - 1 - y + .5) / h
+        got = (u * scale[0] + offset[0], v * scale[1] + offset[1])
+        want = ((x - x0 + .5) / cw, (ch - 1 - (y - y0) + .5) / ch)
+        assert got == pytest.approx(want, abs=1e-9)

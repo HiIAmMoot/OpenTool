@@ -1261,3 +1261,79 @@ def test_merged_object_bakes_what_two_objects_baked(tmp_path, mode, emissive):
     assert two.written[0].any()
     np.testing.assert_array_equal(one.written[0], two.written[0])
     np.testing.assert_allclose(one.pages[0], two.pages[0], atol=1e-6, rtol=0)
+
+
+def quantise8(page):
+    from lightmapper.pages import quantise
+    return quantise(page, Settings(lightmap_32bit=True, dither=False))
+
+
+def glow_run(work, scene, pages, sources, uncropped):
+    from lightmapper.blender_job import _run_blender, run_blender_glow
+    s = Settings(samples=256, vertex_rays=1, albedo_fallback=.25, device='cpu', ignore_normals_mode='enhanced')
+    write_job(work, scene, pages, [], {}, s)
+    glow, _ = run_blender_glow(work, s, sources)
+    if not uncropped:
+        return glow
+    # (the test-only key makes the run read each page as a full image, as it did before cropping)
+    job = json.loads((work / 'job_glow.json').read_text())
+    job['test_glow_uncropped'] = True
+    (work / 'job_glow.json').write_text(json.dumps(job))
+    _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow_full.log')
+    with np.load(out) as data:
+        return [np.array(data[f'page_{i}'], np.float32) for i in range(len(pages))]
+
+
+def assert_rounding_only(cropped, full):
+    # (an 8-bit step is the smallest change that reaches a page, so only float rounding may differ)
+    for got, want in zip(cropped, full):
+        assert np.array_equal(quantise8(got), quantise8(want))
+        assert np.abs(got - want).max() <= 1e-6 * max(np.abs(want).max(), 1e-12)
+
+
+@pytest.mark.blender
+def test_cropped_glow_bakes_what_the_full_image_baked(tmp_path):
+    scene = build([dict(quad=floor(-8, 8, -8, 8, z=1), ignore_normals=True),
+                   dict(quad=floor(-4, -2, 2, 4), page=1), dict(quad=floor(-4, -2, -4, -2), page=2)])
+    source = np.zeros((8, 8, 3), np.float32)
+    source[1:4, 2:5] = 1 + np.arange(9, dtype=np.float32).reshape(3, 3, 1) * np.array([.3, .2, .1], np.float32)
+    sources = [source, np.zeros((8, 8, 3), np.float32), np.zeros((8, 8, 3), np.float32)]
+    cropped = glow_run(tmp_path / 'cropped', scene, [(8, 8)] * 3, sources, False)
+    full = glow_run(tmp_path / 'full', scene, [(8, 8)] * 3, sources, True)
+    assert full[2].max() > 0.05
+    assert np.array_equal(quantise8(cropped[2]), quantise8(full[2]))
+    assert np.abs(cropped[2] - full[2]).max() <= 1e-6 * np.abs(full[2]).max()
+    assert_rounding_only(cropped, full)
+
+
+@pytest.mark.blender
+def test_cropped_glow_reads_black_outside_its_box(tmp_path):
+    left = ((0, 0), (.5, 0), (.5, 1), (0, 1))
+    right = ((.5, 0), (1, 0), (1, 1), (.5, 1))
+    # (the lit half is far from the receiver, so only the dark half's glow could reach it)
+    scene = build([dict(quad=floor(300, 400, 300, 400, z=1, lm=left), ignore_normals=True),
+                   dict(quad=floor(-4, 4, -4, 4, z=1, lm=right), ignore_normals=True),
+                   dict(quad=floor(-1, 1, -1, 1), page=1)])
+    source = np.zeros((8, 8, 3), np.float32)
+    source[:, :4] = 4 + np.arange(32, dtype=np.float32).reshape(8, 4, 1)
+    sources = [source, np.zeros((8, 8, 3), np.float32)]
+    cropped = glow_run(tmp_path / 'cropped', scene, [(8, 8), (8, 8)], sources, False)
+    full = glow_run(tmp_path / 'full', scene, [(8, 8), (8, 8)], sources, True)
+    assert_rounding_only(cropped, full)
+    # (nothing from the dark half: an edge-extended crop would carry the box's last column across it)
+    assert cropped[1][2:-2, 2:-2].max() < 0.05
+    np.testing.assert_array_equal(cropped[0][:, 4:], 0)
+
+
+@pytest.mark.blender
+def test_page_without_glow_keeps_its_flagged_receivers_black(tmp_path):
+    scene = build([dict(quad=floor(-8, 8, -8, 8, z=1), ignore_normals=True),
+                   dict(quad=floor(-4, -2, 2, 4), page=1, ignore_normals=True),
+                   dict(quad=floor(-4, -2, -4, -2), page=2)])
+    bright = np.zeros((8, 8, 3), np.float32)
+    bright[:4] = 4
+    sources = [bright, np.zeros((8, 8, 3), np.float32), np.zeros((8, 8, 3), np.float32)]
+    cropped = glow_run(tmp_path / 'cropped', scene, [(8, 8)] * 3, sources, False)
+    full = glow_run(tmp_path / 'full', scene, [(8, 8)] * 3, sources, True)
+    assert full[2].max() > 0.05
+    assert_rounding_only(cropped, full)
