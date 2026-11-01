@@ -872,87 +872,242 @@ def plan_atlas(written, mask, owner, two_sided):
                  role=np.concatenate([flagged.astype(np.int8), np.full(extra, 2, np.int8)]), twin=twin)
 
 
-def _clip(poly, tri):
-    sign = np.sign((tri[1, 0] - tri[0, 0]) * (tri[2, 1] - tri[0, 1]) - (tri[1, 1] - tri[0, 1]) * (tri[2, 0] - tri[0, 0]))
-    out = list(poly)
+def _clip_squares(squares, tris):
+    # Sutherland-Hodgman of one convex polygon per row against that row's triangle (either orientation); rows hold up to
+    # 8 vertices (a square cut by three lines keeps at most 7) and the count says how many are real
+    count = len(tris)
+    sign = np.sign((tris[:, 1, 0] - tris[:, 0, 0]) * (tris[:, 2, 1] - tris[:, 0, 1])
+                   - (tris[:, 1, 1] - tris[:, 0, 1]) * (tris[:, 2, 0] - tris[:, 0, 0]))
+    poly = np.zeros((count, 8, 2))
+    poly[:, :4] = squares
+    size = np.full(count, 4)
+    index = np.arange(8)[None, :]
     for i in range(3):
-        a, b = tri[i], tri[(i + 1) % 3]
-        src, out = out, []
-        for k in range(len(src)):
-            p, q = src[k], src[(k + 1) % len(src)]
-            sp = sign * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]))
-            sq = sign * ((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]))
-            if sp >= 0:
-                out.append(p)
-            if (sp >= 0) != (sq >= 0):
-                out.append(p + sp / (sp - sq) * (q - p))
-        if not out:
-            return np.zeros((0, 2))
-    return np.array(out)
+        a, b = tris[:, i], tris[:, (i + 1) % 3]
+        s = sign[:, None] * ((b[:, None, 0] - a[:, None, 0]) * (poly[..., 1] - a[:, None, 1])
+                             - (b[:, None, 1] - a[:, None, 1]) * (poly[..., 0] - a[:, None, 0]))
+        valid = index < size[:, None]
+        following = np.where(index + 1 >= size[:, None], 0, index + 1)
+        s_next = np.take_along_axis(s, following, axis=1)
+        keep = valid & (s >= 0)
+        cross = valid & ((s >= 0) != (s_next >= 0))
+        with np.errstate(divide='ignore', invalid='ignore'):
+            q = np.take_along_axis(poly, following[..., None], axis=1)
+            cut = poly + (s / (s - s_next))[..., None] * (q - poly)
+        before = np.cumsum(keep, axis=1) + np.cumsum(cross, axis=1) - keep - cross
+        out = np.zeros_like(poly)
+        rows, cols = np.nonzero(keep)
+        out[rows, before[rows, cols]] = poly[rows, cols]
+        rows, cols = np.nonzero(cross)
+        out[rows, before[rows, cols] + keep[rows, cols]] = cut[rows, cols]
+        poly, size = out, keep.sum(axis=1) + cross.sum(axis=1)
+    return poly, size
 
 
-def _needed_edges(clipped, tri):
-    scale = max(1.0, np.abs(tri).max())
-    need = []
+def _needed_edges(poly, size, tris):
+    # per row, which owner edges a side of the clipped polygon lies along (a corner touching an edge is not enough)
+    index = np.arange(8)[None, :]
+    valid = index < size[:, None]
+    following = np.where(index + 1 >= size[:, None], 0, index + 1)
+    nxt = np.take_along_axis(poly, following[..., None], axis=1)
+    long_enough = np.hypot(nxt[..., 0] - poly[..., 0], nxt[..., 1] - poly[..., 1]) > 1e-7
+    scale = np.maximum(1.0, np.abs(tris).max(axis=(1, 2)))
+    need = np.zeros((len(tris), 3), bool)
     for i in range(3):
-        a, b = tri[i], tri[(i + 1) % 3]
+        a, b = tris[:, i], tris[:, (i + 1) % 3]
         d = b - a
-        reach = 1e-9 * scale * np.hypot(*d)
-        for k in range(len(clipped)):
-            p, r = clipped[k], clipped[(k + 1) % len(clipped)]
-            # (a side lying along the edge is the owner's edge cutting the footprint; a corner touching it is not)
-            if (np.hypot(*(r - p)) > 1e-7 and abs(d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0])) <= reach
-                    and abs(d[0] * (r[1] - a[1]) - d[1] * (r[0] - a[0])) <= reach):
-                need.append(i)
-                break
+        reach = (1e-9 * scale * np.hypot(d[:, 0], d[:, 1]))[:, None]
+        on_p = np.abs(d[:, None, 0] * (poly[..., 1] - a[:, None, 1]) - d[:, None, 1] * (poly[..., 0] - a[:, None, 0])) <= reach
+        on_r = np.abs(d[:, None, 0] * (nxt[..., 1] - a[:, None, 1]) - d[:, None, 1] * (nxt[..., 0] - a[:, None, 0])) <= reach
+        need[:, i] = (valid & long_enough & on_p & on_r).any(axis=1)
     return need
 
 
-def _slot_triangle(col, row, tri):
-    # one triangle T' that equals the owner on the slot's widened footprint square and reaches no further than it must:
-    # two triangles would sample only part of the footprint (Cycles keeps a jittered sample inside the triangle that
-    # holds the pixel's centre), and a square past the owner's edges would sample area the page never does
-    clipped = _clip(np.array([[col - ATLAS_EPS, row - ATLAS_EPS], [col + 1 + ATLAS_EPS, row - ATLAS_EPS],
-                              [col + 1 + ATLAS_EPS, row + 1 + ATLAS_EPS], [col - ATLAS_EPS, row + 1 + ATLAS_EPS]]), tri)
-    need = _needed_edges(clipped, tri)
-    if len(need) == 3:
-        return tri.copy(), 3
-    if len(need) == 2:
-        edges = {0: (0, 1), 1: (1, 2), 2: (2, 0)}
-        shared = (set(edges[need[0]]) & set(edges[need[1]])).pop()
-        others = [v for v in (0, 1, 2) if v != shared]
-        corner = tri[shared]
-        da, db = tri[others[0]] - corner, tri[others[1]] - corner
-        ab = np.linalg.solve(np.column_stack([da, db]), (clipped - corner).T)
-        # (the margin keeps the footprint's far corners inside T', whose far side then stays inside the owner)
-        t = ab.sum(axis=0).max() * (1 + 1e-6) + 1e-6
-        return np.array([corner, corner + t * da, corner + t * db]), 2
-    if len(need) == 1:
-        a, b = tri[need[0]], tri[(need[0] + 1) % 3]
-        d = (b - a) / np.hypot(*(b - a))
-        m = np.array([-d[1], d[0]])
-        if (tri[(need[0] + 2) % 3] - a) @ m < 0:
-            m = -m
-        along, height = (clipped - a) @ d, (clipped - a) @ m
-        lo, hi, top = along.min(), along.max(), max(height.max(), 0) + 1e-3
-        return np.array([a + (lo - top) * d, a + (hi + top) * d, a + 0.5 * (lo + hi) * d + (0.5 * (hi - lo) + top) * m]), 1
+def _slot_triangles(slots, tris):
+    # one triangle T' per slot that equals the owner on the slot's widened footprint square and reaches no further than it
+    # must: two triangles would sample only part of the footprint (Cycles keeps a jittered sample inside the triangle
+    # that holds the pixel's centre), and a square past the owner's edges would sample area the page never does
+    count = len(slots)
+    col, row = slots[:, 0].astype(np.float64), slots[:, 1].astype(np.float64)
+    squares = np.stack([np.stack([col - ATLAS_EPS, row - ATLAS_EPS], axis=1), np.stack([col + 1 + ATLAS_EPS, row - ATLAS_EPS], axis=1),
+                        np.stack([col + 1 + ATLAS_EPS, row + 1 + ATLAS_EPS], axis=1),
+                        np.stack([col - ATLAS_EPS, row + 1 + ATLAS_EPS], axis=1)], axis=1)
+    poly, size = _clip_squares(squares, tris)
+    need = _needed_edges(poly, size, tris)
+    needed = need.sum(axis=1).astype(np.int8)
     # (the widened footprint lies inside the owner, so the smallest right triangle around it does)
-    x0, y0, side = col - ATLAS_EPS, row - ATLAS_EPS, 1 + 2 * ATLAS_EPS
-    return np.array([[x0, y0], [x0 + 2 * side + 0.01, y0], [x0, y0 + 2 * side + 0.01]]), 0
-
-
-def _covers(tri, px, py):
-    a, b, c = tri
-    sign = np.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
-    inside = np.ones(np.broadcast(px, py).shape, bool)
-    for p, q in ((a, b), (b, c), (c, a)):
-        inside &= sign * ((q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0])) / np.hypot(*(q - p)) >= -ATLAS_SLACK
-    return inside
+    side = 1 + 2 * ATLAS_EPS
+    x0, y0 = col - ATLAS_EPS, row - ATLAS_EPS
+    out = np.stack([np.stack([x0, y0], axis=1), np.stack([x0 + 2 * side + 0.01, y0], axis=1),
+                    np.stack([x0, y0 + 2 * side + 0.01], axis=1)], axis=1)
+    whole = needed == 3
+    out[whole] = tris[whole]
+    two = np.flatnonzero(needed == 2)
+    if len(two):
+        edges = need[two]
+        # the two needed edges meet at the owner corner not on the third edge
+        shared = np.where(edges[:, 0] & edges[:, 1], 1, np.where(edges[:, 1] & edges[:, 2], 2, 0))
+        first = np.where(shared == 0, 1, 0)
+        second = np.where(shared == 2, 1, 2)
+        t2 = tris[two]
+        rows = np.arange(len(two))
+        corner = t2[rows, shared]
+        da, db = t2[rows, first] - corner, t2[rows, second] - corner
+        ab = np.linalg.solve(np.stack([da, db], axis=2), np.swapaxes(poly[two] - corner[:, None], 1, 2))
+        total = np.where(np.arange(8)[None, :] < size[two][:, None], ab.sum(axis=1), -np.inf)
+        # (the margin keeps the footprint's far corners inside T', whose far side then stays inside the owner)
+        t = total.max(axis=1) * (1 + 1e-6) + 1e-6
+        out[two] = np.stack([corner, corner + t[:, None] * da, corner + t[:, None] * db], axis=1)
+    one = np.flatnonzero(needed == 1)
+    if len(one):
+        edge = need[one].argmax(axis=1)
+        t1 = tris[one]
+        rows = np.arange(len(one))
+        a, b, third = t1[rows, edge], t1[rows, (edge + 1) % 3], t1[rows, (edge + 2) % 3]
+        d = (b - a) / np.hypot(b[:, 0] - a[:, 0], b[:, 1] - a[:, 1])[:, None]
+        m = np.stack([-d[:, 1], d[:, 0]], axis=1)
+        m = np.where(((third[:, 0] - a[:, 0]) * m[:, 0] + (third[:, 1] - a[:, 1]) * m[:, 1] < 0)[:, None], -m, m)
+        rel = poly[one] - a[:, None]
+        valid = np.arange(8)[None, :] < size[one][:, None]
+        along = np.where(valid, rel[..., 0] * d[:, None, 0] + rel[..., 1] * d[:, None, 1], np.nan)
+        height = np.where(valid, rel[..., 0] * m[:, None, 0] + rel[..., 1] * m[:, None, 1], np.nan)
+        lo, hi = np.nanmin(along, axis=1)[:, None], np.nanmax(along, axis=1)[:, None]
+        top = np.maximum(np.nanmax(height, axis=1), 0)[:, None] + 1e-3
+        out[one] = np.stack([a + (lo - top) * d, a + (hi + top) * d,
+                             a + 0.5 * (lo + hi) * d + (0.5 * (hi - lo) + top) * m], axis=1)
+    return out, needed
 
 
 def _page_corners(scene, width, height):
     # the lightmap UVs as Blender's raster sees them: float32 after the flip, then scaled to sub-texel pixels
     return flip_v(scene['lm_uv']).astype(np.float64)[scene['tris']] * [3 * width, 3 * height]
+
+
+def _depth(tri, x, y):
+    # how far inside its tightest edge line the pixel centre (x, y) lies, negative outside; tri broadcasts against x, y
+    sign = np.sign((tri[..., 1, 0] - tri[..., 0, 0]) * (tri[..., 2, 1] - tri[..., 0, 1])
+                   - (tri[..., 1, 1] - tri[..., 0, 1]) * (tri[..., 2, 0] - tri[..., 0, 0]))
+    depth = np.inf
+    for i in range(3):
+        p, q = tri[..., i, :], tri[..., (i + 1) % 3, :]
+        depth = np.minimum(depth, sign * ((q[..., 0] - p[..., 0]) * (y - p[..., 1]) - (q[..., 1] - p[..., 1]) * (x - p[..., 0]))
+                           / np.hypot(q[..., 0] - p[..., 0], q[..., 1] - p[..., 1]))
+    return depth
+
+
+def _covered_cells(tri, n_cols):
+    # the grid cells whose pixel centre T' covers within ATLAS_SLACK, as cell numbers (row * n_cols + column); only a slot
+    # pixel can clash with a triangle, so no other pixel is tracked. Candidates are the pixels within a pixel of the
+    # triangle's bounding box
+    lo = np.floor(tri.min(axis=0) - 1).astype(int)
+    hi = np.ceil(tri.max(axis=0) + 1).astype(int)
+    columns = np.arange(max(0, -(-(lo[0] - ATLAS_OFFSET) // ATLAS_STRIDE)), min(n_cols - 1, (hi[0] - ATLAS_OFFSET) // ATLAS_STRIDE) + 1)
+    rows = np.arange(max(0, -(-(lo[1] - ATLAS_OFFSET) // ATLAS_STRIDE)), (hi[1] - ATLAS_OFFSET) // ATLAS_STRIDE + 1)
+    hit = _depth(tri, (ATLAS_OFFSET + ATLAS_STRIDE * columns)[None, :] + 0.5, (ATLAS_OFFSET + ATLAS_STRIDE * rows)[:, None] + 0.5) >= -ATLAS_SLACK
+    return (rows[:, None] * n_cols + columns[None, :])[hit]
+
+
+# cells either side of a slot's own whose centre the vectorised pass tests; a triangle that could reach further is decided
+# cell by cell instead
+WINDOW = 2
+# a covered/not-covered verdict closer than this to its threshold is recomputed exactly where the slot lands (the pass
+# works on the triangle relative to its slot, the layout on the triangle shifted to the cell it lands in)
+MARGIN = 1e-7
+
+
+def _window_masks(relative):
+    """Per slot, the cells of the window around its own whose pixel centre T' covers, as bits (row * 5 + column of the
+    window), and whether the slot must be decided exactly once it has a cell."""
+    count = len(relative)
+    masks = np.zeros(count, np.int64)
+    exact = np.zeros(count, bool)
+    steps = np.arange(-WINDOW, WINDOW + 1) * ATLAS_STRIDE
+    gx, gy = steps[None, None, :], steps[None, :, None]
+    bit = (1 << np.arange((2 * WINDOW + 1) ** 2)).reshape(1, 2 * WINDOW + 1, 2 * WINDOW + 1)
+    for start in range(0, count, 32768):
+        tri = relative[start:start + 32768]
+        low, high = tri.min(axis=1), tri.max(axis=1)
+        depth = _depth(tri[:, None, None], gx + 0.5, gy + 0.5)
+        near = depth >= -ATLAS_SLACK - MARGIN
+        # (the layout only considers pixels within one pixel of the bounding box: a centre outside that is not covered)
+        inside = ((gx > low[:, None, None, 0] - 2 + MARGIN) & (gx < high[:, None, None, 0] + 2 - MARGIN)
+                  & (gy > low[:, None, None, 1] - 2 + MARGIN) & (gy < high[:, None, None, 1] + 2 - MARGIN))
+        unsure = near & ((np.abs(depth + ATLAS_SLACK) < MARGIN)
+                         | (np.abs(gx - (low[:, None, None, 0] - 2)) < MARGIN) | (np.abs(gx - (high[:, None, None, 0] + 2)) < MARGIN)
+                         | (np.abs(gy - (low[:, None, None, 1] - 2)) < MARGIN) | (np.abs(gy - (high[:, None, None, 1] + 2)) < MARGIN))
+        edges = np.hypot(tri[:, [1, 2, 0], 0] - tri[:, :, 0], tri[:, [1, 2, 0], 1] - tri[:, :, 1])
+        area = np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1]) - (tri[:, 1, 1] - tri[:, 0, 1]) * (tri[:, 2, 0] - tri[:, 0, 0]))
+        far = (low < -(ATLAS_STRIDE * WINDOW - 2)).any(axis=1) | (high > ATLAS_STRIDE * WINDOW - 2).any(axis=1)
+        masks[start:start + 32768] = (((depth >= -ATLAS_SLACK) & inside) * bit).sum(axis=(1, 2))
+        exact[start:start + 32768] = unsure.any(axis=(1, 2)) | far | (edges.min(axis=1) < 1e-3) | (area < 1e-6)
+    return masks, exact
+
+
+def _reach(tri):
+    """The cells, as (columns, rows) away from the slot's own, whose pixel centre a triangle given relative to its slot
+    covers, with whether any verdict is too close to call (then the cell it lands in decides, see MARGIN)."""
+    low, high = tri.min(axis=0), tri.max(axis=0)
+    columns = np.arange(int(np.floor((low[0] - 2 - MARGIN) / ATLAS_STRIDE)), int(np.ceil((high[0] + 2 + MARGIN) / ATLAS_STRIDE)) + 1)
+    rows = np.arange(int(np.floor((low[1] - 2 - MARGIN) / ATLAS_STRIDE)), int(np.ceil((high[1] + 2 + MARGIN) / ATLAS_STRIDE)) + 1)
+    x, y = ATLAS_STRIDE * columns[None, :], ATLAS_STRIDE * rows[:, None]
+    depth = _depth(tri, x + 0.5, y + 0.5)
+    inside = (x > low[0] - 2 + MARGIN) & (x < high[0] + 2 - MARGIN) & (y > low[1] - 2 + MARGIN) & (y < high[1] + 2 - MARGIN)
+    unsure = ((depth >= -ATLAS_SLACK - MARGIN)
+              & ((np.abs(depth + ATLAS_SLACK) < MARGIN) | (np.abs(x - (low[0] - 2)) < MARGIN) | (np.abs(x - (high[0] + 2)) < MARGIN)
+                 | (np.abs(y - (low[1] - 2)) < MARGIN) | (np.abs(y - (high[1] + 2)) < MARGIN))).any()
+    edges = np.hypot(*(tri[[1, 2, 0]] - tri).T)
+    area = abs((tri[1, 0] - tri[0, 0]) * (tri[2, 1] - tri[0, 1]) - (tri[1, 1] - tri[0, 1]) * (tri[2, 0] - tri[0, 0]))
+    rows_hit, columns_hit = np.nonzero((depth >= -ATLAS_SLACK) & inside)
+    return list(zip(columns[columns_hit].tolist(), rows[rows_hit].tolist())), bool(unsure or edges.min() < 1e-3 or area < 1e-6)
+
+
+def _place(triangles, slots, n_cols):
+    """The greedy layout: each slot takes the first cell after the previous slot's that no accepted triangle covers
+    and where its own triangle covers no accepted slot's pixel. Returns the slot pixels, or None past MAX_ATLAS."""
+    count = len(slots)
+    relative = triangles - slots[:, None]
+    masks, exact = _window_masks(relative)
+    pixels = np.empty((count, 2), np.int64)
+    covered = bytearray(count + 8 * n_cols)
+    occupied = bytearray(len(covered))
+    reach = {}
+    cursor = 0
+    for k, (mask, decide) in enumerate(zip(masks.tolist(), exact.tolist())):
+        if decide:
+            offsets, decide = _reach(relative[k])
+        else:
+            if mask not in reach:
+                reach[mask] = [(i % 5 - WINDOW, i // 5 - WINDOW) for i in range(25) if mask >> i & 1]
+            offsets = reach[mask]
+        while True:
+            if len(covered) < cursor + (WINDOW + 3) * n_cols:
+                covered.extend(bytes(len(covered)))
+                occupied.extend(bytes(len(occupied)))
+            if covered[cursor]:
+                cursor += 1
+                continue
+            column, row = cursor % n_cols, cursor // n_cols
+            if decide:
+                tri = relative[k] + [ATLAS_OFFSET + ATLAS_STRIDE * column, ATLAS_OFFSET + ATLAS_STRIDE * row]
+                cells = _covered_cells(tri, n_cols).tolist()
+            else:
+                cells = [cursor + dy * n_cols + dx for dx, dy in offsets if 0 <= column + dx < n_cols and row + dy >= 0]
+            if cells and max(cells) >= len(covered):
+                covered.extend(bytes(max(cells) + 1 - len(covered)))
+                occupied.extend(bytes(len(covered) - len(occupied)))
+            # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
+            # slot's centre would overwrite it)
+            if not any(occupied[cell] for cell in cells if cell != cursor):
+                break
+            cursor += 1
+        occupied[cursor] = 1
+        for cell in cells:
+            covered[cell] = 1
+        pixels[k] = ATLAS_OFFSET + ATLAS_STRIDE * column, ATLAS_OFFSET + ATLAS_STRIDE * row
+        if max(pixels[k]) + ATLAS_STRIDE + ATLAS_OFFSET + 4 > MAX_ATLAS:
+            return None
+        cursor += 1
+    return pixels
 
 
 def place_atlas(scene, atlas, width, height):
@@ -961,43 +1116,21 @@ def place_atlas(scene, atlas, width, height):
             - (corners[:, 1, 1] - corners[:, 0, 1]) * (corners[:, 2, 0] - corners[:, 0, 0]))
     # (a zero-area owner has no barycentrics to place the slot's corners by)
     if (area[atlas.owner] == 0).any():
+        log('atlas: an owner has a zero-area lightmap triangle, so the page is baked instead')
         return None
     count = len(atlas.slots)
     triangles = np.empty((count, 3, 2))
     needed = np.empty(count, np.int8)
-    for k in range(count):
-        # (a back copy repeats its front copy's footprint)
-        source = atlas.twin[k] if atlas.role[k] == 2 else k
-        if source != k:
-            triangles[k], needed[k] = triangles[source], needed[source]
-        else:
-            triangles[k], needed[k] = _slot_triangle(*atlas.slots[k], corners[atlas.owner[k]])
+    # (a back copy repeats its front copy's footprint)
+    own = np.flatnonzero(atlas.role != 2)
+    triangles[own], needed[own] = _slot_triangles(atlas.slots[own], corners[atlas.owner[own]])
+    back = np.flatnonzero(atlas.role == 2)
+    triangles[back], needed[back] = triangles[atlas.twin[back]], needed[atlas.twin[back]]
     n_cols = int(math.ceil(math.sqrt(1.3 * count)))
-    pixels = np.empty((count, 2), np.int64)
-    occupied, covered = set(), set()
-    cell = 0
-    for k in range(count):
-        relative = triangles[k] - atlas.slots[k]
-        while True:
-            ax, ay = ATLAS_OFFSET + ATLAS_STRIDE * (cell % n_cols), ATLAS_OFFSET + ATLAS_STRIDE * (cell // n_cols)
-            cell += 1
-            # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
-            # slot's centre would overwrite it)
-            if (ax, ay) in covered:
-                continue
-            tri = relative + [ax, ay]
-            lo, hi = np.floor(tri.min(axis=0) - 1).astype(int), np.ceil(tri.max(axis=0) + 1).astype(int)
-            gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1))
-            inside = _covers(tri, gx + 0.5, gy + 0.5)
-            mine = set(zip(gx[inside].tolist(), gy[inside].tolist()))
-            if any(pixel != (ax, ay) and pixel in occupied for pixel in mine):
-                continue
-            occupied.add((ax, ay))
-            covered |= mine
-            pixels[k] = ax, ay
-            break
-        if max(ax, ay) + ATLAS_STRIDE + ATLAS_OFFSET + 4 > MAX_ATLAS:
-            return None
+    pixels = _place(triangles, atlas.slots, n_cols)
+    if pixels is None:
+        log(f'atlas: {count} slots need an image over MAX_ATLAS ({MAX_ATLAS}) pixels, so the page is baked instead')
+        return None
     side = int(pixels.max()) + ATLAS_STRIDE + ATLAS_OFFSET + 4 if count else 0
     return replace(atlas, triangles=triangles, needed=needed, pixels=pixels, side=side)
 

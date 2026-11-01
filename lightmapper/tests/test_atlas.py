@@ -1,6 +1,7 @@
 """The edge top-up atlas: one small triangle per sub-texel, laid out so each bakes what the page path would."""
 
 import dataclasses
+import math
 from pathlib import Path
 
 import numpy as np
@@ -117,6 +118,211 @@ def corner_map(mesh, atlas):
     distance = np.linalg.norm(page[:, :, None] - atlas.triangles[:, None], axis=3)
     assert distance.min(axis=2).max() < 1e-3
     return distance.argmin(axis=2)
+
+
+# ---------- the scalar placement the vectorised one must equal (the layout the spike measured, frozen here)
+
+REF_EPS = 0.02
+REF_SLACK = 0.01
+
+
+def ref_clip(poly, tri):
+    sign = np.sign((tri[1, 0] - tri[0, 0]) * (tri[2, 1] - tri[0, 1]) - (tri[1, 1] - tri[0, 1]) * (tri[2, 0] - tri[0, 0]))
+    out = list(poly)
+    for i in range(3):
+        a, b = tri[i], tri[(i + 1) % 3]
+        src, out = out, []
+        for k in range(len(src)):
+            p, q = src[k], src[(k + 1) % len(src)]
+            sp = sign * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]))
+            sq = sign * ((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]))
+            if sp >= 0:
+                out.append(p)
+            if (sp >= 0) != (sq >= 0):
+                out.append(p + sp / (sp - sq) * (q - p))
+        if not out:
+            return np.zeros((0, 2))
+    return np.array(out)
+
+
+def ref_needed_edges(clipped, tri):
+    scale = max(1.0, np.abs(tri).max())
+    need = []
+    for i in range(3):
+        a, b = tri[i], tri[(i + 1) % 3]
+        d = b - a
+        reach = 1e-9 * scale * np.hypot(*d)
+        for k in range(len(clipped)):
+            p, r = clipped[k], clipped[(k + 1) % len(clipped)]
+            # (a side lying along the edge is the owner's edge cutting the footprint; a corner touching it is not)
+            if (np.hypot(*(r - p)) > 1e-7 and abs(d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0])) <= reach
+                    and abs(d[0] * (r[1] - a[1]) - d[1] * (r[0] - a[0])) <= reach):
+                need.append(i)
+                break
+    return need
+
+
+def ref_slot_triangle(col, row, tri):
+    # one triangle T' that equals the owner on the slot's widened footprint square and reaches no further than it must:
+    # two triangles would sample only part of the footprint (Cycles keeps a jittered sample inside the triangle that
+    # holds the pixel's centre), and a square past the owner's edges would sample area the page never does
+    clipped = ref_clip(np.array([[col - REF_EPS, row - REF_EPS], [col + 1 + REF_EPS, row - REF_EPS],
+                              [col + 1 + REF_EPS, row + 1 + REF_EPS], [col - REF_EPS, row + 1 + REF_EPS]]), tri)
+    need = ref_needed_edges(clipped, tri)
+    if len(need) == 3:
+        return tri.copy(), 3
+    if len(need) == 2:
+        edges = {0: (0, 1), 1: (1, 2), 2: (2, 0)}
+        shared = (set(edges[need[0]]) & set(edges[need[1]])).pop()
+        others = [v for v in (0, 1, 2) if v != shared]
+        corner = tri[shared]
+        da, db = tri[others[0]] - corner, tri[others[1]] - corner
+        ab = np.linalg.solve(np.column_stack([da, db]), (clipped - corner).T)
+        # (the margin keeps the footprint's far corners inside T', whose far side then stays inside the owner)
+        t = ab.sum(axis=0).max() * (1 + 1e-6) + 1e-6
+        return np.array([corner, corner + t * da, corner + t * db]), 2
+    if len(need) == 1:
+        a, b = tri[need[0]], tri[(need[0] + 1) % 3]
+        d = (b - a) / np.hypot(*(b - a))
+        m = np.array([-d[1], d[0]])
+        if (tri[(need[0] + 2) % 3] - a) @ m < 0:
+            m = -m
+        along, height = (clipped - a) @ d, (clipped - a) @ m
+        lo, hi, top = along.min(), along.max(), max(height.max(), 0) + 1e-3
+        return np.array([a + (lo - top) * d, a + (hi + top) * d, a + 0.5 * (lo + hi) * d + (0.5 * (hi - lo) + top) * m]), 1
+    # (the widened footprint lies inside the owner, so the smallest right triangle around it does)
+    x0, y0, side = col - REF_EPS, row - REF_EPS, 1 + 2 * REF_EPS
+    return np.array([[x0, y0], [x0 + 2 * side + 0.01, y0], [x0, y0 + 2 * side + 0.01]]), 0
+
+
+def ref_covers(tri, px, py):
+    a, b, c = tri
+    sign = np.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+    inside = np.ones(np.broadcast(px, py).shape, bool)
+    for p, q in ((a, b), (b, c), (c, a)):
+        inside &= sign * ((q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0])) / np.hypot(*(q - p)) >= -REF_SLACK
+    return inside
+
+
+def ref_page_corners(m, scene, width, height):
+    return m.flip_v(scene['lm_uv']).astype(np.float64)[scene['tris']] * [3 * width, 3 * height]
+
+
+def reference_place_atlas(m, scene, atlas, width, height):
+    corners = ref_page_corners(m, scene, width, height)
+    area = ((corners[:, 1, 0] - corners[:, 0, 0]) * (corners[:, 2, 1] - corners[:, 0, 1])
+            - (corners[:, 1, 1] - corners[:, 0, 1]) * (corners[:, 2, 0] - corners[:, 0, 0]))
+    # (a zero-area owner has no barycentrics to place the slot's corners by)
+    if (area[atlas.owner] == 0).any():
+        return None
+    count = len(atlas.slots)
+    triangles = np.empty((count, 3, 2))
+    needed = np.empty(count, np.int8)
+    for k in range(count):
+        # (a back copy repeats its front copy's footprint)
+        source = atlas.twin[k] if atlas.role[k] == 2 else k
+        if source != k:
+            triangles[k], needed[k] = triangles[source], needed[source]
+        else:
+            triangles[k], needed[k] = ref_slot_triangle(*atlas.slots[k], corners[atlas.owner[k]])
+    n_cols = int(math.ceil(math.sqrt(1.3 * count)))
+    pixels = np.empty((count, 2), np.int64)
+    occupied, covered = set(), set()
+    cell = 0
+    for k in range(count):
+        relative = triangles[k] - atlas.slots[k]
+        while True:
+            ax, ay = 2 + 4 * (cell % n_cols), 2 + 4 * (cell // n_cols)
+            cell += 1
+            # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
+            # slot's centre would overwrite it)
+            if (ax, ay) in covered:
+                continue
+            tri = relative + [ax, ay]
+            lo, hi = np.floor(tri.min(axis=0) - 1).astype(int), np.ceil(tri.max(axis=0) + 1).astype(int)
+            gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1))
+            inside = ref_covers(tri, gx + 0.5, gy + 0.5)
+            mine = set(zip(gx[inside].tolist(), gy[inside].tolist()))
+            if any(pixel != (ax, ay) and pixel in occupied for pixel in mine):
+                continue
+            occupied.add((ax, ay))
+            covered |= mine
+            pixels[k] = ax, ay
+            break
+        if max(ax, ay) + 4 + 2 + 4 > m.MAX_ATLAS:
+            return None
+    side = int(pixels.max()) + 4 + 2 + 4 if count else 0
+    return dataclasses.replace(atlas, triangles=triangles, needed=needed, pixels=pixels, side=side)
+
+
+
+
+
+
+def skips_of(atlas):
+    cols = int(np.ceil(np.sqrt(1.3 * len(atlas.slots))))
+    cells = (atlas.pixels[:, 1] - 2) // 4 * cols + (atlas.pixels[:, 0] - 2) // 4
+    return int(cells.max() + 1 - len(cells))
+
+
+def assert_same_layout(module, scene, atlas, width, height):
+    want = reference_place_atlas(module, scene, atlas, width, height)
+    got = module.place_atlas(scene, atlas, width, height)
+    np.testing.assert_array_equal(got.pixels, want.pixels)
+    assert got.side == want.side and skips_of(got) == skips_of(want)
+    np.testing.assert_array_equal(got.needed, want.needed)
+    np.testing.assert_allclose(got.triangles, want.triangles, rtol=0, atol=1e-12)
+    return got
+
+
+def busy_page(module, seed, size=32):
+    # shuffled small triangles of every orientation and a few slivers, overlapping, so owners compete
+    rng = np.random.default_rng(seed)
+    pixels = []
+    for _ in range(12):
+        start, angle, length = rng.uniform(4, 3 * size - 4, 2), rng.uniform(0, 2 * np.pi), rng.uniform(25, 60)
+        along = np.array([np.cos(angle), np.sin(angle)])
+        across = np.array([-along[1], along[0]])
+        pixels.append(np.array([start, start + length * along, start + length * along + rng.uniform(0.3, 1.5) * across]))
+    for _ in range(450):
+        centre = rng.uniform(4, 3 * size - 4, 2)
+        radius = rng.uniform(1.0, 7.0)
+        angles = np.sort(rng.uniform(0, 2 * np.pi, 3))
+        pixels.append(centre + radius * np.column_stack([np.cos(angles), np.sin(angles)]))
+    pixels = np.clip(np.array(pixels), 0.5, 3 * size - 0.5)
+    uv = np.column_stack([pixels[..., 0].ravel() / (3 * size), 1 - pixels[..., 1].ravel() / (3 * size)])
+    positions = np.tile(np.float32([[0, 0, 0], [1, 0, 0], [0, 1, 0]]), (len(pixels), 1))
+    scene = scene_of(positions, uv)
+    owner = module.subtexel_owner(scene, 0, size, size)
+    atlas = module.plan_atlas(owner >= 0, np.ones((size, size), bool), owner, np.zeros(len(pixels), bool))
+    return scene, atlas, size
+
+
+def test_vectorised_placement_equals_the_scalar_greedy_one(bake_module, spike):
+    for prefix in ('s', 's5'):
+        scene, width, height, atlas = planned(bake_module, spike, prefix)
+        assert_same_layout(bake_module, scene, atlas, width, height)
+
+
+def test_vectorised_placement_equals_the_scalar_one_on_a_busy_page(bake_module):
+    for seed in (1, 2):
+        scene, atlas, size = busy_page(bake_module, seed)
+        assert len(atlas.slots) > 2500
+        placed = assert_same_layout(bake_module, scene, atlas, size, size)
+        assert skips_of(placed) > 0
+        extent = (placed.triangles - atlas.slots[:, None]).max(axis=(1, 2))
+        assert extent.max() > 12, 'the page holds slivers whose triangles leave the vectorised window'
+
+
+def test_place_atlas_says_why_it_returned_none(bake_module, spike, monkeypatch, capsys):
+    scene, width, height, atlas = planned(bake_module, spike, 's5')
+    monkeypatch.setattr(bake_module, 'MAX_ATLAS', 16)
+    assert bake_module.place_atlas(scene, atlas, width, height) is None
+    assert 'MAX_ATLAS' in capsys.readouterr().out
+    flat = dict(scene, lm_uv=np.zeros_like(scene['lm_uv']))
+    monkeypatch.setattr(bake_module, 'MAX_ATLAS', 8192)
+    assert bake_module.place_atlas(flat, atlas, width, height) is None
+    assert 'zero-area' in capsys.readouterr().out
 
 
 # ---------- ownership

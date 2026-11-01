@@ -8,8 +8,6 @@ import types
 
 import pytest
 
-from lightmapper.blender_job import BAKE_SCRIPT
-
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
@@ -20,6 +18,8 @@ LIGHTMAPPER_BLENDER = Path(os.environ.get(
 
 
 def load_bake_module(patch):
+    # (imported here: the path insert below must run before the first lightmapper import)
+    from lightmapper.blender_job import BAKE_SCRIPT
     # only Blender imports are stubbed; the numpy helper is the production implementation
     for name in ('bpy', 'mathutils', 'mathutils.bvhtree'):
         patch.setitem(sys.modules, name, types.ModuleType(name))
