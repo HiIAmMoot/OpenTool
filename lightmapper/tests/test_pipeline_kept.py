@@ -396,3 +396,79 @@ def test_write_again_records_the_written_sizes(tiny, tmp_path, monkeypatch):
     summary = json.loads((work / 'write_summary.json').read_text())
     assert summary['written'] == {'bitmap': (tags / 'copy.bitmap').stat().st_size,
                                   'bsp': (tags / 'copy.scenario_structure_bsp').stat().st_size}
+
+
+def source_files(tags):
+    return {name: (tags / name).read_bytes() for name in ('room.scenario_structure_bsp', 'room.bitmap') if (tags / name).exists()}
+
+
+def test_write_again_writes_where_the_bake_wrote_not_over_its_input(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    before = source_files(tags)
+    for path in written(tags):
+        path.unlink()
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', replace(settings, lightmap_32bit=True), work=work, reuse=True)
+    assert source_files(tags) == before and not (tags / 'room.bitmap').exists()
+    bitmap = read_tag(resolve_reference_path(tags, 'bitm', 'copy'))
+    assert [b.get('format') for b in bitmap.root.block('bitmaps')] == [10]
+    assert json.loads((work / 'write_summary.json').read_text())['written_paths'] == {'bitmap': 'copy', 'bsp': 'copy'}
+
+
+def test_write_again_of_an_in_place_bake_is_in_place(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    settings = tool(settings)
+    work = kept_work(tmp_path, tags)
+    api().bake(tags, 'level', 'room', settings, work=work, keep=True)
+    assert kept.read_manifest(work).output_path == 'room'
+    first = source_files(tags)
+    for name in first:
+        (tags / name).unlink()
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, work=work, reuse=True)
+    assert source_files(tags) == first
+
+
+def test_an_explicit_out_bsp_still_wins_on_a_write_again(tiny, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='other', work=work, reuse=True)
+    assert all(path.is_file() for path in written(tags, 'other'))
+
+
+def test_the_manifest_records_where_the_bake_wrote(tiny, tmp_path):
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    manifest = kept.read_manifest(work)
+    assert (manifest.output_path, manifest.output_scenario) == ('copy', '')
+    other = kept_work(tmp_path, tags, 'b')
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='lit', work=other, keep=True)
+    assert kept.read_manifest(other).output_scenario == 'lit'
+    third = kept_work(tmp_path, tags, 'c')
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', kept_scenario='lit2', work=third, keep=True)
+    assert kept.read_manifest(third).output_scenario == 'lit2'
+    assert not resolve_reference_path(tags, 'scnr', 'lit2').exists()
+
+
+def test_the_manifest_holds_an_absolute_tags_folder(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    monkeypatch.chdir(tags.parent)
+    work = kept_work(tmp_path, tags)
+    api().bake(type(tags)('tags'), 'level', 'room', tool(settings), out_bsp='copy', work=work, keep=True)
+    assert kept.read_manifest(work).tags == str(tags.resolve())
+
+
+def test_write_again_falls_back_to_the_cpu_denoiser_without_the_required_gpu(tiny, tmp_path, monkeypatch):
+    from lightmapper import gpu
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    forbid_baking(monkeypatch)
+    real = gpu.probe_choice
+
+    def probe(setting):
+        if setting == 'nvidia':
+            raise gpu.DeviceError('no NVIDIA GPU here')
+        return real(setting)
+
+    monkeypatch.setattr(gpu, 'probe_choice', probe)
+    api().bake(tags, 'level', 'room', replace(settings, device='nvidia'), out_bsp='copy', work=work, reuse=True)
+    summary = json.loads((work / 'write_summary.json').read_text())
+    assert any('CPU denoiser' in warning for warning in summary['warnings'])

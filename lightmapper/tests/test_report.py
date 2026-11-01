@@ -60,3 +60,9 @@ def test_a_glow_pass_that_ran_ignores_a_stale_reason():
 def test_a_malformed_summary_only_leaves_lines_out():
     assert report.bake_report({'seconds': None, 'devices': None, 'written': None}) == []
     assert report.bake_report({'seconds': [1], 'devices': 'x', 'written': 3}) == []
+
+
+def test_the_report_says_where_the_bsp_was_written():
+    lines = report.bake_report({**FULL, 'written_paths': {'bitmap': 'a\\b', 'bsp': 'a\\b'}})
+    assert lines[lines.index('BSP written: 1.0 MB') + 1] == 'Wrote: a\\b'
+    assert not any(line.startswith('Wrote:') for line in report.bake_report(FULL))

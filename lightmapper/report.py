@@ -52,6 +52,9 @@ def bake_report(summary: dict) -> list[str]:
         lines.append(f"Bitmap written: {format_size(written['bitmap'])}")
     if isinstance(written.get('bsp'), int):
         lines.append(f"BSP written: {format_size(written['bsp'])}")
+    paths = summary.get('written_paths')
+    if isinstance(paths, dict) and isinstance(paths.get('bsp'), str) and paths['bsp']:
+        lines.append(f"Wrote: {paths['bsp']}")
     devices = summary.get('devices')
     devices = devices if isinstance(devices, dict) else {}
     # (a skipped glow run is recorded as 'off')

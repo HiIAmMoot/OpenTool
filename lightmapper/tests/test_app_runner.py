@@ -552,3 +552,15 @@ def test_write_again_leaves_the_bakes_own_log(tiny, tmp_path, monkeypatch):
     assert run_bake(kept_request(tiny, tmp_path, reuse=first.work), lambda e: None).status == 'done'
     assert (first.work / 'opentool.log').read_bytes() == before
     assert (first.work / 'write_opentool.log').is_file()
+
+
+def test_write_again_does_not_depend_on_the_tags_scenario_as_it_is_now(tiny, tmp_path, monkeypatch):
+    tags, _, _ = tiny
+    first = run_bake(kept_request(tiny, tmp_path, keep=True), lambda e: None)
+    scenario = read_tag(tags / 'level.scenario')
+    scenario.root.block('structure_bsps')[0].set_reference('structure_bsp', 'sbsp', 'elsewhere')
+    write_tag(scenario, tags / 'level.scenario')
+    forbid_blender(monkeypatch)
+    out = run_bake(kept_request(tiny, tmp_path, reuse=first.work, new_names=False), lambda e: None)
+    assert out.status == 'done', out.message
+    assert out.output_folder == resolve_reference_path(tags, 'sbsp', 'room').parent

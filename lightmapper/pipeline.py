@@ -302,7 +302,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
           progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False,
-          reuse: bool = False) -> BakeOutput:
+          reuse: bool = False, kept_scenario: str | None = None) -> BakeOutput:
     if keep and (sources != 'all' or dry_run):
         raise ValueError('a kept bake must be a full bake that writes tags')
     if keep and work is None:
@@ -313,9 +313,19 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     tags = Path(tags)
     start = last = perf_counter()
     seconds = {}
-    choice = gpu.probe_choice(s.device)
+    warnings = []
+    try:
+        choice = gpu.probe_choice(s.device)
+    except gpu.DeviceError as error:
+        if not reuse:
+            raise
+        # (a write again runs no GPU stage: the device only picks its denoiser, so a vendor this machine lacks is no
+        # reason to refuse)
+        choice = gpu.probe_choice('cpu')
+        warnings.append(f'{error} The CPU denoiser is used for this write.')
     # (a write again runs no GPU stage, so this machine's ray-query warnings say nothing about it)
-    warnings = [] if reuse else list(choice.warnings)
+    if not reuse:
+        warnings.extend(choice.warnings)
     if not reuse:
         logger.info('devices: %s', choice.summary())
     for warning in warnings:
@@ -359,7 +369,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         if not dry_run:
             raise ValueError(message)
         logger.warning('%s; dry run continues for timing only', message)
-    output_path = out_bsp or input_path
+    output_path = out_bsp or (manifest.output_path if reuse else input_path)
     work = (Path(work) if work is not None else Path(tempfile.gettempdir()) / 'halo_lightmapper'
             / f'{bsp}-{datetime.now():%Y%m%d-%H%M%S}')
     work.mkdir(parents=True, exist_ok=True)
@@ -570,9 +580,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     if keep:
         # (before the finish and the write: a bake that fails there is still one to write again)
         kept.write_manifest(work, kept.Manifest(
-            tags=str(tags), scenario=scenario, bsp=bsp, input_path=input_path, has_template=template is not None,
-            vertex_device=vertex_device, glow_device=glow_device, glow_reason=glow_reason, settings=asdict(s),
-            kept_at=datetime.now().isoformat(timespec='seconds')))
+            tags=str(Path(tags).resolve()), scenario=scenario, bsp=bsp, input_path=input_path,
+            has_template=template is not None, vertex_device=vertex_device, glow_device=glow_device,
+            glow_reason=glow_reason, settings=asdict(s), kept_at=datetime.now().isoformat(timespec='seconds'),
+            output_path=output_path, output_scenario=out_scenario or kept_scenario or ''))
         # (only a folder inside the level's kept folder holds older kept bakes: a work folder the caller named
         # may sit beside anything)
         if work.parent.name == kept.level_folder(Path(), tags, scenario, bsp).name:
@@ -619,10 +630,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     bitmap_tag = write_bitmap(pixels, template)
     np.save(work / 'new_to_input.npy', mapping)
     np.savez(work / 'float_pages.npz', **{f'page_{i}': page for i, page in enumerate(float_pages)})
-    written = {}
+    written, written_paths = {}, {}
     if sources == 'all' and not dry_run:
         written['bitmap'] = _write(tags, 'bitm', output_path, bitmap_tag, backups).stat().st_size
         written['bsp'] = _write(tags, 'sbsp', output_path, bsp_tag, backups).stat().st_size
+        written_paths = {'bitmap': output_path, 'bsp': output_path}
         if out_scenario is not None:
             scenario_tag.root.block('structure_bsps')[bsp_number].set_reference('structure_bsp', 'sbsp', output_path)
             _write(tags, 'scnr', out_scenario, scenario_tag, backups)
@@ -632,6 +644,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
+        'written_paths': written_paths,
         'devices': {**({} if reuse else choice.summary()), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},

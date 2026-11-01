@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from lightmapper import cli, kept
+from test_pipeline import tiny  # noqa: F401
 
 
 REPO = Path(__file__).resolve().parents[2]
@@ -122,7 +123,8 @@ def kept_manifest(tmp_path, **settings):
     base = {**asdict(Settings()), **settings, 'dropped_in_a_later_release': 1}
     kept.write_manifest(work, kept.Manifest(
         tags=str(tmp_path / 'tags'), scenario='level', bsp='room', input_path='room', has_template=False,
-        vertex_device='cpu', glow_device='off', glow_reason='', settings=base, kept_at='now'))
+        vertex_device='cpu', glow_device='off', glow_reason='', settings=base, kept_at='now',
+        output_path='room', output_scenario=''))
     return work
 
 
@@ -195,3 +197,45 @@ def test_cli_write_prints_the_report_and_keeps_its_warnings(monkeypatch, tmp_pat
     assert 'BSP written: 2.0 MB' in out and 'warning: a warning' in out
     assert out.count('denoise') == 1 and 'glow pass skipped (bounces set to 0)' in out
     assert out.index('Total time:') < out.index('Work:')
+
+
+def kept_bake_of_a_tiny_level(tiny, tmp_path, **kwargs):
+    from dataclasses import replace
+    from test_pipeline import api
+    tags, settings, _ = tiny
+    work = kept.level_folder(tmp_path / 'k', tags, 'level', 'room') / 'a'
+    api().bake(tags, 'level', 'room', replace(settings, ignore_normals_mode='tool'), work=work, keep=True, **kwargs)
+    return tags, work
+
+
+def test_cli_write_writes_the_tags_the_bake_wrote(tiny, tmp_path, monkeypatch):
+    from lightmapper.tagio.tagfile import read_tag
+    tags, work = kept_bake_of_a_tiny_level(tiny, tmp_path, out_bsp='copy')
+    room = (tags / 'room.scenario_structure_bsp').read_bytes()
+    for name in ('copy.scenario_structure_bsp', 'copy.bitmap'):
+        (tags / name).unlink()
+    monkeypatch.delenv('HCEEK_TAGS', raising=False)
+    assert cli.main(['write', str(work), '--32bit']) == 0
+    assert (tags / 'room.scenario_structure_bsp').read_bytes() == room and not (tags / 'room.bitmap').exists()
+    assert [b.get('format') for b in read_tag(tags / 'copy.bitmap').root.block('bitmaps')] == [10]
+
+
+def test_cli_write_rewrites_the_scenario_the_bake_wrote(tiny, tmp_path, monkeypatch):
+    from lightmapper.tagio.tagfile import read_tag
+    tags, work = kept_bake_of_a_tiny_level(tiny, tmp_path, out_bsp='copy', out_scenario='lit')
+    (tags / 'lit.scenario').unlink()
+    monkeypatch.delenv('HCEEK_TAGS', raising=False)
+    assert cli.main(['write', str(work)]) == 0
+    entries = read_tag(tags / 'lit.scenario').root.block('structure_bsps')
+    assert [e.reference('structure_bsp')[1] for e in entries] == ['copy']
+
+
+def test_cli_keep_in_an_unwritable_kept_root_says_so(monkeypatch, tmp_path, capsys):
+    blocker = tmp_path / 'k'
+    blocker.write_text('a file')
+    monkeypatch.setattr(kept, 'kept_root', lambda: blocker)
+    monkeypatch.setattr(cli, 'bake', lambda *a, **k: pytest.fail('a bake without a kept folder'))
+    assert cli.main(['bake', '--tags', str(tmp_path), 'level', 'room', '--keep']) == 1
+    assert capsys.readouterr().err.strip() == (
+        f'OpenTool could not make a folder for kept bakes in {blocker}. '
+        'Leave out --keep, or move OpenTool to a folder you can write to.')

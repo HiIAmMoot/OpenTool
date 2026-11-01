@@ -196,17 +196,21 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         else:
             input_path = bsp_tag_path(request.tags, request.scenario, request.bsp)
         out_bsp, out_scenario = new_names(request.scenario, input_path) if request.new_names else (None, None)
+        # (a write again says its target: left to the pipeline it would write where the kept bake wrote, which is not
+        # in place when the bake went to new names, and the window asked about in place)
+        bsp_target = out_bsp or (input_path if reuse is not None else None)
         # keep pipeline reads on the modder's original tags; runner writes the lit scenario so references for other BSPs survive.
         result = pipeline.bake(request.tags, request.scenario, request.bsp, request.settings,
-                               out_bsp=out_bsp, out_scenario=None, work=work, progress=progress,
+                               out_bsp=bsp_target, out_scenario=None, work=work, progress=progress,
                                backups=request.backups, charts=request.charts, keep=request.keep,
-                               reuse=reuse is not None)
+                               reuse=reuse is not None, kept_scenario=out_scenario)
         if out_scenario is not None:
             write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario,
                                backups=request.backups,
                                source=kept.kept_dir(reuse) / kept.SCENARIO if reuse is not None else None)
         safe_emit(('stage', 'validate'))
-        written_bsp = out_bsp or bsp_tag_path(request.tags, request.scenario, request.bsp)
+        # (a write again validates what it wrote: the tags' scenario as it is now may name another BSP)
+        written_bsp = bsp_target or bsp_tag_path(request.tags, request.scenario, request.bsp)
         bsp_tag = read_tag(resolve_reference_path(request.tags, 'sbsp', written_bsp))
         bitmap_path = resolve_reference_path(request.tags, 'bitm', bsp_tag.root.reference('lightmaps_bitmap')[1])
         bitmap_tag = read_tag(bitmap_path)

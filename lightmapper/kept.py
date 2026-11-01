@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 KEPT_FOLDER = 'kept bakes'
 MANIFEST = 'kept.json'
-VERSION = 1
+VERSION = 2
 # these cannot change what was baked: the Blender path and its time limit are not used by a write again, 32-bit only
 # changes how the tags are written, and the device only picks the denoiser's backend, which already varies under an
 # unchanged "auto" (another machine, or the CPU fallback), so it is no reason to refuse
@@ -60,6 +60,10 @@ class Manifest:
     glow_reason: str
     settings: dict
     kept_at: str
+    # (the BSP tag path and the lit scenario the bake wrote, which a write again writes by default: the input is the
+    # user's unlit source unless the bake itself was in place)
+    output_path: str
+    output_scenario: str
 
 
 def kept_root() -> Path:
@@ -117,7 +121,8 @@ def read_manifest(work: Path) -> Manifest:
         manifest = Manifest(**data)
     except (OSError, ValueError, TypeError) as exc:
         raise refused from exc
-    needed = [SOURCE, SCENARIO, CHARTS, RESULT, SCENE, JOB] + ([TEMPLATE] if manifest.has_template else [])
+    needed = ([SOURCE, SCENARIO, CHARTS, RESULT, SCENE, JOB] + ([TEMPLATE] if manifest.has_template else [])
+              + ([GLOW] if manifest.glow_device != 'off' else []))
     if not all((kept_dir(work) / name).is_file() for name in needed):
         raise refused
     return manifest

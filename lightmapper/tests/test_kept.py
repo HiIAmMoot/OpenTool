@@ -78,13 +78,14 @@ def test_level_folder_is_one_per_level(tmp_path):
     assert a != kept.level_folder(tmp_path, tmp_path / 'tags2', 'sc', 'bsp')
 
 
-def make_kept(work, settings=None):
+def make_kept(work, settings=None, glow_device='off'):
     kept.kept_dir(work).mkdir(parents=True)
     for name in ('source.scenario_structure_bsp', 'scenario.scenario', 'charts.npz', 'result.npz', 'scene.npz', 'job.json'):
         (kept.kept_dir(work) / name).write_bytes(b'x')
     kept.write_manifest(work, kept.Manifest(
         tags='t', scenario='s', bsp='b', input_path='i', has_template=False, vertex_device='cpu',
-        glow_device='cpu', glow_reason='', settings=asdict(settings or Settings()), kept_at='now'))
+        glow_device=glow_device, glow_reason='', settings=asdict(settings or Settings()), kept_at='now',
+        output_path='o', output_scenario=''))
 
 
 def test_manifest_round_trips(tmp_path):
@@ -139,7 +140,7 @@ def test_read_manifest_refuses(tmp_path, damage):
         manifest.write_text({'list': '[]', 'null': 'null'}[damage])
     elif damage == 'version':
         data = json.loads(manifest.read_text())
-        data['version'] = 2
+        data['version'] = kept.VERSION + 1
         manifest.write_text(json.dumps(data))
     else:
         (kept.kept_dir(tmp_path) / 'result.npz').unlink()
@@ -244,3 +245,21 @@ def test_prune_logs_a_folder_it_cannot_remove(tmp_path, monkeypatch, caplog):
         kept.prune(level / 'b')
     assert sorted(p.name for p in level.iterdir()) == ['a', 'b']
     assert len(caplog.messages) == 1 and str(level / 'a') in caplog.messages[0]
+
+
+def test_a_kept_bake_of_version_1_is_refused(tmp_path):
+    make_kept(tmp_path)
+    data = json.loads((tmp_path / kept.MANIFEST).read_text())
+    del data['output_path'], data['output_scenario']
+    data['version'] = 1
+    (tmp_path / kept.MANIFEST).write_text(json.dumps(data))
+    with pytest.raises(KeptBakeError):
+        kept.read_manifest(tmp_path)
+
+
+def test_a_kept_bake_that_ran_the_glow_pass_needs_its_glow_file(tmp_path):
+    make_kept(tmp_path, glow_device='cpu')
+    with pytest.raises(KeptBakeError):
+        kept.read_manifest(tmp_path)
+    kept.save_glow(tmp_path, [arr(1, (2, 2, 3))])
+    assert kept.read_manifest(tmp_path).glow_device == 'cpu'

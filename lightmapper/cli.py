@@ -111,7 +111,12 @@ def main(argv=None) -> int:
             settings.lightmap_32bit = True
         work = args.work
         if args.keep and work is None:
-            work = kept.create_work(kept.kept_root(), args.tags, args.scenario, args.bsp)
+            try:
+                work = kept.create_work(kept.kept_root(), args.tags, args.scenario, args.bsp)
+            except OSError:
+                print(f'OpenTool could not make a folder for kept bakes in {kept.kept_root()}. '
+                      'Leave out --keep, or move OpenTool to a folder you can write to.', file=sys.stderr)
+                return 1
         result = bake(args.tags, args.scenario, args.bsp, settings,
                       args.out_bsp, args.out_scenario, work, args.sources, args.charts, args.dry_run,
                       backups=not args.no_backups, keep=args.keep)
@@ -159,7 +164,8 @@ def _write(args) -> int:
         if args.lightmap_32bit is not None:
             settings = replace(settings, lightmap_32bit=args.lightmap_32bit)
         result = bake(args.tags or Path(manifest.tags), manifest.scenario, manifest.bsp, settings,
-                      args.out_bsp, args.out_scenario, args.work, reuse=True, backups=not args.no_backups)
+                      args.out_bsp, args.out_scenario or manifest.output_scenario or None, args.work, reuse=True,
+                      backups=not args.no_backups)
     except KeptBakeError as error:
         print(error, file=sys.stderr)
         return 1

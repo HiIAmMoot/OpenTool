@@ -1919,7 +1919,7 @@ def keep_a_bake(app, tiny, bsp='room'):
     names = (kept.SOURCE, kept.SCENARIO, kept.CHARTS, kept.RESULT, kept.SCENE, kept.JOB)
     for name in names:
         (folder / 'kept' / name).write_bytes(b'x')
-    kept.write_manifest(folder, kept.Manifest(str(tags), 'level', bsp, bsp, False, 'cpu', 'off', '', {}, 'then'))
+    kept.write_manifest(folder, kept.Manifest(str(tags), 'level', bsp, bsp, False, 'cpu', 'off', '', {}, 'then', bsp, ''))
     return folder
 
 
