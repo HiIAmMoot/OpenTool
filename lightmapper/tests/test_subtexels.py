@@ -206,3 +206,77 @@ def test_merge_weights_come_from_effective_samples(bake_module, monkeypatch):
     merged = bake_module.merge_extra(base, owned, 28, tiers, extra)
     monkeypatch.setattr(bake_module, 'effective_samples', lambda *args: 2 * real(*args))
     np.testing.assert_allclose(bake_module.merge_extra(base, owned, 28, tiers, extra), merged / 2, rtol=1e-6)
+
+
+# today's functions, kept verbatim as the reference the strip-wise ones must equal bit for bit
+def reference_downsample(rgb, scale=None):
+    h, w = rgb.shape[:2]
+    written = (rgb >= 0).all(axis=2)
+    count = written.reshape(h // 3, 3, w // 3, 3).sum(axis=(1, 3))
+    values = rgb if scale is None else rgb * scale[:, :, None]
+    total = np.where(written[:, :, None], values, 0).reshape(h // 3, 3, w // 3, 3, 3).sum(axis=(1, 3))
+    return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32), count > 0
+
+
+def reference_owned(rgb):
+    h, w = rgb.shape[:2]
+    return (rgb >= 0).all(axis=2).reshape(h // 3, 3, w // 3, 3).sum(axis=(1, 3))
+
+
+def reference_merge(bake_module, base, owned, base_spp, tiers, extra):
+    total = base * (owned * base_spp)[:, :, None]
+    for (spp, mask), image in zip(tiers, extra):
+        total = total + np.where(mask[:, :, None], image, 0) * (owned * spp)[:, :, None]
+    weight = bake_module.effective_samples(owned, base_spp, tiers)
+    return (total / np.maximum(weight, 1)[:, :, None]).astype(np.float32)
+
+
+STRIP_CASES = [(3, 3), (6, 9), (3 * 300, 3 * 7), (3 * 513, 3 * 2)]
+
+
+def strip_case(h, w, scaled):
+    rng = np.random.default_rng(h * w)
+    rgb = rng.random((h, w, 3), np.float32) * 40
+    rgb[rng.random((h, w)) < .3] = -1
+    rgb[0, 0] = [np.inf, 0, 0]
+    scale = rng.choice(np.float32([0, 1, 2]), (h, w)) if scaled else None
+    return rgb, scale
+
+
+@pytest.mark.filterwarnings('ignore:invalid value:RuntimeWarning')
+@pytest.mark.parametrize('h, w', STRIP_CASES)
+@pytest.mark.parametrize('scaled', [False, True])
+def test_strip_downsample_is_bit_identical(bake_module, h, w, scaled):
+    rgb, scale = strip_case(h, w, scaled)
+    got, written, owned = bake_module.downsample_and_owned(rgb, scale)
+    want, want_written = reference_downsample(rgb, scale)
+    assert got.dtype == np.float32 and got.tobytes() == want.tobytes()
+    assert np.array_equal(written, want_written) and np.array_equal(owned, reference_owned(rgb))
+
+
+@pytest.mark.filterwarnings('ignore:invalid value:RuntimeWarning')
+@pytest.mark.parametrize('h, w', STRIP_CASES)
+@pytest.mark.parametrize('scaled', [False, True])
+def test_downsample_written_still_matches(bake_module, h, w, scaled):
+    rgb, scale = strip_case(h, w, scaled)
+    got, written = bake_module.downsample_written(rgb, scale)
+    want, want_written = reference_downsample(rgb, scale)
+    assert got.tobytes() == want.tobytes() and np.array_equal(written, want_written)
+    assert np.array_equal(bake_module.owned_subsamples(rgb), reference_owned(rgb))
+
+
+@pytest.mark.parametrize('rows', [1, 3, 300, 513])
+def test_merge_is_bit_identical(bake_module, rows):
+    rng = np.random.default_rng(rows)
+    owned = rng.integers(0, 10, (rows, 7))
+    base = (rng.random((rows, 7, 3), np.float32) * 40).astype(np.float32)
+    tiers = bake_module.plan_extra_passes(owned, 28, 256)
+    assert tiers
+    extra = []
+    for _, mask in tiers:
+        image = (rng.random((rows, 7, 3), np.float32) * 40).astype(np.float32)
+        image[~mask] = [np.inf, np.nan, -np.inf]
+        extra.append(image)
+    got = bake_module.merge_extra(base, owned, 28, tiers, extra)
+    want = reference_merge(bake_module, base, owned, 28, tiers, extra)
+    assert got.dtype == np.float32 and got.tobytes() == want.tobytes()

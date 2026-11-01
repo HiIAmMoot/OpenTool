@@ -650,14 +650,42 @@ def receiver_diffuse_scale(scene, page, width, height, enhanced=False, coverage=
     return scale[::-1].copy()
 
 
-def downsample_written(rgb, scale=None):
-    """Box-average 3x3 sub-texels, excluding the negative unwritten sentinel, not black samples."""
+# texel rows per strip: bounds the page loop's temporaries to a slice of a page instead of several whole ones
+STRIP_ROWS = 256
+
+
+def strips(texel_rows):
+    for first in range(0, texel_rows, STRIP_ROWS):
+        yield first, min(first + STRIP_ROWS, texel_rows)
+
+
+def downsample_and_owned(rgb, scale=None):
+    """Box-average 3x3 sub-texels, excluding the negative unwritten sentinel, not black samples.
+
+    Gives (mean, texels written, sub-texels written per texel)."""
     h, w = rgb.shape[:2]
-    written = (rgb >= 0).all(axis=2)
-    count = written.reshape(h // 3, 3, w // 3, 3).sum(axis=(1, 3))
-    values = rgb if scale is None else rgb * scale[:, :, None]
-    total = np.where(written[:, :, None], values, 0).reshape(h // 3, 3, w // 3, 3, 3).sum(axis=(1, 3))
-    return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32), count > 0
+    mean = np.empty((h // 3, w // 3, 3), np.float32)
+    owned = np.empty((h // 3, w // 3), np.int64)
+    masked = np.empty((3 * min(STRIP_ROWS, h // 3), w, 3), np.float32)
+    for first, end in strips(h // 3):
+        part = rgb[3 * first:3 * end]
+        n = end - first
+        written = (part >= 0).all(axis=2)
+        count = written.reshape(n, 3, w // 3, 3).sum(axis=(1, 3))
+        values = part if scale is None else part * scale[3 * first:3 * end, :, None]
+        out = masked[:3 * n]
+        # (one work array for every strip, where np.where made a new one each time)
+        out.fill(0)
+        np.copyto(out, values, where=written[:, :, None])
+        total = out.reshape(n, 3, w // 3, 3, 3).sum(axis=(1, 3))
+        mean[first:end] = total / np.maximum(count, 1)[:, :, None]
+        owned[first:end] = count
+    return mean, owned > 0, owned
+
+
+def downsample_written(rgb, scale=None):
+    mean, written, _ = downsample_and_owned(rgb, scale)
+    return mean, written
 
 
 # an edge texel owns few of its 9 sub-texels, so with the same samples per sub-texel it is a noisier
@@ -670,7 +698,11 @@ TIER_SPAN = 1.5
 def owned_subsamples(rgb):
     """How many of each texel's 3x3 sub-texels the bake wrote."""
     h, w = rgb.shape[:2]
-    return (rgb >= 0).all(axis=2).reshape(h // 3, 3, w // 3, 3).sum(axis=(1, 3))
+    owned = np.empty((h // 3, w // 3), np.int64)
+    for first, end in strips(h // 3):
+        written = (rgb[3 * first:3 * end] >= 0).all(axis=2)
+        owned[first:end] = written.reshape(end - first, 3, w // 3, 3).sum(axis=(1, 3))
+    return owned
 
 
 def plan_extra_passes(owned, base_spp, target):
@@ -695,12 +727,17 @@ def effective_samples(owned, base_spp, tiers):
 
 def merge_extra(base, owned, base_spp, tiers, extra):
     """Mean of the base and extra bakes of each texel, weighted by the samples each put in."""
-    total = base * (owned * base_spp)[:, :, None]
-    for (spp, mask), image in zip(tiers, extra):
-        # (a texel outside the mask may hold inf or NaN, and a zero weight would not clear it)
-        total = total + np.where(mask[:, :, None], image, 0) * (owned * spp)[:, :, None]
-    weight = effective_samples(owned, base_spp, tiers)
-    return (total / np.maximum(weight, 1)[:, :, None]).astype(np.float32)
+    merged = np.empty(base.shape, np.float32)
+    for first, end in strips(base.shape[0]):
+        rows = slice(first, end)
+        part = owned[rows]
+        total = base[rows] * (part * base_spp)[:, :, None]
+        for (spp, mask), image in zip(tiers, extra):
+            # (a texel outside the mask may hold inf or NaN, and a zero weight would not clear it)
+            total = total + np.where(mask[rows, :, None], image[rows], 0) * (part * spp)[:, :, None]
+        weight = effective_samples(part, base_spp, [(spp, mask[rows]) for spp, mask in tiers])
+        merged[rows] = total / np.maximum(weight, 1)[:, :, None]
+    return merged
 
 
 def warn_if_masks_differ(diffuse_written, emit_written, page):
@@ -731,6 +768,7 @@ def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, 
     tiers = plan_extra_passes(owned, base_spp, job['texel_samples'])
     extra = []
     extra_corrected = []
+    pixels = np.empty((h, w, 4), np.float32)
     seed = cycles.seed
     try:
         for n, (spp, mask) in enumerate(tiers):
@@ -738,7 +776,7 @@ def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, 
             cycles.seed = seed + 1 + n
             cycles.samples = spp
             mask_image.generated_width, mask_image.generated_height = w, h
-            pixels = np.zeros((h, w, 4), np.float32)
+            pixels.fill(0)
             pixels[mask] = 1
             mask_image.pixels.foreach_set(pixels.ravel())
             clear_page(image, buffer)
@@ -770,10 +808,10 @@ def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
     bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
                         target='IMAGE_TEXTURES')
     raw = read_page(image, buffer, 3 * h, 3 * w)
-    diffuse, written = downsample_written(raw)
+    diffuse, written, owned = downsample_and_owned(raw)
     corrected = downsample_written(raw, diffuse_scale)[0] if diffuse_scale is not None else diffuse
     if mask_image is not None:
-        diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned_subsamples(raw), image, mask_image,
+        diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned, image, mask_image,
                                                buffer, h, w, job, diffuse_scale)
     if job.get('lamps_only'):
         return corrected[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
