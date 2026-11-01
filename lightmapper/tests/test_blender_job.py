@@ -87,7 +87,7 @@ def test_write_job_files_load_back(tmp_path):
     with np.load(tmp_path / 'scene.npz') as data:
         expected_fields = [f.name for f in fields(Scene) if getattr(scene, f.name) is not None]
         assert sorted(data.files) == sorted(expected_fields + [
-            'tri_ignore_normals', 'query_ignore_normals', 'occ_tri_owner',
+            'tri_ignore_normals', 'tri_pass_through', 'query_ignore_normals', 'occ_tri_owner',
             'occ_tri_emit_only', 'tri_twin', 'tri_twin_perm',
             'texel_pos', 'texel_normal', 'texel_class', 'texel_page', 'texel_xy',
             'edge_pos', 'edge_normal', 'edge_class', 'edge_active', 'edge_keys', 'edge_offsets'])

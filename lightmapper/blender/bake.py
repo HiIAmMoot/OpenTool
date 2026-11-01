@@ -302,7 +302,7 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
     return material
 
 
-def make_object(name, positions, uv_layers, tris, materials, material_index, shadow, normals=None):
+def make_object(name, positions, uv_layers, tris, materials, material_index, shadow, normals=None, pass_through=False):
     """positions (N,3), tris (T,3) into them, uv_layers {name: (N,2)}, materials a list, normals (N,3) or flat."""
     mesh = bpy.data.meshes.new(name)
     count = len(tris)
@@ -329,6 +329,9 @@ def make_object(name, positions, uv_layers, tris, materials, material_index, sha
         mesh.normals_split_custom_set_from_vertices(np.ascontiguousarray(normals, np.float32).tolist())
     obj = bpy.data.objects.new(name, mesh)
     obj.visible_shadow = bool(shadow)
+    if pass_through:
+        # (the camera flag stays: a bake target without it is not drawn into the page)
+        obj.visible_diffuse = obj.visible_glossy = obj.visible_transmission = obj.visible_shadow = False
     bpy.context.scene.collection.objects.link(obj)
     return obj
 
@@ -387,12 +390,13 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
     keys = np.column_stack([scene_data['tri_page'], scene_data['tri_class'],
                             scene_data['tri_casts_shadow'] | tinted,
                             scene_data.get('tri_ignore_normals', np.zeros(len(tris), bool)),
-                            receiver_sun_bits(scene_data, job['suns'])])
+                            receiver_sun_bits(scene_data, job['suns']),
+                            scene_data.get('tri_pass_through', np.zeros(len(tris), bool))])
     distinct_keys, labels = np.unique(keys, axis=0, return_inverse=True)
     order = np.argsort(labels, kind='stable')
     groups = np.split(order, np.flatnonzero(np.diff(labels[order])) + 1) if len(order) else []
     for key, picked in zip(distinct_keys, groups):
-        page, cls, casts = int(key[0]), int(key[1]), bool(key[2])
+        page, cls, casts, through = int(key[0]), int(key[1]), bool(key[2]), bool(key[-1])
         used, local = np.unique(tris[picked].ravel(), return_inverse=True)
         local = local.reshape(-1, 3)
         paired = scene_data['tri_twin'][picked] >= 0
@@ -418,12 +422,12 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
                                    zero_albedo=bool(key[3]) and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
                                    glow_image=glow_images[page] if glow_images and bool(key[3]) else None)
                      for n, (tex, cut, emit, tint) in enumerate(distinct)]
-        obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
+        obj = make_object(f'recv_{page}_{cls}_{int(casts)}{"_through" if through else ""}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
                            UV_LIGHTMAP: flip_v(scene_data['lm_uv'][used])},
                           local, materials, [distinct.index(p) for p in tri_props], casts,
-                          scene_data['normals'][used])
-        obj['sun_facing'] = key[4:].tolist()
+                          scene_data['normals'][used], through)
+        obj['sun_facing'] = key[4:-1].tolist()
         obj['flagged'] = bool(key[3])
         receivers.append((obj, page, cls))
 

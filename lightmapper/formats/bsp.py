@@ -5,6 +5,7 @@ page packing so visibility lists can be remapped without changing their meaning.
 """
 
 from dataclasses import dataclass, field
+import logging
 import struct
 
 import numpy as np
@@ -13,6 +14,7 @@ from .vertices import ENV, compress, pack_uncompressed, unpack_uncompressed
 from ..tagio.tagfile import Element, Tag, new_element
 
 
+logger = logging.getLogger(__name__)
 NO_CLUSTER = -32768
 LIGHTMAPPED_LIGHTING = {
     'ambient_color': tuple(np.float32(x) for x in (0.2, 0.2, 0.2)),
@@ -114,6 +116,10 @@ def read_geometry(bsp: Tag) -> BspGeometry:
     fallback = np.full(len(surfaces), NO_CLUSTER, dtype=np.int16)
     leaf_surfaces = root.block('leaf_surfaces')
     render_only = np.ones(len(surfaces), np.bool_)
+    if not len(leaf_surfaces):
+        # (without the link every surface would read as render-only, and a level would lose all its shadows)
+        logger.warning('the BSP has no leaf_surfaces: no surface is treated as render-only')
+        render_only[:] = False
     for ref in leaf_surfaces:
         # (the engine maps a collision hit to a render surface only through a reference with a node)
         if ref.get('node') not in (-1, 0xFFFFFFFF):
