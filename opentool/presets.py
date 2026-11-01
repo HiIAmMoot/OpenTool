@@ -26,7 +26,8 @@ PRESET_HINTS: dict[str, str] = {
     'Ultra': 'Sharpest. Slow and memory-hungry; for a final bake.',
     'Custom': 'Your own values from Advanced, on any device.',
 }
-# sky_grid is left out of the panel in 0.2.2 (0.3.0 replaces it with a shadows choice); the presets still carry it and a settings file can set it
+# sky_grid has no panel row, yet the presets still carry it and a settings file
+# can set it, so it stays in PRESETS
 ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max')
 PAGE_MAX_CHOICES = PAGE_SIDES
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
