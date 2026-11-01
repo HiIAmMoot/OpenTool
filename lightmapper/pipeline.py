@@ -430,16 +430,15 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     else:
         scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
                                           s.scenery_emission)
-        check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
-                                         [(p.width, p.height) for p in pages], s.page_max)
+        counts, sizes = memory.SceneCounts.from_scene(scene), [(p.width, p.height) for p in pages]
+        check = memory.check_bake_memory(counts, sizes, s.page_max)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)
         # (a calibration run bakes no lamps, so it neither reads nor counts them)
         lights, light_counts = scene_lights(scenario_tag, tags, bsp_number, bsp_tag) if sources == 'all' else ([], {})
-        whole_page_tiles = memory.whole_page_tiles(memory.SceneCounts.from_scene(scene),
-                                                   [(p.width, p.height) for p in pages], memory.free_physical_bytes())
-        write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
+        whole_page_tiles = memory.whole_page_tiles(counts, sizes, check.free)
+        write_job(work, scene, sizes, lighting.suns,
                   lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
                   vertex_pass='skip', lights=lights, whole_page_tiles=whole_page_tiles)
     stage('scene')

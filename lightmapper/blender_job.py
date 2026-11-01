@@ -14,7 +14,7 @@ import time
 
 import numpy as np
 
-from .memory import SceneCounts, free_physical_bytes, out_of_memory_message
+from .memory import SceneCounts, free_physical_bytes, glow_whole_page_tiles, out_of_memory_message
 from .formats.lights import SceneLight
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
@@ -393,7 +393,10 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[
     cropped.clear()
     page = None
     job = json.loads((work / 'job.json').read_text())
-    job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
+    # (the free memory now, after the page stage's arrays are gone, and the glow stage's own tile term)
+    tiles = glow_whole_page_tiles(SceneCounts.from_npz(work / 'scene.npz'), [tuple(p) for p in job['pages']],
+                                  free_physical_bytes())
+    job.update(whole_page_tiles=tiles, glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')
     (work / 'job_glow.json').write_text(json.dumps(job, indent=2))
     _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow.log')

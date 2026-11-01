@@ -277,6 +277,21 @@ def test_glow_run_has_no_lights(tmp_path, monkeypatch):
     assert json.loads((tmp_path / 'job_glow.json').read_text())['lights'] == []
 
 
+@pytest.mark.parametrize('free, tiles', [(10**13, True), (1, False), (None, False)])
+def test_glow_run_decides_its_own_tiles(tmp_path, monkeypatch, free, tiles):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), whole_page_tiles=not tiles)
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: free)
+
+    def stop(*args):
+        raise BlenderError('stopped before Blender')
+
+    monkeypatch.setattr(blender_job, '_run_blender', stop)
+    with pytest.raises(BlenderError):
+        blender_job.run_blender_glow(tmp_path, Settings(), [np.zeros((8, 16, 3), np.float32)])
+    assert json.loads((tmp_path / 'job_glow.json').read_text())['whole_page_tiles'] is tiles
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is (not tiles)
+
+
 @pytest.mark.parametrize('owners, room, want', [
     (130, True, [62, 62, 6]), (3, True, [3]), (2, False, [0, 2]), (62, True, [62]), (63, True, [62, 1])])
 def test_lamp_batches_fill_the_budget(owners, room, want):

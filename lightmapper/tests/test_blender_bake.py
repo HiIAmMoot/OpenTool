@@ -844,9 +844,9 @@ def test_page_buffer_is_refilled_before_every_bake(tmp_path, blender_exe):
         np.testing.assert_array_equal(rgb[~written], -1)  # not the previous bake's value
 
 
-def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None, job_keys=None, **settings):
+def run_scene_settings_driver(tmp_path, blender_exe, clamp_indirect=None, job_keys=None, page=(16, 16), **settings):
     s = Settings(samples=8, vertex_rays=1, **settings)
-    write_job(tmp_path, build([full_quad()]), [(16, 16)], [], {}, s)
+    write_job(tmp_path, build([full_quad()]), [page], [], {}, s)
     if clamp_indirect is not None or job_keys:
         job = json.loads((tmp_path / 'job.json').read_text())
         if clamp_indirect is not None:
@@ -880,6 +880,14 @@ def test_adaptive_sampling_follows_the_setting(tmp_path, blender_exe, adaptive):
 def test_whole_page_tiles_set_the_page_tile(tmp_path, blender_exe, tiles):
     first = run_scene_settings_driver(tmp_path, blender_exe, job_keys={'test_whole_page_tiles': tiles})['first_bake']
     assert first == ({'tile_size': 48, 'use_auto_tile': True} if tiles else {'tile_size': 2048, 'use_auto_tile': True})
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('page', [(16, 8), (8, 16)])
+def test_whole_page_tile_covers_the_longer_side(tmp_path, blender_exe, page):
+    first = run_scene_settings_driver(tmp_path, blender_exe, job_keys={'test_whole_page_tiles': True},
+                                      page=page)['first_bake']
+    assert first['tile_size'] == 48
 
 
 @pytest.mark.blender

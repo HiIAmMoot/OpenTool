@@ -15,6 +15,9 @@ PER_PAGE_TEXEL: int = 63
 PER_TRIANGLE: int = 0
 PER_VERTEX: int = 1771
 PER_TILE_SUB_TEXEL: int = 101
+# the glow run's own tile term: timberland's glow stage peaked at 19.1 GB with whole-page tiles against 14.0 GB without,
+# 5.1 GB over two 2048 pages (9 * 2048^2 sub-texels), rounded up
+GLOW_PER_TILE_SUB_TEXEL: int = 136
 # Cycles' tile limit (tile.h:120): a page whose sub-texel side is bigger cannot be one tile
 MAX_TILE = 8192
 MARGIN = 1.15
@@ -58,13 +61,26 @@ def bake_bytes(counts, pages) -> int:
     return ceil(MARGIN * (page_term(w, h) + resident_term(pages) + scene_term(counts)))
 
 
-def whole_page_tiles(counts, pages, free: int | None) -> bool:
-    if free is None or not pages:
-        return False
+def _tile_bytes(counts, pages, per_tile) -> int | None:
     w, h = max(pages, key=lambda page: page[0] * page[1])
     if 3 * max(max(page) for page in pages) > MAX_TILE:
+        return None
+    # (outside MARGIN: the term is a measured difference between two bakes, so the margin on the model's other terms
+    # would count its own error twice)
+    return bake_bytes(counts, pages) + per_tile * 9 * w * h
+
+
+def whole_page_tiles(counts, pages, free: int | None, per_tile: int | None = None) -> bool:
+    if free is None or not pages:
         return False
-    return bake_bytes(counts, pages) + PER_TILE_SUB_TEXEL * 9 * w * h <= free
+    need = _tile_bytes(counts, pages, PER_TILE_SUB_TEXEL if per_tile is None else per_tile)
+    return need is not None and need <= free
+
+
+# (the glow stage has no estimate of its own: its Blender peak without tiles matched the page stage's, 13.7 against
+# 13.1 GB on timberland, so the page stage's model is its base)
+def glow_whole_page_tiles(counts, pages, free: int | None) -> bool:
+    return whole_page_tiles(counts, pages, free, GLOW_PER_TILE_SUB_TEXEL)
 
 
 class MEMORYSTATUSEX(ctypes.Structure):

@@ -51,6 +51,16 @@ def test_whole_page_tiles_need_room_and_a_small_enough_page(counts):
     assert not memory.whole_page_tiles(counts, page, None)
 
 
+def test_glow_tiles_use_the_glow_stage_term(counts):
+    page = [(2048, 2048)]
+    need = memory.bake_bytes(counts, page) + memory.GLOW_PER_TILE_SUB_TEXEL * 9 * 2048 * 2048
+    assert memory.GLOW_PER_TILE_SUB_TEXEL > memory.PER_TILE_SUB_TEXEL
+    assert memory.glow_whole_page_tiles(counts, page, need)
+    assert not memory.glow_whole_page_tiles(counts, page, need - 1)
+    assert not memory.glow_whole_page_tiles(counts, [(4096, 4096)], 10**15)
+    assert not memory.glow_whole_page_tiles(counts, page, None)
+
+
 def test_the_largest_page_decides_the_page_term(monkeypatch, message_model):
     monkeypatch.setattr(memory, 'PER_PAGE_TEXEL', 2)
     monkeypatch.setattr(memory, 'PER_TRIANGLE', 3)
