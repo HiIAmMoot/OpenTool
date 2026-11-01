@@ -17,6 +17,7 @@ from . import gpu
 CALIBRATION_PATH = Path(__file__).with_name('calibration.json')
 DEFAULT_BLENDER = r'C:\Program Files\Blender Foundation\Blender 5.2\blender.exe'
 RADIOSITY_MODES = ('coherence', 'scaled')
+RENDER_ONLY_SHADOWS = ('cast', 'none', 'bump_alpha')
 
 
 def _calibrated(key):
@@ -58,8 +59,9 @@ class Settings(ChartSettings):
     sky_grid: int = 4
     # tool never lets object shaders emit; off leaves only the BSP's own emitters, for an in-game A/B
     scenery_emission: bool = True
-    # tool casts shadow rays against the collision BSP, so a surface with no collision under it shadows nothing there
-    render_only_shadows: bool = False
+    # tool casts shadow rays against the collision BSP, so a surface with no collision under it shadows nothing there:
+    # none copies that, cast makes them solid, bump_alpha tests the surface by its shader's bump-map alpha
+    render_only_shadows: str = 'bump_alpha'
     ignore_normals_mode: str = 'tool'
     # how far a plane-away face's sun reaches in from its lit boundary: tool's final-quality floor for the mesh cells
     # its radiosity refines to near a shadow edge (non-emissive, detail level 0)
@@ -80,6 +82,11 @@ class Settings(ChartSettings):
         self.device = gpu.normalise_device(self.device)
         if self.cpu_vertex_backend not in ('numba', 'blender'):
             raise ValueError(f"cpu_vertex_backend must be one of ('numba', 'blender'), not {self.cpu_vertex_backend!r}")
+        if isinstance(self.render_only_shadows, bool):
+            # (0.2.2 builds saved a boolean)
+            self.render_only_shadows = 'cast' if self.render_only_shadows else 'none'
+        if self.render_only_shadows not in RENDER_ONLY_SHADOWS:
+            raise ValueError(f'render_only_shadows must be one of {RENDER_ONLY_SHADOWS}, not {self.render_only_shadows!r}')
         if self.ignore_normals_mode not in ('tool', 'enhanced'):
             raise ValueError(f"ignore_normals_mode must be one of ('tool', 'enhanced'), not {self.ignore_normals_mode!r}")
         for name in ('cpu_samples', 'cpu_vertex_rays'):

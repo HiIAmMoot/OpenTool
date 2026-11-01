@@ -17,7 +17,7 @@ from .errors import KeptBakeError
 from .diff import load_pages, paired_samples, bitmap_pages, render_markdown, report
 from .pipeline import bake, copy_tags
 from . import settings as settings_module
-from .settings import Settings, load_settings
+from .settings import RENDER_ONLY_SHADOWS, Settings, load_settings
 from .tagio.tagfile import read_tag, resolve_reference_path
 from .validate import validate_bsp
 
@@ -81,7 +81,7 @@ def _parser():
             command.add_argument('--dry-run', action='store_true')
             command.add_argument('--keep', action='store_true')
             command.add_argument('--32bit', dest='lightmap_32bit', action='store_true')
-            command.add_argument('--render-only-shadows', action='store_true')
+            command.add_argument('--render-only-shadows', choices=RENDER_ONLY_SHADOWS)
     return parser
 
 
@@ -111,7 +111,7 @@ def main(argv=None) -> int:
         if args.lightmap_32bit:
             settings.lightmap_32bit = True
         if args.render_only_shadows:
-            settings.render_only_shadows = True
+            settings.render_only_shadows = args.render_only_shadows
         work = args.work
         if args.keep and work is None:
             try:

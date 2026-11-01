@@ -46,7 +46,7 @@ def _scale(shader: str, model: tuple[float, float], u: float, v: float) -> tuple
 
 
 def shader_texture(tags_root: Path, group: str | None, path: str,
-                   model_uv_scale: tuple[float, float] = (1.0, 1.0)) -> ShaderTexture:
+                   model_uv_scale: tuple[float, float] = (1.0, 1.0), bump_alpha: bool = False) -> ShaderTexture:
     if group not in ('senv', 'sgla', 'soso', 'schi', 'scex') or not path:
         return NO_TEXTURE
     root = read_tag(resolve_reference_path(tags_root, group, path)).root
@@ -56,7 +56,10 @@ def shader_texture(tags_root: Path, group: str | None, path: str,
         flags = root.get('properties.flags')
         # the lightmap pass (rasterizer_xbox_environment.c:749-764) alpha-tests the bump;
         # 0x2 or a missing bump uses the opaque default bump texture, so it stays solid
-        cutout = bool(albedo) and bool(bump) and bool(flags & ALPHA_TESTED) and not flags & BUMP_IS_SPECULAR_MASK
+        # (bump_alpha tests a render-only surface by its bump alpha whatever its flag says: the engine never draws it
+        # there, so the flag was never needed)
+        tested = bump_alpha or bool(flags & ALPHA_TESTED)
+        cutout = bool(albedo) and bool(bump) and tested and not flags & BUMP_IS_SPECULAR_MASK
         alpha = bump if cutout else None
         alpha_scale = (root.get('bump.bump_map_scale') or 1.0) if cutout else 1.0
         return ShaderTexture(albedo or None, (1.0, 1.0), cutout, True, alpha, alpha_scale)

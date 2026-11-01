@@ -17,7 +17,7 @@ EXAMPLE_TEXT = {
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',
     'ignore_normals_mode': "How surfaces that ignore normals, such as foliage, are lit. Traditional copies tool; Enhanced lights them per texel.",
     'lightmap_32bit': '32-bit pages show no banding but take twice the space.',
-    'render_only_shadows': "Surfaces with no collision under them, such as a sea plane, shadow what lies beneath. Tool lets them cast no shadow.",
+    'render_only_shadows': "How surfaces with no collision under them, such as a sea plane, shadow what lies beneath. By bump alpha tests them by their shader's bump map, Solid blocks all light, None lets it all through as tool does.",
 }
 
 

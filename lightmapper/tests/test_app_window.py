@@ -1656,7 +1656,7 @@ def test_advanced_row_order(app):
     widgets['adaptive_sampling'] = app.adaptive_check
     widgets['ignore_normals_mode'] = app.ignore_normals_entry
     widgets['lightmap_32bit'] = app.lightmap_32bit_check
-    widgets['render_only_shadows'] = app.render_only_shadows_check
+    widgets['render_only_shadows'] = app.render_only_shadows_entry
     assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
                              'render_only_shadows')
     rows = [widgets[name].grid_info()['row'] for name in app.row_order]
@@ -1702,12 +1702,20 @@ def test_adaptive_reaches_settings_and_is_remembered(tmp_path, tiny, make_app):
 def test_render_only_shadows_reaches_settings_and_is_remembered(tmp_path, tiny, make_app):
     a = make_app(store_path=tmp_path / 's.json')
     _ready(a, tiny)
-    assert a.render_only_shadows_check['text'] == 'Render-only surfaces cast shadows'
-    assert a.request().settings.render_only_shadows is False
-    a.render_only_shadows_var.set(True)
-    assert a.request().settings.render_only_shadows is True
-    a.remember()
-    assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() is True
+    assert a.render_only_shadows_var.get() == 'By bump alpha'
+    assert a.request().settings.render_only_shadows == 'bump_alpha'
+    for label, value in (('Solid', 'cast'), ('None', 'none')):
+        a.render_only_shadows_var.set(label)
+        assert a.request().settings.render_only_shadows == value
+        a.remember()
+        assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() == label
+
+
+@pytest.mark.parametrize('saved, label', [(True, 'Solid'), (False, 'None'), ('bump_alpha', 'By bump alpha'),
+                                          ('nonsense', 'By bump alpha')])
+def test_a_saved_boolean_render_only_setting_is_migrated(tmp_path, make_app, saved, label):
+    (tmp_path / 's.json').write_text(json.dumps({'render_only_shadows': saved}))
+    assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() == label
 
 
 def test_the_row_without_an_image_shows_its_text_only(app):

@@ -16,6 +16,7 @@ CPU_PRESETS: dict[str, dict] = {
 }
 DEVICES: tuple[tuple[str, str], ...] = (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
 IGNORE_NORMALS: tuple[tuple[str, str], ...] = (('Enhanced', 'enhanced'), ('Traditional', 'tool'))
+RENDER_ONLY_SHADOWS: tuple[tuple[str, str], ...] = (('By bump alpha', 'bump_alpha'), ('Solid', 'cast'), ('None', 'none'))
 GPU_NOTE = 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
 PRESET_NAMES = ('Draft', 'Normal', 'High', 'Ultra')
 CUSTOM = 'Custom'

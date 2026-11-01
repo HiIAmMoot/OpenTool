@@ -141,7 +141,7 @@ def scene_lights(scenario: Tag, tags: Path, bsp_index: int, bsp_tag: Tag) -> tup
 
 
 def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scenery_emission=True,
-           render_only_shadows=False):
+           render_only_shadows='bump_alpha'):
     textures = TextureSet(tags)
     shaders = [shader_texture(tags, *group.key[:2]) for group in geometry.groups]
     texture_ids = [textures.texture_of(shader) for shader in shaders]
@@ -154,6 +154,7 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
     render_only = geometry.render_only if len(geometry.render_only) else np.zeros(surface_count, np.bool_)
     tri_through = []
     water_warned = set()
+    bump_variants = {}
     base = 0
     for p, page in enumerate(pages):
         for material in page.materials:
@@ -173,7 +174,8 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             # (a render-only triangle stays a lit receiver on its page; with the setting off no ray meets it, as the
             # vertex passes already let non-casting triangles through, so it does not bounce light either, which tool
             # may: a known small difference)
-            blocks = render_only_shadows | ~render_only[material.surface_ids]
+            only = render_only[material.surface_ids]
+            blocks = (render_only_shadows != 'none') | ~only
             water = group_key[0] == 'swat'
             if water and group_key[1] not in water_warned:
                 water_warned.add(group_key[1])
@@ -186,8 +188,16 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             # missing shadow and tint already give)
             tri_through.append(np.zeros(count, np.bool_) if lit_emission.any() else
                                np.ones(count, np.bool_) if water else np.broadcast_to(~blocks, count))
-            tex_ids.append(np.full(count, texture_ids[group], np.int32))
-            cutouts.append(np.full(count, shader.cutout, np.bool_))
+            tested = only & (render_only_shadows == 'bump_alpha') & (group_key[0] == 'senv')
+            if tested.any():
+                if group not in bump_variants:
+                    variant = shader_texture(tags, *group_key[:2], bump_alpha=True)
+                    bump_variants[group] = (textures.texture_of(variant), variant.cutout)
+                variant_texture, variant_cutout = bump_variants[group]
+            else:
+                variant_texture, variant_cutout = texture_ids[group], shader.cutout
+            tex_ids.append(np.where(tested, variant_texture, texture_ids[group]).astype(np.int32))
+            cutouts.append(np.where(tested, variant_cutout, shader.cutout))
             # (a solid surface blocks outright, so only a see-through one keeps its shader's tint)
             # (a render-only triangle that does not block lets all light through, tinted or not)
             see_through = group_key[0] in TRANSPARENT_GROUPS and not shader.casts_shadow

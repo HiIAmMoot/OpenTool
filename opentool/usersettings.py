@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from .presets import ADVANCED, CUSTOM, DEVICES, IGNORE_NORMALS, PRESET_NAMES
+from .presets import ADVANCED, CUSTOM, DEVICES, IGNORE_NORMALS, PRESET_NAMES, RENDER_ONLY_SHADOWS
 
 
 @dataclass
@@ -19,7 +19,7 @@ class UserSettings:
     lightmap_32bit: bool = False
     adaptive_sampling: bool = True
     ignore_normals_mode: str = 'tool'
-    render_only_shadows: bool = False
+    render_only_shadows: str = 'bump_alpha'
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
     verbose: bool = False
@@ -49,6 +49,9 @@ def load(path: Path | None = None) -> UserSettings:
         if item.name not in data:
             continue
         value = data[item.name]
+        if item.name == 'render_only_shadows' and isinstance(value, bool):
+            # (0.2.2 builds saved a boolean)
+            value = 'cast' if value else 'none'
         default = getattr(defaults, item.name)
         if item.name == 'advanced':
             if isinstance(value, dict):
@@ -65,6 +68,8 @@ def load(path: Path | None = None) -> UserSettings:
         values['device'] = defaults.device
     if values.get('ignore_normals_mode', defaults.ignore_normals_mode) not in tuple(value for _, value in IGNORE_NORMALS):
         values['ignore_normals_mode'] = defaults.ignore_normals_mode
+    if values.get('render_only_shadows', defaults.render_only_shadows) not in tuple(v for _, v in RENDER_ONLY_SHADOWS):
+        values['render_only_shadows'] = defaults.render_only_shadows
     return UserSettings(**values)
 
 
