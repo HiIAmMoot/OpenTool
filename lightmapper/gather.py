@@ -25,7 +25,7 @@ LAYOUT_GROUPS = ('senv', 'sgla', 'soso', 'schi', 'scex')
 # these have none, so the base fields are read straight from the tag's first bytes
 BASE_ONLY_GROUPS = ('swat', 'smet', 'spla', 'sotr')
 # shader groups tool sees light through: a surface of one that is not a cut-out casts no solid shadow
-TRANSPARENT_GROUPS = ('sgla', 'schi', 'scex', 'swat', 'smet', 'spla')
+TRANSPARENT_GROUPS = ('sgla', 'schi', 'scex', 'smet', 'spla')
 TAG_HEADER_SIZE = 64
 # flags u16, detail level s16, power, emitted colour, tint colour (big-endian, as in the tag)
 BASE_RADIOSITY = struct.Struct('>Hhf3f3f')

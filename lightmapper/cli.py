@@ -81,6 +81,7 @@ def _parser():
             command.add_argument('--dry-run', action='store_true')
             command.add_argument('--keep', action='store_true')
             command.add_argument('--32bit', dest='lightmap_32bit', action='store_true')
+            command.add_argument('--render-only-shadows', action='store_true')
     return parser
 
 
@@ -109,6 +110,8 @@ def main(argv=None) -> int:
         settings = _blender_fallback(load_settings(args.settings))
         if args.lightmap_32bit:
             settings.lightmap_32bit = True
+        if args.render_only_shadows:
+            settings.render_only_shadows = True
         work = args.work
         if args.keep and work is None:
             try:

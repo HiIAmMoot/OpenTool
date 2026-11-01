@@ -1656,7 +1656,9 @@ def test_advanced_row_order(app):
     widgets['adaptive_sampling'] = app.adaptive_check
     widgets['ignore_normals_mode'] = app.ignore_normals_entry
     widgets['lightmap_32bit'] = app.lightmap_32bit_check
-    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
+    widgets['render_only_shadows'] = app.render_only_shadows_check
+    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
+                             'render_only_shadows')
     rows = [widgets[name].grid_info()['row'] for name in app.row_order]
     assert rows == sorted(set(rows))
     assert app.advanced_error.grid_info()['row'] > rows[-1]
@@ -1695,6 +1697,24 @@ def test_adaptive_reaches_settings_and_is_remembered(tmp_path, tiny, make_app):
     b = make_app(store_path=tmp_path / 's.json')
     assert b.adaptive_var.get() is False
     assert str(b.advanced_entries['samples']['state']) == 'normal'
+
+
+def test_render_only_shadows_reaches_settings_and_is_remembered(tmp_path, tiny, make_app):
+    a = make_app(store_path=tmp_path / 's.json')
+    _ready(a, tiny)
+    assert a.render_only_shadows_check['text'] == 'Render-only surfaces cast shadows'
+    assert a.request().settings.render_only_shadows is False
+    a.render_only_shadows_var.set(True)
+    assert a.request().settings.render_only_shadows is True
+    a.remember()
+    assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() is True
+
+
+def test_the_row_without_an_image_shows_its_text_only(app):
+    app._toggle_advanced()
+    app._on_example_hover('render_only_shadows')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['render_only_shadows']
+    assert not app.example_image_label.cget('image')
 
 
 def test_picking_a_preset_keeps_adaptive_off(app):

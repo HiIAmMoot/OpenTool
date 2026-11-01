@@ -19,6 +19,7 @@ class UserSettings:
     lightmap_32bit: bool = False
     adaptive_sampling: bool = True
     ignore_normals_mode: str = 'tool'
+    render_only_shadows: bool = False
     advanced: dict = field(default_factory=dict)
     advanced_open: bool = False
     verbose: bool = False

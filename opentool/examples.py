@@ -5,7 +5,7 @@ from lightmapper import frozen
 # one image per Settings field, named after it, showing the compared values side by side: the
 # generator writes opentool/examples/<name>.png for each name here
 EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max',
-                'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
+                'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit', 'render_only_shadows')
 EXAMPLE_DIR = frozen.bundle_dir() / 'opentool' / 'examples'
 
 EXAMPLE_TEXT = {
@@ -17,6 +17,7 @@ EXAMPLE_TEXT = {
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',
     'ignore_normals_mode': "How surfaces that ignore normals, such as foliage, are lit. Traditional copies tool; Enhanced lights them per texel.",
     'lightmap_32bit': '32-bit pages show no banding but take twice the space.',
+    'render_only_shadows': "Surfaces with no collision under them, such as a sea plane, shadow what lies beneath. Tool lets them cast no shadow.",
 }
 
 
