@@ -369,6 +369,13 @@ def test_subtexel_owner_covers_what_receiver_diffuse_scale_covers(bake_module):
         assert (owner >= 0).all()
 
 
+def test_receiver_diffuse_scale_covers_blenders_written_set(bake_module, spike):
+    for prefix in ('s', 's5'):
+        scene, width, height, _ = load(spike, prefix)
+        coverage = bake_module.receiver_diffuse_scale(scene, 0, width, height, coverage=True)
+        np.testing.assert_array_equal(coverage >= 0, spike[f'{prefix}_written'])
+
+
 def test_subtexel_owner_matches_blenders_written_set(bake_module, spike):
     for prefix in ('s', 's5'):
         scene, width, height, _ = load(spike, prefix)

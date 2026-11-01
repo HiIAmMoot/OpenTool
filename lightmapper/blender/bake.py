@@ -746,18 +746,22 @@ def receiver_diffuse_scale(scene, page, width, height, enhanced=False, coverage=
         scale.fill(flagged_value)
         return scale
     occupied = np.zeros((height, width), bool)
-    uv = scene['lm_uv'].astype(np.float64) * [width, height]
+    # (Blender's rows and raster point, as subtexel_owner, so the scale covers exactly the sub-texels the bake
+    # writes; its own bool claim map keeps the peak below subtexel_owner's int32 one)
+    uv = flip_v(scene['lm_uv']).astype(np.float64) * [width, height]
     for tri, flagged in zip(scene['tris'][rows], flags):
         a, b, c = uv[tri]
-        x0 = max(0, math.ceil(min(a[0], b[0], c[0]) - 0.5))
-        x1 = min(width - 1, math.floor(max(a[0], b[0], c[0]) - 0.5))
-        y0 = max(0, math.ceil(min(a[1], b[1], c[1]) - 0.5))
-        y1 = min(height - 1, math.floor(max(a[1], b[1], c[1]) - 0.5))
-        x = np.arange(x0, x1 + 1, dtype=np.float64)[None, :] + 0.5
+        x0 = max(0, math.ceil(min(a[0], b[0], c[0]) - 1))
+        x1 = min(width - 1, math.floor(max(a[0], b[0], c[0])))
+        y0 = max(0, math.ceil(min(a[1], b[1], c[1]) - 1))
+        y1 = min(height - 1, math.floor(max(a[1], b[1], c[1])))
+        if x1 < x0 or y1 < y0:
+            continue
+        x = np.arange(x0, x1 + 1, dtype=np.float64)[None, :] + RASTER_POINT[0]
         # row strips bound the edge-function temporaries even for a triangle spanning a whole page
         for first in range(y0, y1 + 1, 64):
             end = min(first + 64, y1 + 1)
-            y = np.arange(first, end, dtype=np.float64)[:, None] + 0.5
+            y = np.arange(first, end, dtype=np.float64)[:, None] + RASTER_POINT[1]
             ab = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
             bc = (c[0] - b[0]) * (y - b[1]) - (c[1] - b[1]) * (x - b[0])
             ca = (a[0] - c[0]) * (y - c[1]) - (a[1] - c[1]) * (x - c[0])
@@ -765,8 +769,7 @@ def receiver_diffuse_scale(scene, page, width, height, enhanced=False, coverage=
             inside = (((ab >= 0) & (bc >= 0) & (ca >= 0)) | ((ab <= 0) & (bc <= 0) & (ca <= 0))) & ~claimed
             scale[first:end, x0:x1 + 1][inside] = flagged_value if flagged else (0 if coverage else 1)
             claimed[inside] = True
-    # lightmap UVs are flipped on the bake mesh; read_page returns Blender's bottom row first
-    return scale[::-1].copy()
+    return scale
 
 
 # texel rows per strip: bounds the page loop's temporaries to a slice of a page instead of several whole ones
