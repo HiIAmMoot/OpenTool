@@ -76,7 +76,7 @@ def test_round_trip(tmp_path):
 
 
 def test_custom_verbose_round_trip_and_defaults(tmp_path):
-    advanced = {key: str(value) for key, value in dict(texels_per_unit=3, samples=128, vertex_rays=512, sky_grid=3, bounces=2, page_max=512).items()}
+    advanced = {key: str(value) for key, value in dict(texels_per_unit=3, samples=128, vertex_rays=512, bounces=2, page_max=512).items()}
     us = UserSettings(preset='Custom', advanced=advanced, verbose=True)
     save(us, tmp_path / 's.json')
     assert load(tmp_path / 's.json') == us

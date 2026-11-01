@@ -33,7 +33,7 @@ A level that cannot fit the configured limits is refused. Errors can name a char
 | `bounces` | 1 | Diffuse bounces. One bounce matches tool's shadow brightness. More bounces give brighter, more physically correct shadows. |
 | `vertex_rays` | 4096 | Rays per unique position and normal query for incident light vectors, plus separate sun-shadow rays, when a GPU runs the vertex pass. Fewer rays bake faster but can show triangle patterns in bump-mapped surfaces. |
 | `cpu_vertex_rays` | null | Rays per query when the vertex pass runs on the CPU, including the fallback after a GPU pass fails. `null` follows `vertex_rays`; a value must be at least 1. |
-| `sky_grid` | 4 | Each sky light becomes a `sky_grid` by `sky_grid` grid of sun lamps, as in tool's final quality (tool's draft uses 2). |
+| `sky_grid` | 4 | Each sky light becomes a `sky_grid` by `sky_grid` grid of sun lamps, as in tool's final quality (tool's draft uses 2). The app's Advanced panel does not show it in 0.2.2; set it in a settings file. |
 | `scenery_emission` | true | Let scenery shaders give off light. This adds a source beyond tool's lighting model. Turn it off to compare with tool. |
 | `reach` | 0.225 | On faces turned away from the sun, how far in world units the sun's light reaches in from the lit corners. Tool's value. |
 | `albedo_scale` | 1.0 | Multiplier on texture colour for bounced light. |

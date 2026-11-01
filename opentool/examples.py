@@ -4,7 +4,7 @@ from lightmapper import frozen
 
 # one image per Settings field, named after it, showing the compared values side by side: the
 # generator writes opentool/examples/<name>.png for each name here
-EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max',
+EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max',
                 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
 EXAMPLE_DIR = frozen.bundle_dir() / 'opentool' / 'examples'
 
@@ -12,7 +12,6 @@ EXAMPLE_TEXT = {
     'texels_per_unit': 'Lightmap texels per world unit. Higher is sharper and slower to bake.',
     'samples': 'Rays per lightmap texel. More rays give less noise.',
     'vertex_rays': 'Rays per vertex, for the light direction bump maps use. More give smoother bump shading.',
-    'sky_grid': 'Suns per sky light. More give softer sky shadows.',
     'bounces': 'How often light bounces between surfaces. More light reaches the shade.',
     'page_max': 'The largest lightmap page. Bigger pages fit more of the level on each.',
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',

@@ -235,7 +235,7 @@ def test_request_carries_the_form(app, tiny):
 
 def test_draft_fills_all_advanced_fields(app):
     app._select_preset('Draft')
-    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='256', sky_grid='2', bounces='1', page_max='512')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='256', bounces='1', page_max='512')
 
 
 def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
@@ -1238,7 +1238,7 @@ def test_saved_density_outside_the_list_is_kept_as_a_custom_entry(tmp_path, tiny
     usersettings.save(
         usersettings.UserSettings(
             preset='Custom',
-            advanced=dict(texels_per_unit='3.0', samples='256', vertex_rays='1024', sky_grid='2', bounces='1', page_max='512'),
+            advanced=dict(texels_per_unit='3.0', samples='256', vertex_rays='1024', bounces='1', page_max='512'),
         ),
         store,
     )
@@ -2005,3 +2005,51 @@ def test_a_kept_lookup_error_is_logged_once_per_message(ready_app, monkeypatch):
     ready_app._inputs_changed()
     assert ready_app.log_path.read_text().count('OSError: the kept folder is unreadable') == 1
     assert ready_app._kept_folder is None and str(ready_app.write_again_button['state']) == 'disabled'
+
+
+def _ready(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
+
+
+def test_suns_per_sky_light_is_not_in_the_advanced_panel(app):
+    assert 'sky_grid' not in app.advanced_vars
+    assert 'sky_grid' not in app.row_order
+
+    def texts(widget):
+        yield str(widget.cget('text')) if 'text' in widget.keys() else ''
+        for child in widget.winfo_children():
+            yield from texts(child)
+    assert not any('Suns per sky light' in text for text in texts(app.root))
+
+
+@pytest.mark.parametrize('name, grid', [('Draft', 2), ('Normal', 4), ('High', 4), ('Ultra', 4)])
+def test_a_named_preset_still_bakes_its_sky_grid(app, tiny, name, grid):
+    _ready(app, tiny)
+    app._select_preset(name)
+    assert app.request().settings.sky_grid == grid
+
+
+def test_custom_bakes_the_default_sky_grid(app, tiny):
+    _ready(app, tiny)
+    app.advanced_vars['samples'].set('300')
+    assert app.preset_var.get() == 'Custom'
+    assert app.request().settings.sky_grid == 4
+
+
+def test_a_saved_sky_grid_is_read_ignored_and_not_written_back(tmp_path, tiny, make_app):
+    store = tmp_path / 's.json'
+    store.write_text(json.dumps({
+        'preset': 'Custom',
+        'advanced': {'texels_per_unit': '2', 'samples': '1024', 'vertex_rays': '300',
+                     'sky_grid': '8', 'bounces': '1', 'page_max': '512'}}))
+    app = make_app(store_path=store)
+    assert app.preset_var.get() == 'Custom'
+    _ready(app, tiny)
+    assert app.request().settings.sky_grid == 4
+    app.remember()
+    usersettings.save(app.settings, store)
+    assert 'sky_grid' not in json.loads(store.read_text())['advanced']

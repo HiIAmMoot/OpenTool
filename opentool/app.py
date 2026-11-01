@@ -194,8 +194,8 @@ class App:
             row_labels[name].grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
             value = tk.StringVar()
             self.advanced_vars[name] = value
-            if name in ('bounces', 'samples', 'vertex_rays', 'sky_grid'):
-                maximum = {'bounces': 8, 'samples': 4096, 'vertex_rays': 65536, 'sky_grid': 8}[name]
+            if name in ('bounces', 'samples', 'vertex_rays'):
+                maximum = {'bounces': 8, 'samples': 4096, 'vertex_rays': 65536}[name]
                 entry = ttk.Spinbox(self.advanced_frame, from_=0 if name == 'bounces' else 1,
                                     to=maximum, textvariable=value)
             elif name == 'page_max':

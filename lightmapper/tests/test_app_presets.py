@@ -92,9 +92,9 @@ def test_an_overridden_vertex_count_is_used_on_every_device():
 def test_exact_preset_interface_values():
     assert DEVICES == (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
     assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
-    assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
+    assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max')
     assert PAGE_MAX_CHOICES == (256, 512, 1024, 2048, 4096)
-    assert LABELS == dict(texels_per_unit='Texel density', samples='Rays per texel', vertex_rays='Rays per vertex', sky_grid='Suns per sky light', bounces='Bounces', page_max='Max resolution')
+    assert LABELS == dict(texels_per_unit='Texel density', samples='Rays per texel', vertex_rays='Rays per vertex', bounces='Bounces', page_max='Max resolution')
     assert CUSTOM == 'Custom' and PRESET_HINTS['Custom'] == 'Your own values from Advanced, on any device.'
 
 
@@ -121,7 +121,7 @@ def test_parse_advanced_rejects(field, text):
         parse_advanced({field: text})
 
 
-@pytest.mark.parametrize('field,text', [('samples','0'),('samples','4097'),('vertex_rays','0'),('vertex_rays','65537'),('sky_grid','0'),('sky_grid','9')])
+@pytest.mark.parametrize('field,text', [('samples','0'),('samples','4097'),('vertex_rays','0'),('vertex_rays','65537')])
 def test_parse_advanced_rejects_new_ranges(field, text):
     with pytest.raises(ValueError, match=LABELS[field]):
         parse_advanced({field: text})
@@ -154,7 +154,17 @@ def test_row_hint():
     assert presets.row_hint('ignore_normals_mode', 'Traditional', False) == ''
     assert presets.row_hint('samples', '1024', True) == presets.ADAPTIVE_HINT
     assert presets.row_hint('samples', '1024', False) == ''
-    for name in ('texels_per_unit', 'vertex_rays', 'sky_grid', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):
+    for name in ('texels_per_unit', 'vertex_rays', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):
         assert presets.row_hint(name, 'Enhanced', True) == ''
     assert presets.ENHANCED_HINT == 'the bake can take up to twice as long, and needs more memory'
     assert presets.ADAPTIVE_HINT == 'the most rays per texel while adaptive sampling is on'
+
+
+@pytest.mark.parametrize('name, grid', [('Draft', 2), ('Normal', 4), ('High', 4), ('Ultra', 4)])
+def test_a_named_preset_builds_its_sky_grid(name, grid):
+    assert build_settings(name, {}, 'b').sky_grid == grid
+
+
+def test_custom_builds_the_default_sky_grid():
+    advanced = dict(texels_per_unit=2.0, samples=1024, vertex_rays=1024, bounces=1, page_max=512)
+    assert build_settings('Custom', advanced, 'b').sky_grid == 4

@@ -26,9 +26,10 @@ PRESET_HINTS: dict[str, str] = {
     'Ultra': 'Sharpest. Slow and memory-hungry; for a final bake.',
     'Custom': 'Your own values from Advanced, on any device.',
 }
-ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
+# sky_grid is left out of the panel in 0.2.2 (0.3.0 replaces it with a shadows choice); the presets still carry it and a settings file can set it
+ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max')
 PAGE_MAX_CHOICES = PAGE_SIDES
-LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'sky_grid': 'Suns per sky light', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
+LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
 DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
 
@@ -66,7 +67,7 @@ def density_values(current: str) -> list[str]:
 
 def parse_advanced(texts: dict[str, str]) -> dict:
     values = {}
-    ranges = {'samples': (1, 4096), 'vertex_rays': (1, 65536), 'sky_grid': (1, 8), 'bounces': (0, 8)}
+    ranges = {'samples': (1, 4096), 'vertex_rays': (1, 65536), 'bounces': (0, 8)}
     for field in ADVANCED:
         text = texts.get(field, '').strip()
         if not text:
@@ -85,7 +86,7 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if not valid:
                 raise ValueError
         except ValueError:
-            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'sky_grid': '1 to 8', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
+            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
             raise ValueError(f'{LABELS[field]} must be a number from {allowed}.') from None
         values[field] = value
     return values
@@ -94,7 +95,7 @@ def parse_advanced(texts: dict[str, str]) -> dict:
 def build_settings(preset: str, advanced: dict, blender: str, device: str = 'auto') -> Settings:
     if preset == CUSTOM:
         if set(advanced) != set(ADVANCED):
-            raise ValueError('Custom needs all six Advanced values.')
+            raise ValueError('Custom needs all five Advanced values.')
         values = dict(advanced)
     else:
         values = {**PRESETS[preset], **advanced}
