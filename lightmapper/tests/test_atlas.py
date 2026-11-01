@@ -257,8 +257,6 @@ def reference_place_atlas(m, scene, atlas, width, height):
 
 
 
-
-
 def skips_of(atlas):
     cols = int(np.ceil(np.sqrt(1.3 * len(atlas.slots))))
     cells = (atlas.pixels[:, 1] - 2) // 4 * cols + (atlas.pixels[:, 0] - 2) // 4
@@ -312,6 +310,24 @@ def test_vectorised_placement_equals_the_scalar_one_on_a_busy_page(bake_module):
         assert skips_of(placed) > 0
         extent = (placed.triangles - atlas.slots[:, None]).max(axis=(1, 2))
         assert extent.max() > 12, 'the page holds slivers whose triangles leave the vectorised window'
+
+
+def test_exact_per_cell_path_equals_the_scalar_one(bake_module, monkeypatch):
+    # a margin of 0.6 sends nearly every slot to the cell-by-cell path that normally only rare slots take
+    monkeypatch.setattr(bake_module, 'MARGIN', 0.6)
+    calls = []
+    real = bake_module._land
+    monkeypatch.setattr(bake_module, '_land', lambda *args: calls.append(1) or real(*args))
+    for seed in (1, 2):
+        scene, atlas, size = busy_page(bake_module, seed)
+        assert_same_layout(bake_module, scene, atlas, size, size)
+    assert len(calls) > 3000
+
+
+def test_exact_path_keeps_to_the_grid_at_the_first_row(bake_module):
+    # a triangle reaching above and left of the first cell covers no cell there is
+    start, cells = bake_module._land(np.float64([[-5, -5], [9, -5], [2, 6]]), 4, 0, bytearray(64), bytearray(64))
+    assert start == 0 and sorted(cells) == [0, 1]
 
 
 def test_place_atlas_says_why_it_returned_none(bake_module, spike, monkeypatch, capsys):

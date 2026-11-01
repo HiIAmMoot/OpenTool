@@ -995,16 +995,54 @@ def _depth(tri, x, y):
     return depth
 
 
-def _covered_cells(tri, n_cols):
-    # the grid cells whose pixel centre T' covers within ATLAS_SLACK, as cell numbers (row * n_cols + column); only a slot
-    # pixel can clash with a triangle, so no other pixel is tracked. Candidates are the pixels within a pixel of the
-    # triangle's bounding box
-    lo = np.floor(tri.min(axis=0) - 1).astype(int)
-    hi = np.ceil(tri.max(axis=0) + 1).astype(int)
-    columns = np.arange(max(0, -(-(lo[0] - ATLAS_OFFSET) // ATLAS_STRIDE)), min(n_cols - 1, (hi[0] - ATLAS_OFFSET) // ATLAS_STRIDE) + 1)
-    rows = np.arange(max(0, -(-(lo[1] - ATLAS_OFFSET) // ATLAS_STRIDE)), (hi[1] - ATLAS_OFFSET) // ATLAS_STRIDE + 1)
-    hit = _depth(tri, (ATLAS_OFFSET + ATLAS_STRIDE * columns)[None, :] + 0.5, (ATLAS_OFFSET + ATLAS_STRIDE * rows)[:, None] + 0.5) >= -ATLAS_SLACK
-    return (rows[:, None] * n_cols + columns[None, :])[hit]
+def _land(tri, n_cols, cursor, covered, occupied):
+    """Where a triangle given relative to its slot lands under the greedy rule, and the cells it then covers. Each
+    candidate cell is decided on the triangle shifted to that cell, as the pixels are laid out, a chunk of free cells at a
+    time (nothing changes while one slot looks, so the first clear cell of a chunk is its cell). Only a slot pixel can
+    clash with a triangle, so only the grid cells around the triangle's bounding box are tested."""
+    low, high = tri.min(axis=0), tri.max(axis=0)
+    columns = np.arange(int(np.floor((low[0] - 2) / ATLAS_STRIDE)) - 1, int(np.ceil((high[0] + 2) / ATLAS_STRIDE)) + 2)
+    rows = np.arange(int(np.floor((low[1] - 2) / ATLAS_STRIDE)) - 1, int(np.ceil((high[1] + 2) / ATLAS_STRIDE)) + 2)
+    chunk = 4
+    while True:
+        span = 8 * chunk
+        reserve = cursor + span + (rows[-1] + 2) * n_cols
+        if reserve > len(covered):
+            covered.extend(bytes(reserve - len(covered)))
+            occupied.extend(bytes(reserve - len(occupied)))
+        free = np.flatnonzero(np.frombuffer(bytes(covered[cursor:cursor + span]), np.uint8) == 0)[:chunk]
+        if not len(free):
+            cursor += span
+            continue
+        cells = cursor + free
+        column, row = cells % n_cols, cells // n_cols
+        ax, ay = ATLAS_OFFSET + ATLAS_STRIDE * column, ATLAS_OFFSET + ATLAS_STRIDE * row
+        shifted = tri + np.stack([ax, ay], axis=1)[:, None]
+        x = ax[:, None] + ATLAS_STRIDE * columns[None, :]
+        y = ay[:, None] + ATLAS_STRIDE * rows[None, :]
+        low_pixel = np.floor(shifted.min(axis=1) - 1).astype(int)
+        high_pixel = np.ceil(shifted.max(axis=1) + 1).astype(int)
+        hit = ((_depth(shifted[:, None, None], x[:, None, :] + 0.5, y[:, :, None] + 0.5) >= -ATLAS_SLACK)
+               & (x >= low_pixel[:, :1])[:, None, :] & (x <= high_pixel[:, :1])[:, None, :]
+               & (y >= low_pixel[:, 1:])[:, :, None] & (y <= high_pixel[:, 1:])[:, :, None]
+               & ((column[:, None] + columns[None, :] >= 0) & (column[:, None] + columns[None, :] < n_cols))[:, None, :]
+               & (row[:, None] + rows[None, :] >= 0)[:, :, None])
+        ids = cells[:, None, None] + rows[None, :, None] * n_cols + columns[None, None, :]
+        taken = np.zeros(ids.shape, bool)
+        if hit.any():
+            bottom, top = int(ids[hit].min()), int(ids[hit].max())
+            if top >= len(occupied):
+                covered.extend(bytes(top + 1 - len(covered)))
+                occupied.extend(bytes(top + 1 - len(occupied)))
+            taken[hit] = np.frombuffer(bytes(occupied[bottom:top + 1]), np.uint8)[ids[hit] - bottom] != 0
+        # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
+        # slot's centre would overwrite it)
+        blocked = (taken & (ids != cells[:, None, None])).any(axis=(1, 2))
+        if not blocked.all():
+            chosen = int(np.argmin(blocked))
+            return int(cells[chosen]), ids[chosen][hit[chosen]].tolist()
+        cursor = int(cells[-1]) + 1
+        chunk = min(64, 2 * chunk)
 
 
 # cells either side of a slot's own whose centre the vectorised pass tests; a triangle that could reach further is decided
@@ -1017,10 +1055,11 @@ MARGIN = 1e-7
 
 def _window_masks(relative):
     """Per slot, the cells of the window around its own whose pixel centre T' covers, as bits (row * 5 + column of the
-    window), and whether the slot must be decided exactly once it has a cell."""
+    window), whether the slot must be decided exactly once it has a cell, and whether its triangle reaches past the window."""
     count = len(relative)
     masks = np.zeros(count, np.int64)
     exact = np.zeros(count, bool)
+    outside = np.zeros(count, bool)
     steps = np.arange(-WINDOW, WINDOW + 1) * ATLAS_STRIDE
     gx, gy = steps[None, None, :], steps[None, :, None]
     bit = (1 << np.arange((2 * WINDOW + 1) ** 2)).reshape(1, 2 * WINDOW + 1, 2 * WINDOW + 1)
@@ -1040,7 +1079,8 @@ def _window_masks(relative):
         far = (low < -(ATLAS_STRIDE * WINDOW - 2)).any(axis=1) | (high > ATLAS_STRIDE * WINDOW - 2).any(axis=1)
         masks[start:start + 32768] = (((depth >= -ATLAS_SLACK) & inside) * bit).sum(axis=(1, 2))
         exact[start:start + 32768] = unsure.any(axis=(1, 2)) | far | (edges.min(axis=1) < 1e-3) | (area < 1e-6)
-    return masks, exact
+        outside[start:start + 32768] = far
+    return masks, exact, outside
 
 
 def _reach(tri):
@@ -1066,40 +1106,43 @@ def _place(triangles, slots, n_cols):
     and where its own triangle covers no accepted slot's pixel. Returns the slot pixels, or None past MAX_ATLAS."""
     count = len(slots)
     relative = triangles - slots[:, None]
-    masks, exact = _window_masks(relative)
+    masks, exact, outside = _window_masks(relative)
     pixels = np.empty((count, 2), np.int64)
     covered = bytearray(count + 8 * n_cols)
     occupied = bytearray(len(covered))
     reach = {}
     cursor = 0
-    for k, (mask, decide) in enumerate(zip(masks.tolist(), exact.tolist())):
-        if decide:
+    for k, (mask, decide, far) in enumerate(zip(masks.tolist(), exact.tolist(), outside.tolist())):
+        # (a triangle reaching past the window is decided cell by cell, so no rounding bound has to hold for it)
+        if far:
+            decide = True
+        elif decide:
             offsets, decide = _reach(relative[k])
         else:
             if mask not in reach:
                 reach[mask] = [(i % 5 - WINDOW, i // 5 - WINDOW) for i in range(25) if mask >> i & 1]
             offsets = reach[mask]
-        while True:
-            if len(covered) < cursor + (WINDOW + 3) * n_cols:
-                covered.extend(bytes(len(covered)))
-                occupied.extend(bytes(len(occupied)))
-            if covered[cursor]:
-                cursor += 1
-                continue
-            column, row = cursor % n_cols, cursor // n_cols
-            if decide:
-                tri = relative[k] + [ATLAS_OFFSET + ATLAS_STRIDE * column, ATLAS_OFFSET + ATLAS_STRIDE * row]
-                cells = _covered_cells(tri, n_cols).tolist()
-            else:
+        if decide:
+            cursor, cells = _land(relative[k], n_cols, cursor, covered, occupied)
+        else:
+            while True:
+                if len(covered) < cursor + (WINDOW + 3) * n_cols:
+                    covered.extend(bytes(len(covered)))
+                    occupied.extend(bytes(len(occupied)))
+                if covered[cursor]:
+                    cursor += 1
+                    continue
+                column, row = cursor % n_cols, cursor // n_cols
                 cells = [cursor + dy * n_cols + dx for dx, dy in offsets if 0 <= column + dx < n_cols and row + dy >= 0]
-            if cells and max(cells) >= len(covered):
-                covered.extend(bytes(max(cells) + 1 - len(covered)))
-                occupied.extend(bytes(len(covered) - len(occupied)))
-            # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
-            # slot's centre would overwrite it)
-            if not any(occupied[cell] for cell in cells if cell != cursor):
-                break
-            cursor += 1
+                if cells and max(cells) >= len(covered):
+                    covered.extend(bytes(max(cells) + 1 - len(covered)))
+                    occupied.extend(bytes(len(covered) - len(occupied)))
+                # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an
+                # earlier slot's centre would overwrite it)
+                if not any(occupied[cell] for cell in cells if cell != cursor):
+                    break
+                cursor += 1
+        column, row = cursor % n_cols, cursor // n_cols
         occupied[cursor] = 1
         for cell in cells:
             covered[cell] = 1
