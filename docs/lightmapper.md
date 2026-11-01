@@ -97,7 +97,7 @@ A settings file is a JSON object with the settings you want to change; everythin
 ```json
 {
   "texels_per_unit": 8,
-  "page_max": 1024,
+  "page_max": "auto",
   "blender": "C:\\Apps\\Blender 5.2\\blender.exe"
 }
 ```

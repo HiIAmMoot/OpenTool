@@ -20,7 +20,7 @@ def test_cache_roundtrip(tmp_path):
     assert load_charts(path, 'key') is None
     save_charts(path, pages, 'key')
     with np.load(path, allow_pickle=False) as data:
-        assert json.loads(str(data['meta'])) == {'version': 11, 'key': 'key', 'pages': [[8, 16, 1]]}
+        assert json.loads(str(data['meta'])) == {'version': 12, 'key': 'key', 'pages': [[8, 16, 1]]}
         assert data['p0_m0_group'].dtype == np.int32
         assert data['p0_m0_tris'].dtype == np.uint16
         assert data['p0_m0_surface_ids'].dtype == np.int32
@@ -175,4 +175,16 @@ def test_corrupt_cache_is_a_miss(tmp_path, damage):
         np.savez(path, meta='not json')
     else:
         np.savez(path, meta=json.dumps({'version': charts.CACHE_VERSION, 'key': 'key', 'pages': [[8, 16, 1]]}))
+    assert charts.load_charts(path, 'key') is None
+
+
+def test_cache_version_is_bumped(tmp_path, monkeypatch):
+    from lightmapper import charts
+    path = tmp_path / 'charts.npz'
+    env, lm = np.zeros(3, ENV), np.zeros(3, LM)
+    pages = [OutPage(8, 16, [OutMaterial(7, env, lm, np.array([[2, 0, 1]]), np.array([19]))])]
+    monkeypatch.setattr(charts, 'CACHE_VERSION', 11)
+    charts.save_charts(path, pages, 'key')
+    monkeypatch.undo()
+    assert charts.CACHE_VERSION == 12
     assert charts.load_charts(path, 'key') is None

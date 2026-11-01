@@ -295,7 +295,7 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
         # an access violation alone is any crash; only Blender's own failed-allocation line makes it memory
         if done.returncode in ACCESS_VIOLATION and ('Calloc returns null' in tail or 'Malloc returns null' in tail):
             message = out_of_memory_message(SceneCounts.from_npz(work / job['scene']),
-                                            [tuple(p) for p in job['pages']], s.page_max, free_before)
+                                            [tuple(p) for p in job['pages']], s.resolved_page_max, free_before)
             raise BlenderOutOfMemory(message, tail)
         raise BlenderError(f'blender exited with {done.returncode}\n{tail}')
     if not out.is_file():

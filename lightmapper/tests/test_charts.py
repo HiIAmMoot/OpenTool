@@ -207,7 +207,7 @@ def test_rectangle_repack_preserves_each_triangle_area():
     from lightmapper.charts import _finish, _packing_areas, _pack_rectangles, _run_atlas
     pos, tris = scattered_quads(12)
     group = make_group(pos, tris)
-    s = ChartSettings()
+    s = ChartSettings(page_max=1024)
     atlas_pages, extent = _run_atlas([(0, group, None, 1.0)], False, s)
     before = _finish(atlas_pages, extent, s)
     after = _pack_rectangles([piece for page in atlas_pages for piece in page], s)
@@ -266,11 +266,21 @@ def test_extent_on_power_of_two():
     assert np.all(texels >= s.padding)
 
 
-def test_oversized_chart_refuses_instead_of_losing_density():
+def test_oversized_chart_still_hits_the_page_count_cap():
     pos, tris = grid(20, 1.0)
-    s = ChartSettings(page_max=16, padding=4)
-    with pytest.raises(CapError, match='page_max'):
+    s = ChartSettings(page_max=16, padding=4, max_pages=32)
+    with pytest.raises(CapError, match=r'max_pages \(32\)'):
         chart_and_pack([make_group(pos, tris)], [radiosity()], s)
+
+
+def test_oversized_grid_now_packs_at_16():
+    # bisected into parts that fit a 16 texel page, instead of refused for exceeding it
+    pos, tris = grid(20, 1.0)
+    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(page_max=16, padding=4))
+    assert all(max(p.width, p.height) <= 16 for p in pages)
+    areas = np.array([area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m)])
+    assert len(areas) == 800
+    np.testing.assert_allclose(areas, 2.0, rtol=1e-5)
 
 
 @pytest.mark.parametrize('factors,accepted', [([0.998] * 10, True), ([0.99] * 10, False),
@@ -305,9 +315,12 @@ def test_density_selection_checks_median_and_total(monkeypatch, factors, accepte
 
 
 def test_unsplittable_oversized_triangle_refuses_instead_of_shrinking():
+    # (a triangle cannot be cut, so it is refused by name rather than shrunk)
+    from lightmapper.charts import TriangleTooWide
     group = make_group([[0, 0, 0], [100, 0, 0], [0, 100, 0]], [[0, 1, 2]])
-    with pytest.raises(CapError, match='page_max'):
+    with pytest.raises(TriangleTooWide) as caught:
         chart_and_pack([group], [radiosity()], ChartSettings(page_max=16, padding=1))
+    assert caught.value.shader == 'shader'
 
 
 def quad_group(origin, size, uv_min, uv_size, name, sid0):
@@ -983,3 +996,99 @@ def test_zero_texture_area_island_is_recharted_alone(caplog):
             for tri in texel_triangles(page, m):
                 assert area(*tri) > 0.5
     assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2, 3]
+
+
+def test_page_max_auto_resolves_to_4096():
+    s = ChartSettings()
+    assert s.page_max == 'auto' and s.resolved_page_max == 4096
+    assert ChartSettings(page_max=512).resolved_page_max == 512
+
+
+@pytest.mark.parametrize('bad', ['Auto', 'big', '512', 100, 0])
+def test_page_max_refuses_other_strings(bad):
+    with pytest.raises(ValueError, match='page_max'):
+        ChartSettings(page_max=bad)
+
+
+def island_group(sizes, tpu, name='shader'):
+    # separate quads, each `size` world units on a side with its own texture uvs: an island `size * tpu` texels wide
+    pos, uvs, tris = [], [], []
+    for i, size in enumerate(sizes):
+        base = len(pos)
+        pos.extend([[i * 100, 0, 0], [i * 100 + size, 0, 0], [i * 100 + size, size, 0], [i * 100, size, 0]])
+        uvs.extend([[i * 2, 0], [i * 2 + 1, 0], [i * 2 + 1, 1], [i * 2, 1]])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name)
+
+
+def test_bake_side_is_the_smallest_that_fits():
+    group = island_group([4] * 6, 50)
+    for page_max in ('auto', 1024):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
+                               ChartSettings(texels_per_unit=50, page_max=page_max))
+        assert len(pages) == 2
+        assert all(max(p.width, p.height) <= 512 for p in pages)
+
+
+def test_one_triangle_forces_the_side_up():
+    pos = np.array([[0, 0, 0], [12, 0, 0], [0, 12, 0]], np.float32)
+    triangle = make_group(pos, [[0, 1, 2]], uvs=[[0, 0], [1, 0], [0, 1]], name='wide')
+    pages = chart_and_pack([island_group([4] * 6, 50), triangle], [radiosity(SIMPLE_PARAMETERIZATION)] * 2,
+                           ChartSettings(texels_per_unit=50))
+    assert all(max(p.width, p.height) <= 1024 for p in pages)
+    assert any(max(p.width, p.height) == 1024 for p in pages)
+
+
+def test_triangle_wider_than_max_resolution_names_the_shader():
+    from lightmapper.charts import TriangleTooWide
+    # (599 texels of triangle, and xatlas starts a uv chart half a texel in: 600 wide, 608 with padding)
+    pos = np.array([[0, 0, 0], [11.98, 0, 0], [0, 11.98, 0]], np.float32)
+    triangle = make_group(pos, [[0, 1, 2]], uvs=[[0, 0], [1, 0], [0, 1]], name='wide')
+    with pytest.raises(TriangleTooWide) as caught:
+        chart_and_pack([island_group([4] * 6, 50), triangle], [radiosity(SIMPLE_PARAMETERIZATION)] * 2,
+                       ChartSettings(texels_per_unit=50, page_max=512))
+    error = caught.value
+    assert (error.shader, error.width, error.page_max) == ('wide', 608, 512)
+    assert 'wide' in str(error) and '608' in str(error) and '512' in str(error)
+    assert isinstance(error, CapError)
+
+
+def big_island():
+    pos, tris = grid(14, 1.0)
+    return make_group(pos, tris, uvs=pos[:, :2] / 14, name='big')
+
+
+def test_oversized_island_is_bisected_not_refused():
+    pages = chart_and_pack([big_island()], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max='auto'))
+    assert all(max(p.width, p.height) <= 512 for p in pages)
+    areas = np.array([area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m)])
+    assert len(areas) == 392
+    np.testing.assert_allclose(areas, 1250.0, rtol=1e-5)
+
+
+def test_fixed_256_never_exceeds_256():
+    pages = chart_and_pack([big_island()], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max=256))
+    assert all(max(p.width, p.height) <= 256 for p in pages)
+    assert sum(len(m.tris) for p in pages for m in p.materials) == 392
+
+
+def test_charting_does_not_depend_on_page_max(monkeypatch):
+    from lightmapper import charts
+    seen = []
+    real = charts.xatlas_c.PackSettings
+
+    def recorder(**kwargs):
+        seen.append(kwargs['resolution'])
+        return real(**kwargs)
+    monkeypatch.setattr(charts.xatlas_c, 'PackSettings', recorder)
+    pos, tris = grid(8, 1.0)
+    group = make_group(pos, tris)
+    results = {}
+    for page_max in (256, 'auto'):
+        seen.clear()
+        pages = chart_and_pack([group], [radiosity()], ChartSettings(page_max=page_max))
+        assert {r for r in seen if r} == {4096 - 2 * 4}
+        results[page_max] = sorted(area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m))
+    np.testing.assert_allclose(results[256], results['auto'], rtol=1e-5)

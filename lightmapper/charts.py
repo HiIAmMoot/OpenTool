@@ -7,7 +7,7 @@ meshes in one atlas; their chart rectangles share our final packing. Every stock
 split where a material can be, and refused otherwise, never truncated.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import logging
 import math
@@ -28,7 +28,13 @@ from .gather import SIMPLE_PARAMETERIZATION, ShaderRadiosity
 
 logger = logging.getLogger(__name__)
 # identical input bytes and settings can have incompatible layouts under a different packing algorithm
-CACHE_VERSION = 11
+CACHE_VERSION = 12
+# the largest page 'auto' allows
+AUTO_PAGE_MAX = 4096
+# xatlas always charts at this side, whatever the pages end up being, so the layout of a chart never depends on page_max
+CHART_SIDE = 4096
+# the bake side the search for the smallest page side starts from
+FIRST_BAKE_SIDE = 512
 
 
 def save_charts(path: Path, pages: list[OutPage], key: str):
@@ -78,6 +84,13 @@ class CapError(ValueError):
     pass
 
 
+class TriangleTooWide(CapError):
+    def __init__(self, shader: str, width: int, page_max: int):
+        super().__init__(f'shader {shader} has a triangle {width} texels wide with padding, over page_max '
+                         f'({page_max}): lower texels_per_unit')
+        self.shader, self.width, self.page_max = shader, width, page_max
+
+
 @dataclass
 class ChartSettings:
     # the global texels_per_unit is the level 1 density; levels 0 (high) to 3 (turd) multiply it with
@@ -85,7 +98,7 @@ class ChartSettings:
     texels_per_unit: float = 2.0
     detail_level_scale: tuple = (2.667, 1.0, 0.6, 0.03)
     padding: int = 4
-    page_max: int = 1024
+    page_max: int | str = 'auto'
     page_min: int = 8
     max_vertices: int = 64000
     max_surfaces: int = 20000
@@ -95,16 +108,21 @@ class ChartSettings:
     respect_normal_seams: bool = True
 
     def __post_init__(self):
-        for name in ('page_max', 'page_min'):
-            value = getattr(self, name)
-            if value < 1 or value & (value - 1):
-                raise ValueError(f'{name} must be a power of two, not {value}')
-        if self.page_min > self.page_max:
+        if self.page_max != 'auto' and not (type(self.page_max) is int and self.page_max > 0
+                                            and not self.page_max & (self.page_max - 1)):
+            raise ValueError(f"page_max must be 'auto' or a power of two, not {self.page_max!r}")
+        if self.page_min < 1 or self.page_min & (self.page_min - 1):
+            raise ValueError(f'page_min must be a power of two, not {self.page_min}')
+        if self.page_min > self.resolved_page_max:
             raise ValueError('page_min exceeds page_max')
         # (a settings file brings the list back as a list, which would not equal the default)
         self.detail_level_scale = tuple(float(v) for v in self.detail_level_scale)
         if len(self.detail_level_scale) != 4 or not all(v > 0 for v in self.detail_level_scale):
             raise ValueError(f'detail_level_scale needs four positive multipliers, not {self.detail_level_scale}')
+
+    @property
+    def resolved_page_max(self) -> int:
+        return AUTO_PAGE_MAX if self.page_max == 'auto' else self.page_max
 
     def density_scale(self, shader: ShaderRadiosity) -> float:
         if not 0 <= shader.detail_level < len(self.detail_level_scale):
@@ -273,9 +291,9 @@ def _run_atlas(entries, uv_mode: bool, s: ChartSettings, *, limit_charts=True, j
     texels_per_unit = s.texels_per_unit * lowest
     # (xatlas starts a chart at texel 0 and lets it reach the last texel: _finish adds a margin
     # on both sides, so the atlas gets that much less)
-    # an automatic-size reference cannot silently shrink a chart to page_max;
-    # only the candidate is constrained to the requested page size
-    atlas.generate(xatlas_c.PackSettings(resolution=s.page_max - 2 * s.padding if limit_charts else 0,
+    # an automatic-size reference cannot silently shrink a chart; only the candidate is constrained, and always to
+    # the same side, so a chart's shape does not change with page_max (oversized ones are cut afterwards)
+    atlas.generate(xatlas_c.PackSettings(resolution=CHART_SIDE - 2 * s.padding if limit_charts else 0,
                                           texels_per_unit=texels_per_unit,
                                           padding=s.padding, bilinear=True, rotate_charts=True,
                                           brute_force=False,
@@ -672,7 +690,8 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
                    s: ChartSettings) -> list[OutPage]:
     if len(radiosity) != len(groups):
         raise ValueError('one shader radiosity per source group is required')
-    if s.page_max - 2 * s.padding <= 0:
+    top = s.resolved_page_max
+    if top - 2 * s.padding <= 0:
         raise ValueError('page_max must exceed twice the padding')
     ordinary, simple, fallback = [], [], []
     for index, (group, shader) in enumerate(zip(groups, radiosity)):
@@ -702,6 +721,21 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
         pieces.extend(_density_checked_pieces(simple, True, s))
     if not pieces:
         return []
-    pages = _pack_rectangles(pieces, s)
-    _check_caps(pages, s)
-    return pages
+    widest, shader = _widest_triangle(pieces, s.padding)
+    if widest > top:
+        raise TriangleTooWide(shader, widest, top)
+    side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
+    while True:
+        side_s = replace(s, page_max=side)
+        parts, split, made = _split_oversized(pieces, side, s.padding)
+        try:
+            pages = _pack_rectangles(parts, side_s)
+            _check_caps(pages, side_s)
+        except CapError:
+            # (the last side's error is the one worth reading: it has the most room)
+            if side >= top:
+                raise
+            side *= 2
+            continue
+        logger.info('bake side %d: %d piece(s) split into %d parts', side, split, made)
+        return pages

@@ -45,7 +45,7 @@ def test_stitches_two_charts_merged_into_one_material():
         m = page.materials[0]
         pieces.append((0, SimpleNamespace(env=m.env), np.arange(3),
                        m.lm['texcoord'] * 16 + [16 * i, 0], m.tris, m.surface_ids))
-    pages = _finish([pieces], [np.array([27, 11])], ChartSettings(padding=0))
+    pages = _finish([pieces], [np.array([27, 11])], ChartSettings(padding=0, page_max=1024))
     assert len(pages[0].materials) == 1
     assert len(pages[0].materials[0].env) == 6
     raw = np.full((16, 32, 3), 0.2, np.float32)

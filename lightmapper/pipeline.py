@@ -431,7 +431,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
                                           s.scenery_emission)
         check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
-                                         [(p.width, p.height) for p in pages], s.page_max)
+                                         [(p.width, p.height) for p in pages], s.resolved_page_max)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)
