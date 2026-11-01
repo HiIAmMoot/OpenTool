@@ -239,3 +239,35 @@ def test_seam_grouping_at_stock_bsp_limit():
     lm['texcoord'] = pos[:, :2] / 256
     page = OutPage(256, 256, [OutMaterial(0, env, lm, tris, np.arange(131072))])
     assert list(seam_edges([page])) == []
+
+
+def test_cut_simple_island_seam_is_paired():
+    from dataclasses import replace
+    from lightmapper import charts
+    from lightmapper.formats.bsp import SourceGroup
+    from lightmapper.seams import seam_edges
+    positions = np.array([[x, y, 0] for y in (0, 1) for x in range(7)], np.float32)
+    tris = np.array([t for x in range(6) for t in ([x, x + 1, x + 8], [x, x + 8, x + 7])], np.int32)
+    env = np.zeros(len(positions), ENV)
+    env['position'], env['normal'] = positions, [0, 0, 1]
+    group = SourceGroup(('senv', 'shader', 0, 0, -1), None, env, tris, np.arange(len(tris)))
+    s = charts.ChartSettings()
+    pieces = charts._density_checked_pieces([(0, group, positions[:, :2], 1.0)], True, s)
+    side = 16
+    parts, split, _ = charts._split_oversized(pieces, side, s.padding)
+    assert split == 1 and len(parts) == 2
+    pages = charts._pack_rectangles(parts, replace(s, page_max=side))
+    # where the two ends of the cut edge (x=3) landed on each chart
+    ends = []
+    for p, page in enumerate(pages):
+        for material in page.materials:
+            for pos, texcoord in zip(material.env['position'], material.lm['texcoord']):
+                for k, y in enumerate((0, 1)):
+                    if np.allclose(pos, [3, y, 0]):
+                        ends.append((p, k, texcoord * [page.width, page.height]))
+
+    def cut_edge(side_of_pair):
+        page, uvs, _ = side_of_pair
+        found = {k for p, k, uv in ends if p == page for u in uvs if np.allclose(uv, u, atol=1e-3)}
+        return found == {0, 1}
+    assert any(cut_edge(a) and cut_edge(b) for a, b in seam_edges(pages, joined_groups={0}))

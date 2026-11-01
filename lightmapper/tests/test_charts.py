@@ -759,3 +759,147 @@ def test_simple_parameterization_fallback_stays_joined_across_a_hard_crease():
     pages = chart_and_pack([simple, plain], [radiosity(SIMPLE_PARAMETERIZATION), radiosity()], ChartSettings())
     assert chart_count(pages, group=0) == 1
     assert chart_count(pages, group=1) == 2
+
+
+def cells_piece(cells, cell=10, offset=(0, 0), name='shader'):
+    # one quad of two triangles per (x, y) cell, each with its own vertices, so only uv values join neighbours
+    positions, tris = [], []
+    for x, y in cells:
+        base = len(positions)
+        positions += [[x, y, 0], [x + 1, y, 0], [x + 1, y + 1, 0], [x, y + 1, 0]]
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return piece_from_group(make_group(np.array(positions, np.float32), tris, name=name), cell, offset)
+
+
+def piece_from_group(group, cell, offset=(0, 0)):
+    return (0, group, np.arange(len(group.env)), group.env['position'][:, :2].astype(np.float64) * cell + offset,
+            group.tris, group.surface_ids)
+
+
+def piece_from_grid(n, cell, offset=(0, 0), name='shader'):
+    return piece_from_group(make_group(*grid(n), name=name), cell, offset)
+
+
+def test_components_follow_shared_uv_values():
+    from lightmapper.charts import _components
+    quad = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float)
+    tris = np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [8, 9, 10], [8, 10, 11]])
+    uv = np.concatenate([quad, quad + [1, 0], quad + [10, 10]])
+    found = _components(uv, tris, np.arange(6))
+    assert [list(part) for part in found] == [[0, 1, 2, 3], [4, 5]]
+    # the second quad could sit at the first one's positions, but its uvs touch nothing
+    uv = np.concatenate([quad, quad + [5, 0]])
+    assert [list(part) for part in _components(uv, tris[:4], np.arange(4))] == [[0, 1], [2, 3]]
+
+
+def test_bisection_keeps_uvs_and_areas():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    piece = cells_piece([(x, 0) for x in range(40)])
+    parts = _bisect_piece(piece, 128, 4)
+    assert len(parts) > 1
+    assert all(_padded_size(p[3], 4).max() <= 128 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+    rows = np.concatenate([p[5] for p in parts])
+    corners = np.concatenate([p[3][p[4]] for p in parts])[np.argsort(rows)]
+    source = piece[3][piece[4]]
+    np.testing.assert_array_equal(corners, source)
+    for p in parts:
+        np.testing.assert_array_equal(p[3], piece[3][p[2]])
+
+    def areas(c):
+        return 0.5 * np.abs((c[:, 1, 0] - c[:, 0, 0]) * (c[:, 2, 1] - c[:, 0, 1])
+                            - (c[:, 1, 1] - c[:, 0, 1]) * (c[:, 2, 0] - c[:, 0, 0]))
+    np.testing.assert_allclose(areas(corners), areas(source), atol=1e-9)
+
+
+def test_bisection_parts_are_uv_connected():
+    from lightmapper.charts import _bisect_piece, _components
+    # a U of 10-texel cells, 5 wide and 14 tall: a bar along y=0 and arms up x=0 and x=4.
+    # The median cut on y leaves the bar and the arms' lower rows below it and, above it, the two arms
+    # joined only through the bar; each arm alone is under 12 cells tall, so the recursion would stop there
+    cells = [(x, 0) for x in range(5)] + [(x, y) for x in (0, 4) for y in range(1, 14)]
+    parts = _bisect_piece(cells_piece(cells), 128, 4)
+    assert len(parts) > 1
+    for part in parts:
+        assert len(_components(part[3], part[4], np.arange(len(part[4])))) == 1
+
+
+def test_pieces_that_fit_are_untouched():
+    from lightmapper.charts import _split_oversized
+    piece = cells_piece([(0, 0), (1, 0)])
+    parts, split, made = _split_oversized([piece], 128, 4)
+    assert len(parts) == 1 and parts[0] is piece
+    assert (split, made) == (0, 0)
+
+
+def test_oversized_pieces_are_counted():
+    from lightmapper.charts import _split_oversized
+    fits, wide = cells_piece([(0, 0)]), cells_piece([(x, 0) for x in range(40)])
+    parts, split, made = _split_oversized([fits, wide], 128, 4)
+    assert parts[0] is fits
+    assert (split, made) == (1, len(parts) - 1)
+
+
+def test_widest_triangle_names_its_shader():
+    from lightmapper.charts import _widest_triangle
+    narrow = cells_piece([(0, 0)], name='narrow')
+    wide = piece_from_group(make_group(np.array([[0, 0, 0], [600, 0, 0], [0, 5, 0]], np.float32), [[0, 1, 2]], name='wide'), 1)
+    assert _widest_triangle([narrow, wide], 4) == (608, 'wide')
+    assert _widest_triangle([], 4) == (0, '')
+
+
+def test_bisection_with_a_degenerate_triangle_terminates():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    index, group, xref, uv, tris, sid = cells_piece([(x, 0) for x in range(40)], offset=(100, 100))
+    n = len(uv)
+    piece = (index, group, np.r_[xref, np.arange(n, n + 3)], np.concatenate([uv, np.zeros((3, 2))]),
+             np.concatenate([tris, [[n, n + 1, n + 2]]]).astype(np.int32), np.r_[sid, len(sid)])
+    start = time.perf_counter()
+    parts = _bisect_piece(piece, 64, 4)
+    assert time.perf_counter() - start < 10
+    assert all(_padded_size(p[3], 4).max() <= 64 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+
+
+def test_bisection_of_a_large_island_is_fast():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    piece = piece_from_grid(64, 8)
+    start = time.perf_counter()
+    parts = _bisect_piece(piece, 32, 4)
+    assert time.perf_counter() - start < 20
+    assert all(_padded_size(p[3], 4).max() <= 32 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+
+
+def quad_texels(cells, cell=10):
+    texels, tris = [], []
+    for x, y in cells:
+        base = len(texels)
+        texels += [[x * cell, y * cell], [(x + 1) * cell, y * cell], [(x + 1) * cell, (y + 1) * cell], [x * cell, (y + 1) * cell]]
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return np.array(texels, float), np.array(tris)
+
+
+def test_mirrored_island_splits_into_two_pieces():
+    from lightmapper.charts import _components, _island_overlaps, _split_self_overlap
+    # the right half folds back over the left: quad 2 lies on quad 1 and quad 3 on quad 0
+    texels, tris = quad_texels([(0, 0), (1, 0), (2, 0), (3, 0)])
+    texels[:, 0] = np.where(texels[:, 0] > 20, 40 - texels[:, 0], texels[:, 0])
+    found = _split_self_overlap(texels, tris)
+    assert len(found) == 2
+    assert sorted(np.concatenate(found)) == list(range(len(tris)))
+    for rows in found:
+        assert not _island_overlaps(texels, np.unique(tris[rows]), tris[rows])
+        assert len(_components(texels, tris, rows)) == 1
+
+
+def test_self_overlap_split_keeps_non_colliding_neighbours_together():
+    from lightmapper.charts import _split_self_overlap
+    # a ring of eight cells round a 3x3 block, then one triangle laid over the first cell's second triangle
+    ring = [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (0, 1)]
+    texels, tris = quad_texels(ring)
+    n = len(texels)
+    texels = np.concatenate([texels, [[0, 0], [10, 10], [0, 10]]])
+    tris = np.concatenate([tris, [[n, n + 1, n + 2]]])
+    found = _split_self_overlap(texels, tris)
+    assert sorted(len(rows) for rows in found) == [1, 16]

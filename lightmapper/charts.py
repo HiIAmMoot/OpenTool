@@ -268,6 +268,116 @@ def _bounded_charts(uv, tris, rows):
         pending.extend((rows[order[middle:]], rows[order[:middle]]))
 
 
+def _uv_nodes(uv: np.ndarray) -> np.ndarray:
+    return np.unique(uv, axis=0, return_inverse=True)[1].reshape(-1)
+
+
+def _components(uv: np.ndarray, tris: np.ndarray, rows: np.ndarray) -> list[np.ndarray]:
+    # triangles are joined by a shared uv value at a corner, as xatlas joins uv-mesh faces
+    rows = np.sort(np.asarray(rows))
+    if not len(rows):
+        return []
+    used, local = np.unique(tris[rows], return_inverse=True)
+    node = _uv_nodes(uv[used])[local.reshape(-1, 3)]
+    count = node.max() + 1
+    edges = np.concatenate([node[:, [0, 1]], node[:, [1, 2]]])
+    graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(count, count))
+    label = connected_components(graph, directed=False)[1][node[:, 0]]
+    order = np.argsort(label, kind='stable')
+    found = np.split(rows[order], np.flatnonzero(np.diff(label[order])) + 1)
+    return sorted(found, key=lambda part: part[0])
+
+
+def _padded_size(uv: np.ndarray, padding: int) -> np.ndarray:
+    return np.ceil(uv.max(axis=0) - np.floor(uv.min(axis=0))).astype(int) + 2 * padding
+
+
+def _bisect_piece(piece, side: int, padding: int) -> list:
+    index, group, xref, uv, tris, surface_ids = piece
+    if len(tris) == 1 or _padded_size(uv, padding).max() <= side:
+        return [piece]
+    parts = []
+    pending = [np.arange(len(tris))]
+    while pending:
+        rows = pending.pop()
+        used = np.unique(tris[rows])
+        if len(rows) == 1 or _padded_size(uv[used], padding).max() <= side:
+            parts.append((index, group, xref[used], uv[used].copy(),
+                          np.searchsorted(used, tris[rows]).astype(np.int32), surface_ids[rows]))
+            continue
+        axis = int(np.argmax(np.ptp(uv[used], axis=0)))
+        rows = rows[np.argsort(uv[tris[rows]].mean(axis=1)[:, axis], kind='stable')]
+        middle = len(rows) // 2
+        halves = [part for half in (rows[:middle], rows[middle:]) for part in _components(uv, tris, half)]
+        pending.extend(reversed(halves))
+    return parts
+
+
+def _split_oversized(pieces, side: int, padding: int) -> tuple[list, int, int]:
+    parts, split, made = [], 0, 0
+    for piece in pieces:
+        cut = _bisect_piece(piece, side, padding)
+        parts.extend(cut)
+        if cut[0] is not piece:
+            split += 1
+            made += len(cut)
+    return parts, split, made
+
+
+def _widest_triangle(pieces, padding: int) -> tuple[int, str]:
+    widest, shader = 0, ''
+    for _, group, _, uv, tris, _ in pieces:
+        corners = uv[tris]
+        size = np.ceil(corners.max(axis=1) - np.floor(corners.min(axis=1))).astype(int) + 2 * padding
+        if len(size) and size.max() > widest:
+            widest, shader = int(size.max()), group.key[1]
+    return widest, shader
+
+
+def _split_self_overlap(texels: np.ndarray, tris: np.ndarray) -> list[np.ndarray]:
+    # coverage is the texel centres a triangle holds, as _island_overlaps counts them
+    corners = texels[np.unique(tris)]
+    low = np.floor(corners.min(axis=0)).astype(np.int64)
+    size = np.ceil(corners.max(axis=0)).astype(np.int64) - low + 1
+    cover = []
+    for tri in tris:
+        a, b, c = texels[tri[0]] - low, texels[tri[1]] - low, texels[tri[2]] - low
+        x0, y0 = np.floor(np.minimum(np.minimum(a, b), c)).astype(np.int64)
+        x1, y1 = np.ceil(np.maximum(np.maximum(a, b), c)).astype(np.int64)
+        px, py = np.meshgrid(np.arange(x0, x1) + 0.5, np.arange(y0, y1) + 0.5)
+        ys, xs = np.nonzero(_in_triangle(px, py, a, b, c))
+        cover.append((ys + y0) * size[0] + xs + x0)
+    taken = np.zeros(size[0] * size[1], bool)
+    node = _uv_nodes(texels)[tris]
+    flat = node.reshape(-1)
+    order = np.argsort(flat, kind='stable')
+    starts = np.searchsorted(flat[order], np.arange(flat.max() + 2))
+    owner = order // 3
+
+    def neighbours(t):
+        return sorted({int(u) for n in node[t] for u in owner[starts[n]:starts[n + 1]]})
+
+    assigned = np.zeros(len(tris), bool)
+    pieces = []
+    for first in range(len(tris)):
+        if assigned[first]:
+            continue
+        rows = [first]
+        assigned[first] = True
+        taken[cover[first]] = True
+        for t in rows:
+            for n in neighbours(t):
+                if assigned[n] or taken[cover[n]].any():
+                    continue
+                assigned[n] = True
+                taken[cover[n]] = True
+                rows.append(n)
+        for t in rows:
+            taken[cover[t]] = False
+        pieces.append(np.array(sorted(rows)))
+    return pieces
+
+
 def _finish(pages, extent, s: ChartSettings) -> list[OutPage]:
     result = []
     for pieces, ext in zip(pages, extent):
@@ -465,7 +575,7 @@ def _pack_rectangles(pieces, s):
     for piece in pieces:
         uv = piece[3]
         low = np.floor(uv.min(axis=0))
-        size = np.ceil(uv.max(axis=0) - low).astype(int) + 2 * s.padding
+        size = _padded_size(uv, s.padding)
         if np.any(size > s.page_max):
             raise CapError('a chart exceeds page_max including padding')
         rectangles.append((piece, uv - low, tuple(size)))
