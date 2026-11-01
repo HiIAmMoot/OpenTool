@@ -58,6 +58,15 @@ def test_kept_enhanced_bake_keeps_the_glow(tiny, tmp_path, monkeypatch):
     assert len(kept.load_glow(work)) == 1
 
 
+def test_kept_bake_drops_raw_pages(tiny, tmp_path, monkeypatch):
+    seen = []
+    work = kept_work(tmp_path, tiny[0])
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced',
+                          bake_kwargs={'work': work, 'dry_run': False, 'out_bsp': 'copy', 'keep': True},
+                          on_glow=lambda held, pages: seen.append((work / 'raw_pages.npz').exists()))
+    assert seen == [True] and not (work / 'raw_pages.npz').exists()
+
+
 def test_a_new_kept_bake_replaces_the_last_one(tiny, tmp_path):
     tags, settings, _ = tiny
     first, second = kept_work(tmp_path, tags, 'a'), kept_work(tmp_path, tags, 'b')

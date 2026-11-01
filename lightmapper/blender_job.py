@@ -386,6 +386,10 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[
             cropped[f'page_{i}'] = page[y0:y1, x0:x1]
             cropped[f'box_{i}'] = np.array([x0, y0, x1, y1, page.shape[1], page.shape[0]], np.int32)
     np.savez(work / 'glow_pages.npz', **cropped)
+    # (the caller's list and the crops' views keep the whole pages alive while Blender runs)
+    pages.clear()
+    cropped.clear()
+    page = None
     job = json.loads((work / 'job.json').read_text())
     job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')

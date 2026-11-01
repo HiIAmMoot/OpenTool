@@ -32,7 +32,7 @@ VERSION = 2
 # changes how the tags are written, and the device only picks the denoiser's backend, which already varies under an
 # unchanged "auto" (another machine, or the CPU fallback), so it is no reason to refuse
 ALLOWED_CHANGES = frozenset({'lightmap_32bit', 'blender', 'timeout_s', 'device'})
-SUPERSEDED = ('out.npz', 'gpu_out.npz', 'cpu_out.npz', 'vertex_out.npz', 'glow_out.npz', 'diffuse.npz', 'glow_pages.npz')
+SUPERSEDED = ('out.npz', 'gpu_out.npz', 'cpu_out.npz', 'vertex_out.npz', 'glow_out.npz', 'diffuse.npz', 'glow_pages.npz', 'raw_pages.npz')
 SOURCE = 'source.scenario_structure_bsp'
 TEMPLATE = 'template.bitmap'
 SCENARIO = 'scenario.scenario'

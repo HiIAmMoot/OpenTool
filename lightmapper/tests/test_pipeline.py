@@ -1,6 +1,7 @@
 """Exercise orchestration on synthetic tags and scenes."""
 
 from dataclasses import replace
+from pathlib import Path
 import importlib.util
 import json
 import struct
@@ -1530,7 +1531,8 @@ def test_summary_names_the_glow_device_or_why_it_was_skipped(tiny, monkeypatch, 
     assert ('glow' in summary['seconds']) == (want[0] != 'off')
 
 
-def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=True, progress=None, bake_kwargs=None):
+def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=True, progress=None, bake_kwargs=None,
+                          on_glow=None):
     from lightmapper.formats.bsp import OutMaterial, OutPage
     tags, settings, work = tiny
     pipeline = api()
@@ -1565,6 +1567,10 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     def glow(work, s, pages):
         assert mode == 'enhanced', 'tool mode must never start a glow run'
         assert bounces > 0, 'zero bounces must not start a reflected glow stage'
+        if on_glow:
+            caller = sys._getframe(1)
+            assert caller.f_code.co_name == 'bake'
+            on_glow(caller.f_locals, pages)
         assert pages[0].shape == (6, 6, 3)
         np.testing.assert_allclose(pages[0][0, 0], .3, rtol=1e-6)
         np.testing.assert_allclose(pages[0][2, 2], .3, rtol=1e-6)
@@ -1589,6 +1595,46 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     if not emit:
         np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
     return summary
+
+
+def held_page_arrays(held, own):
+    import dataclasses
+    found, seen = [], set()
+
+    def walk(value):
+        if id(value) in seen:
+            return
+        seen.add(id(value))
+        if isinstance(value, np.ndarray):
+            if value.ndim == 3 and value.shape in ((2, 2, 3), (6, 6, 3)) and not any(value is o for o in own):
+                found.append(value.shape)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item)
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif dataclasses.is_dataclass(value) and not isinstance(value, type):
+            for field in dataclasses.fields(value):
+                walk(getattr(value, field.name))
+
+    for value in held.values():
+        walk(value)
+    return found
+
+
+def test_glow_run_starts_with_no_pages_held(tiny, monkeypatch):
+    seen = []
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', on_glow=lambda held, pages: seen.append(held_page_arrays(held, pages)))
+    assert seen == [[]]
+
+
+def test_bake_after_the_glow_run_is_unchanged(tiny, monkeypatch):
+    # data/enhanced_bake.bitmap is copy.bitmap of the bake of 1347400, before the pages were freed, made with the
+    # same call: run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
+    want = (Path(__file__).parent / 'data' / 'enhanced_bake.bitmap').read_bytes()
+    assert (tiny[0] / 'copy.bitmap').read_bytes() == want
 
 
 def put_cutout_maps(tags):

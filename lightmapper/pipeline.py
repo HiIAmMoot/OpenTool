@@ -509,6 +509,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             result = with_vertex_pass(result, vp)
         else:
             result = with_vertex_pass(result, cpu_pass())
+        # (the pass has its copy and the finish never reads these)
+        result = replace(result, diffuse_pages=None)
         stage('vertex_pass')
         if keep:
             kept.save_baked(work)
@@ -552,17 +554,25 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
+    # (nothing below reads the baked pages, and the loop's last page and gather would stay in these names)
+    result = replace(result, pages=None)
+    raw = gathered = texel_scene = None
     glow_device = manifest.glow_device if reuse else 'off'
     if reuse and kept_glow is not None:
         raw_pages = [raw + added for raw, added in zip(raw_pages, kept_glow)]
     if glow_runs:
         # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
         # would come back off them as albedo times emission)
+        np.savez(work / 'raw_pages.npz', **{f'page_{i}': raw for i, raw in enumerate(raw_pages)})
+        raw_pages = None
         started = perf_counter()
         glow, glow_device = run_blender_glow(work, s, glow_pages)
+        glow_pages = None
         if keep:
             kept.save_glow(work, glow)
         seconds['blender_glow'] = perf_counter() - started
+        with np.load(work / 'raw_pages.npz') as data:
+            raw_pages = [data[f'page_{i}'] for i in range(len(pages))]
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
         stage('glow')
