@@ -1387,7 +1387,7 @@ def device_choice(device):
 
 
 class AtlasBake:
-    def __init__(self, root, runs):
+    def __init__(self, root):
         self.root = root
         self.report = json.loads((root / 'atlas.json').read_text())
 
@@ -1410,15 +1410,10 @@ class AtlasBake:
         return [(int(m.group(1)), m.group(2)) for m in map(FALLBACK_LINE.search, self.log(name)) if m]
 
     def tier_calls(self, name):
-        tiers, base_next = [], True
-        for call in self.report[name]['calls']:
-            if call['type'] == 'EMIT':
-                base_next = True
-            elif base_next:
-                base_next = False
-            else:
-                tiers.append(call)
-        return tiers
+        # (a tier bakes atlas objects, or the page through a full-size mask; the page's own bakes see a one-texel mask)
+        return [c for c in self.report[name]['calls'] if c['type'] == 'DIFFUSE' and (
+            any(n.startswith('atlas') for n in c['selected'])
+            or any(size != [1, 1] for image, size in c['images'].items() if image.startswith('mask_')))]
 
 
 def atlas_bake(tmp_path, blender_exe, scene, pages, suns, runs, device='CPU', samples=72 * 16, texel_samples=72 * 16,
@@ -1435,7 +1430,7 @@ def atlas_bake(tmp_path, blender_exe, scene, pages, suns, runs, device='CPU', sa
         capture_output=True, text=True, stdin=subprocess.DEVNULL,
         env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
-    return AtlasBake(tmp_path, runs)
+    return AtlasBake(tmp_path)
 
 
 def equivalence(a, p0, p1, selected):
@@ -1458,10 +1453,13 @@ def equivalence(a, p0, p1, selected):
     return result
 
 
-def assert_equivalent(label, a, p0, p1, selected):
+def assert_equivalent(label, a, p0, p1, selected, bias_only=False):
     result = equivalence(a, p0, p1, selected)
     print(f'ATLAS_EQUIVALENCE {label} {json.dumps(result)}')
     assert result['bias_ok'], (label, result)
+    # (a point lamp's direct light is noise-free, so criterion (b) would judge float-level differences against ~1e-6)
+    if bias_only:
+        return result
     assert result['mean']['ok'] and result['p99']['ok'], (label, result)
     return result
 
@@ -1642,37 +1640,37 @@ def test_atlas_objects_keep_their_light_links(tmp_path, blender_exe):
     lit = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (8, 16), 4.7)))
     unlit = dict(quad=floor(10, 18, 0, 8, lm=chart32(-11, (24, 16), 4.7)), cls=1)
     bake = atlas_bake(tmp_path, blender_exe, build([lit, unlit]), [(32, 32)], [soft_sun()],
-                      [ATLAS_RUN, page_run('P0')])
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)])
     assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
-    a, p0 = bake.out('A')['page_0'], bake.out('P0')['page_0']
+    a, p0, p1 = (bake.out(name)['page_0'] for name in ('A', 'P0', 'P1'))
     selected = bake.topped_up('A')
     columns = np.arange(32)[None, :] >= 16
     assert selected[:, :16].any() and selected[:, 16:].any()
     # the sun lights class 0 only, so the class 1 copies stay dark and the class 0 copies are lit
     assert a[selected & columns].max() < 1e-3
     assert p0[selected & columns].max() < 1e-3
-    np.testing.assert_allclose(a[selected & ~columns].mean(), p0[selected & ~columns].mean(), rtol=0.03)
+    assert_equivalent('light links', a, p0, p1, selected & ~columns)
     assert a[selected & ~columns].mean() > 0.3
 
 
 @pytest.mark.blender
 def test_atlas_objects_keep_lamp_links(tmp_path, blender_exe):
     flagged = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (8, 16), 4.7)), ignore_normals=True)
-    plain = dict(quad=floor(10, 18, 0, 8, lm=chart32(-11, (24, 16), 4.7)))
+    plain = dict(quad=floor(10, 18, 0, 8, lm=chart32(-11, (24, 16), 5.5)))
     bake = atlas_bake(tmp_path, blender_exe, build([flagged, plain]), [(32, 32)], [],
-                      [ATLAS_RUN, page_run('P0')], lights=[lamp_light((14, 4, 1.5))])
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)], lights=[lamp_light((14, 4, 1.5))])
     assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
     objects = [(name, info) for call in bake.tier_calls('A') for name, info in call['objects'].items()]
     assert any(info['flagged'] for _, info in objects) and any(not info['flagged'] for _, info in objects)
     for name, info in objects:
         assert ('lamp_receivers' in info['collections']) == (not info['flagged']), (name, info)
-    a, p0 = bake.out('A')['page_0'], bake.out('P0')['page_0']
+    a, p0, p1 = (bake.out(name)['page_0'] for name in ('A', 'P0', 'P1'))
     selected = bake.topped_up('A')
     columns = np.arange(32)[None, :] >= 16
     # the flagged receiver takes no lamp light either way, the plain one does
     assert a[selected & ~columns].max() < 1e-6 and p0[selected & ~columns].max() < 1e-6
     assert p0[selected & columns].mean() > 0.003
-    np.testing.assert_allclose(a[selected & columns].mean(), p0[selected & columns].mean(), rtol=0.05)
+    assert_equivalent('lamp links', a, p0, p1, selected & columns, bias_only=True)
 
 
 @pytest.mark.blender
@@ -1752,7 +1750,8 @@ def test_unowned_subtexel_tier_bakes_through_the_mask(tmp_path, blender_exe):
 def test_unwritten_atlas_slot_bakes_the_tier_through_the_mask(tmp_path, blender_exe):
     bake = atlas_bake(tmp_path, blender_exe, edge_scene(), [(32, 32)], [soft_sun()],
                       [{**ATLAS_RUN, 'unwritten': True}, page_run('P0')])
-    assert len(bake.fallbacks('A')) == len(bake.tiers('A')) >= 1, bake.log('A')
+    # (a tier that falls back logs only its page-bake line)
+    assert not bake.tiers('A') and len(bake.fallbacks('A')) >= 1, bake.log('A')
     assert all('unwritten' in reason for _, reason in bake.fallbacks('A'))
     np.testing.assert_array_equal(bake.out('A')['page_0'], bake.out('P0')['page_0'])
 
@@ -1769,3 +1768,14 @@ def test_atlas_objects_are_removed_after_each_tier(tmp_path, blender_exe):
         assert call['counts']['meshes'] - before['meshes'] == len(call['selected'])
         assert call['counts']['materials'] - before['materials'] == sum(
             len(info['materials']) for info in call['objects'].values())
+
+
+def test_an_atlas_plan_without_slots_is_a_page_bake(bake_module, monkeypatch, capsys):
+    import types
+
+    empty = bake_module.Atlas(slots=np.zeros((0, 2), np.int64), owner=np.zeros(0, np.int32),
+                              role=np.zeros(0, np.int8), twin=np.zeros(0, np.int64))
+    monkeypatch.setattr(bake_module, 'plan_atlas', lambda *args: empty)
+    inputs = types.SimpleNamespace(scene={}, two_sided=None)
+    assert bake_module.atlas_tier(0, None, inputs, None, None, 4, 4) is None
+    assert 'atlas tier 0: page bake (no slots)' in capsys.readouterr().out

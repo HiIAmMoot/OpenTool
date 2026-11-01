@@ -1300,10 +1300,11 @@ def scatter_atlas(atlas, values, buffer_shape):
     return buffer, int(((atlas.role == 0) & ~ok).sum() + (~both).sum())
 
 
-def atlas_objects(inputs, atlas, mesh):
+def atlas_objects(inputs, atlas, mesh, objects=None):
     """One object per source holding the slots its triangles own, linked where the source is linked."""
     roles = {0: {}, 1: dict(both_sides=False), 2: dict(both_sides=True, back_only=True)}
-    objects = []
+    # (a caller that passes its list still holds what was made when a later source fails)
+    objects = [] if objects is None else objects
     for number, source in enumerate(inputs.sources):
         slots = np.flatnonzero(np.isin(atlas.owner, source.picked))
         if not len(slots):
@@ -1379,16 +1380,21 @@ def atlas_tier(n, mask, inputs, owner, written, h, w):
     if plan is None:
         log(f'atlas tier {n}: page bake (a written sub-texel has no owning triangle)')
         return None
+    if not len(plan.slots):
+        log(f'atlas tier {n}: page bake (no slots)')
+        return None
     plan = place_atlas(inputs.scene, plan, w, h)
     if plan is None:
         log(f'atlas tier {n}: page bake (no atlas layout)')
         return None
-    objects = atlas_objects(inputs, plan, atlas_mesh(inputs.scene, plan, w, h))
     image, side = inputs.image, plan.side
-    values = np.empty(side * side * 4, np.float32)
+    # (one array: it sets the sentinel and then takes the baked pixels, so a large atlas costs one buffer)
+    values = np.full(side * side * 4, -1, np.float32)
+    objects = []
     try:
+        atlas_objects(inputs, plan, atlas_mesh(inputs.scene, plan, w, h), objects)
         image.generated_width = image.generated_height = side
-        image.pixels.foreach_set(np.full(side * side * 4, -1, np.float32))
+        image.pixels.foreach_set(values)
         select_only(objects)
         bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
                             target='IMAGE_TEXTURES')
@@ -1397,13 +1403,13 @@ def atlas_tier(n, mask, inputs, owner, written, h, w):
         remove_atlas_objects(objects)
     values = values.reshape(side, side, 4)[:, :, :3]
     slots = len(plan.slots)
-    baked = int((values >= 0).all(axis=2).sum())
-    log(f'atlas tier {n}: slots {slots}, side {side}, atlas pixels baked {baked} ({baked / slots:.2f})')
     raw, missing = scatter_atlas(plan, values, (3 * h, 3 * w))
     # (merge_extra weights a tier by the base bake's owned counts, so a tier with a slot missing is never merged)
     if missing:
         log(f'atlas tier {n}: page bake ({missing} of {slots} slots unwritten)')
         return None
+    baked = int((values >= 0).all(axis=2).sum())
+    log(f'atlas tier {n}: slots {slots}, side {side}, atlas pixels baked {baked} ({baked / slots:.2f})')
     return raw
 
 
@@ -1454,8 +1460,6 @@ def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, 
     corrected = (merge_extra(corrected, owned, base_spp, tiers, extra_corrected)
                  if diffuse_scale is not None else diffuse)
     return diffuse, corrected
-
-
 
 
 def select_only(objects, active=None):
