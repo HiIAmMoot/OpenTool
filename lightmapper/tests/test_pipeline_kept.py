@@ -443,10 +443,6 @@ def test_the_manifest_records_where_the_bake_wrote(tiny, tmp_path):
     other = kept_work(tmp_path, tags, 'b')
     api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='lit', work=other, keep=True)
     assert kept.read_manifest(other).output_scenario == 'lit'
-    third = kept_work(tmp_path, tags, 'c')
-    api().bake(tags, 'level', 'room', settings, out_bsp='copy', kept_scenario='lit2', work=third, keep=True)
-    assert kept.read_manifest(third).output_scenario == 'lit2'
-    assert not resolve_reference_path(tags, 'scnr', 'lit2').exists()
 
 
 def test_the_manifest_holds_an_absolute_tags_folder(tiny, tmp_path, monkeypatch):

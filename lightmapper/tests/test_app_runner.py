@@ -495,6 +495,9 @@ def test_runner_keeps_under_the_kept_root(tiny, tmp_path):
     assert out.status == 'done'
     assert kept.latest(tmp_path / 'kept', tiny[0], 'level', 'room') == out.work
     assert kept.read_manifest(out.work).bsp == 'room'
+    # the app writes its lit scenario itself (it keeps the other BSPs' earlier lit references), so the CLI must not
+    # rewrite it from the kept copy
+    assert kept.read_manifest(out.work).output_scenario == ''
 
 
 def forbid_blender(monkeypatch):

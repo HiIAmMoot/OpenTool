@@ -302,7 +302,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
           out_scenario: str | None = None, work: Path | None = None, sources: str = 'all',
           charts: Path | None = None, dry_run: bool = False,
           progress: Callable[[str], None] | None = None, backups: bool = True, keep: bool = False,
-          reuse: bool = False, kept_scenario: str | None = None) -> BakeOutput:
+          reuse: bool = False) -> BakeOutput:
     if keep and (sources != 'all' or dry_run):
         raise ValueError('a kept bake must be a full bake that writes tags')
     if keep and work is None:
@@ -583,7 +583,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             tags=str(Path(tags).resolve()), scenario=scenario, bsp=bsp, input_path=input_path,
             has_template=template is not None, vertex_device=vertex_device, glow_device=glow_device,
             glow_reason=glow_reason, settings=asdict(s), kept_at=datetime.now().isoformat(timespec='seconds'),
-            output_path=output_path, output_scenario=out_scenario or kept_scenario or ''))
+            output_path=output_path, output_scenario=out_scenario or ''))
         # (only a folder inside the level's kept folder holds older kept bakes: a work folder the caller named
         # may sit beside anything)
         if work.parent.name == kept.level_folder(Path(), tags, scenario, bsp).name:

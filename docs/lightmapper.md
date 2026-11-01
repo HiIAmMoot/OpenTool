@@ -116,7 +116,7 @@ A bake made with `--keep` can be written to the tags again without baking, for e
 python lightmap.py write bake\bloodgulch --32bit
 ```
 
-`write <work>` takes the kept bake's folder (the `Work:` line a kept bake printed, or the `--work` folder it was kept in). Neither Blender nor the vertex pass runs, so it takes seconds. It writes the tags the bake wrote: the `--out-bsp` and `--out-scenario` names the bake used, or the input BSP in place when the bake was in place. In the example above, a bake made with `--out-bsp bloodgulch_lit --keep --work bakeloodgulch` is written to `bloodgulch_lit` again and the unlit source stays as it is. The report's `Wrote:` line names the BSP tag it wrote.
+`write <work>` takes the kept bake's folder (the `Work:` line a kept bake printed, or the `--work` folder it was kept in). Neither Blender nor the vertex pass runs, so it takes seconds. It writes the tags the bake wrote: the `--out-bsp` and `--out-scenario` names the bake used, or the input BSP in place when the bake was in place. In the example above, a bake made with `--out-bsp bloodgulch_lit --keep --work bake\bloodgulch` is written to `bloodgulch_lit` again and the unlit source stays as it is. The report's `Wrote:` line names the BSP tag it wrote.
 
 - `--tags` defaults to the tags folder the bake was kept with. The level, its BSP and the scenario written come from the kept copies, not from the tags as they are now.
 - `--settings file.json` and the `--out-bsp`, `--out-scenario` and `--no-backups` options work as for `bake`; naming `--out-bsp` writes there instead of where the bake wrote. Without `--settings`, the settings the bake was kept with are used.

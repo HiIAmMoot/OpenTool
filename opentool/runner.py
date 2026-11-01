@@ -203,7 +203,7 @@ def run_bake(request: BakeRequest, emit: Callable[[tuple], None]) -> BakeOutcome
         result = pipeline.bake(request.tags, request.scenario, request.bsp, request.settings,
                                out_bsp=bsp_target, out_scenario=None, work=work, progress=progress,
                                backups=request.backups, charts=request.charts, keep=request.keep,
-                               reuse=reuse is not None, kept_scenario=out_scenario)
+                               reuse=reuse is not None)
         if out_scenario is not None:
             write_lit_scenario(request.tags, request.scenario, request.bsp, out_bsp, out_scenario,
                                backups=request.backups,
