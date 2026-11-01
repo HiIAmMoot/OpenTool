@@ -1,25 +1,9 @@
 """Written sub-samples, including black ones, contribute equally to a page texel."""
 
-import importlib.util
-import sys
 import types
 
 import numpy as np
 import pytest
-
-from lightmapper.blender_job import BAKE_SCRIPT
-
-
-@pytest.fixture
-def bake_module(monkeypatch):
-    # only Blender imports are stubbed; the numpy helper is the production implementation
-    for name in ('bpy', 'mathutils', 'mathutils.bvhtree'):
-        monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
-    sys.modules['mathutils.bvhtree'].BVHTree = None
-    spec = importlib.util.spec_from_file_location('lm_bake', BAKE_SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_downsample_averages_only_written_subsamples(bake_module):

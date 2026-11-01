@@ -1,10 +1,14 @@
 """Keep OpenTool importable without installing it."""
 
+import importlib.util
 import os
 from pathlib import Path
 import sys
+import types
 
 import pytest
+
+from lightmapper.blender_job import BAKE_SCRIPT
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -13,6 +17,22 @@ HCEEK_TAGS = Path(os.environ['HCEEK_TAGS']) if os.environ.get('HCEEK_TAGS') else
 LIGHTMAPPER_BLENDER = Path(os.environ.get(
     "LIGHTMAPPER_BLENDER", r"C:\Program Files\Blender Foundation\Blender 5.2\blender.exe"
 ))
+
+
+def load_bake_module(patch):
+    # only Blender imports are stubbed; the numpy helper is the production implementation
+    for name in ('bpy', 'mathutils', 'mathutils.bvhtree'):
+        patch.setitem(sys.modules, name, types.ModuleType(name))
+    sys.modules['mathutils.bvhtree'].BVHTree = None
+    spec = importlib.util.spec_from_file_location('lm_bake', BAKE_SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def bake_module(monkeypatch):
+    return load_bake_module(monkeypatch)
 
 
 @pytest.fixture

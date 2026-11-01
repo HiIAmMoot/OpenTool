@@ -13,7 +13,7 @@ The two-closure diffuse bake is restored on flagged sub-texels before averaging,
 The vertex pass still receives the uncorrected diffuse page; mixed texels never scale a neighbour's light.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import math
 import os
@@ -802,6 +802,271 @@ def merge_extra(base, owned, base_spp, tiers, extra):
         weight = effective_samples(part, base_spp, [(spp, mask[rows]) for spp, mask in tiers])
         merged[rows] = total / np.maximum(weight, 1)[:, :, None]
     return merged
+
+
+# Blender's bake raster samples a pixel at this offset from its corner (bake.cc subtracts 0.501, 0.502 before scan conversion)
+RASTER_POINT = (0.501, 0.502)
+# widens a slot's footprint square to hold the jitter footprint the raster offset shifts (b9 spike report)
+ATLAS_EPS = 0.02
+# slot pixels sit on a grid this far apart, from this corner, so the triangle around each has room (b9 spike report)
+ATLAS_STRIDE = 4
+ATLAS_OFFSET = 2
+# how far, in pixels, a triangle may fall short of a pixel centre and still count as covering it
+ATLAS_SLACK = 0.01
+MAX_ATLAS = 8192
+
+
+def subtexel_owner(scene, page, width, height):
+    width, height = 3 * width, 3 * height
+    owner = np.full((height, width), -1, np.int32)
+    uv = flip_v(scene['lm_uv']).astype(np.float64) * [width, height]
+    for t in np.flatnonzero(scene['tri_page'] == page):
+        a, b, c = uv[scene['tris'][t]]
+        x0 = max(0, math.ceil(min(a[0], b[0], c[0]) - 1))
+        x1 = min(width - 1, math.floor(max(a[0], b[0], c[0])))
+        y0 = max(0, math.ceil(min(a[1], b[1], c[1]) - 1))
+        y1 = min(height - 1, math.floor(max(a[1], b[1], c[1])))
+        if x1 < x0 or y1 < y0:
+            continue
+        x = np.arange(x0, x1 + 1, dtype=np.float64)[None, :] + RASTER_POINT[0]
+        # row strips bound the edge-function temporaries even for a triangle spanning a whole page
+        for first in range(y0, y1 + 1, 64):
+            end = min(first + 64, y1 + 1)
+            y = np.arange(first, end, dtype=np.float64)[:, None] + RASTER_POINT[1]
+            ab = (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])
+            bc = (c[0] - b[0]) * (y - b[1]) - (c[1] - b[1]) * (x - b[0])
+            ca = (a[0] - c[0]) * (y - c[1]) - (a[1] - c[1]) * (x - c[0])
+            inside = ((ab >= 0) & (bc >= 0) & (ca >= 0)) | ((ab <= 0) & (bc <= 0) & (ca <= 0))
+            block = owner[first:end, x0:x1 + 1]
+            block[inside & (block < 0)] = t
+    return owner
+
+
+@dataclass
+class Atlas:
+    slots: np.ndarray
+    owner: np.ndarray
+    role: np.ndarray
+    twin: np.ndarray
+    triangles: np.ndarray | None = None
+    needed: np.ndarray | None = None
+    pixels: np.ndarray | None = None
+    side: int = 0
+
+
+def plan_atlas(written, mask, owner, two_sided):
+    chosen = written & np.repeat(np.repeat(mask, 3, axis=0), 3, axis=1)
+    rows, cols = np.nonzero(chosen)
+    own = owner[rows, cols]
+    # (a written sub-texel no triangle owns has no geometry to copy: the caller bakes the page instead)
+    if (own < 0).any():
+        return None
+    flagged = two_sided[own]
+    front = np.flatnonzero(flagged)
+    count, extra = len(own), len(front)
+    twin = np.full(count + extra, -1, np.int64)
+    twin[front] = count + np.arange(extra)
+    twin[count:] = front
+    xy = np.column_stack([cols, rows]).astype(np.int64)
+    return Atlas(slots=np.concatenate([xy, xy[front]]), owner=np.concatenate([own, own[front]]).astype(np.int32),
+                 role=np.concatenate([flagged.astype(np.int8), np.full(extra, 2, np.int8)]), twin=twin)
+
+
+def _clip(poly, tri):
+    sign = np.sign((tri[1, 0] - tri[0, 0]) * (tri[2, 1] - tri[0, 1]) - (tri[1, 1] - tri[0, 1]) * (tri[2, 0] - tri[0, 0]))
+    out = list(poly)
+    for i in range(3):
+        a, b = tri[i], tri[(i + 1) % 3]
+        src, out = out, []
+        for k in range(len(src)):
+            p, q = src[k], src[(k + 1) % len(src)]
+            sp = sign * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]))
+            sq = sign * ((b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0]))
+            if sp >= 0:
+                out.append(p)
+            if (sp >= 0) != (sq >= 0):
+                out.append(p + sp / (sp - sq) * (q - p))
+        if not out:
+            return np.zeros((0, 2))
+    return np.array(out)
+
+
+def _needed_edges(clipped, tri):
+    scale = max(1.0, np.abs(tri).max())
+    need = []
+    for i in range(3):
+        a, b = tri[i], tri[(i + 1) % 3]
+        d = b - a
+        reach = 1e-9 * scale * np.hypot(*d)
+        for k in range(len(clipped)):
+            p, r = clipped[k], clipped[(k + 1) % len(clipped)]
+            # (a side lying along the edge is the owner's edge cutting the footprint; a corner touching it is not)
+            if (np.hypot(*(r - p)) > 1e-7 and abs(d[0] * (p[1] - a[1]) - d[1] * (p[0] - a[0])) <= reach
+                    and abs(d[0] * (r[1] - a[1]) - d[1] * (r[0] - a[0])) <= reach):
+                need.append(i)
+                break
+    return need
+
+
+def _slot_triangle(col, row, tri):
+    # one triangle T' that equals the owner on the slot's widened footprint square and reaches no further than it must:
+    # two triangles would sample only part of the footprint (Cycles keeps a jittered sample inside the triangle that
+    # holds the pixel's centre), and a square past the owner's edges would sample area the page never does
+    clipped = _clip(np.array([[col - ATLAS_EPS, row - ATLAS_EPS], [col + 1 + ATLAS_EPS, row - ATLAS_EPS],
+                              [col + 1 + ATLAS_EPS, row + 1 + ATLAS_EPS], [col - ATLAS_EPS, row + 1 + ATLAS_EPS]]), tri)
+    need = _needed_edges(clipped, tri)
+    if len(need) == 3:
+        return tri.copy(), 3
+    if len(need) == 2:
+        edges = {0: (0, 1), 1: (1, 2), 2: (2, 0)}
+        shared = (set(edges[need[0]]) & set(edges[need[1]])).pop()
+        others = [v for v in (0, 1, 2) if v != shared]
+        corner = tri[shared]
+        da, db = tri[others[0]] - corner, tri[others[1]] - corner
+        ab = np.linalg.solve(np.column_stack([da, db]), (clipped - corner).T)
+        # (the margin keeps the footprint's far corners inside T', whose far side then stays inside the owner)
+        t = ab.sum(axis=0).max() * (1 + 1e-6) + 1e-6
+        return np.array([corner, corner + t * da, corner + t * db]), 2
+    if len(need) == 1:
+        a, b = tri[need[0]], tri[(need[0] + 1) % 3]
+        d = (b - a) / np.hypot(*(b - a))
+        m = np.array([-d[1], d[0]])
+        if (tri[(need[0] + 2) % 3] - a) @ m < 0:
+            m = -m
+        along, height = (clipped - a) @ d, (clipped - a) @ m
+        lo, hi, top = along.min(), along.max(), max(height.max(), 0) + 1e-3
+        return np.array([a + (lo - top) * d, a + (hi + top) * d, a + 0.5 * (lo + hi) * d + (0.5 * (hi - lo) + top) * m]), 1
+    # (the widened footprint lies inside the owner, so the smallest right triangle around it does)
+    x0, y0, side = col - ATLAS_EPS, row - ATLAS_EPS, 1 + 2 * ATLAS_EPS
+    return np.array([[x0, y0], [x0 + 2 * side + 0.01, y0], [x0, y0 + 2 * side + 0.01]]), 0
+
+
+def _covers(tri, px, py):
+    a, b, c = tri
+    sign = np.sign((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+    inside = np.ones(np.broadcast(px, py).shape, bool)
+    for p, q in ((a, b), (b, c), (c, a)):
+        inside &= sign * ((q[0] - p[0]) * (py - p[1]) - (q[1] - p[1]) * (px - p[0])) / np.hypot(*(q - p)) >= -ATLAS_SLACK
+    return inside
+
+
+def _page_corners(scene, width, height):
+    # the lightmap UVs as Blender's raster sees them: float32 after the flip, then scaled to sub-texel pixels
+    return flip_v(scene['lm_uv']).astype(np.float64)[scene['tris']] * [3 * width, 3 * height]
+
+
+def place_atlas(scene, atlas, width, height):
+    corners = _page_corners(scene, width, height)
+    area = ((corners[:, 1, 0] - corners[:, 0, 0]) * (corners[:, 2, 1] - corners[:, 0, 1])
+            - (corners[:, 1, 1] - corners[:, 0, 1]) * (corners[:, 2, 0] - corners[:, 0, 0]))
+    # (a zero-area owner has no barycentrics to place the slot's corners by)
+    if (area[atlas.owner] == 0).any():
+        return None
+    count = len(atlas.slots)
+    triangles = np.empty((count, 3, 2))
+    needed = np.empty(count, np.int8)
+    for k in range(count):
+        # (a back copy repeats its front copy's footprint)
+        source = atlas.twin[k] if atlas.role[k] == 2 else k
+        if source != k:
+            triangles[k], needed[k] = triangles[source], needed[source]
+        else:
+            triangles[k], needed[k] = _slot_triangle(*atlas.slots[k], corners[atlas.owner[k]])
+    n_cols = int(math.ceil(math.sqrt(1.3 * count)))
+    pixels = np.empty((count, 2), np.int64)
+    occupied, covered = set(), set()
+    cell = 0
+    for k in range(count):
+        relative = triangles[k] - atlas.slots[k]
+        while True:
+            ax, ay = ATLAS_OFFSET + ATLAS_STRIDE * (cell % n_cols), ATLAS_OFFSET + ATLAS_STRIDE * (cell // n_cols)
+            cell += 1
+            # (a cell under an earlier triangle would bake that slot's neighbour; one whose triangle reaches an earlier
+            # slot's centre would overwrite it)
+            if (ax, ay) in covered:
+                continue
+            tri = relative + [ax, ay]
+            lo, hi = np.floor(tri.min(axis=0) - 1).astype(int), np.ceil(tri.max(axis=0) + 1).astype(int)
+            gx, gy = np.meshgrid(np.arange(lo[0], hi[0] + 1), np.arange(lo[1], hi[1] + 1))
+            inside = _covers(tri, gx + 0.5, gy + 0.5)
+            mine = set(zip(gx[inside].tolist(), gy[inside].tolist()))
+            if any(pixel != (ax, ay) and pixel in occupied for pixel in mine):
+                continue
+            occupied.add((ax, ay))
+            covered |= mine
+            pixels[k] = ax, ay
+            break
+        if max(ax, ay) + ATLAS_STRIDE + ATLAS_OFFSET + 4 > MAX_ATLAS:
+            return None
+    side = int(pixels.max()) + ATLAS_STRIDE + ATLAS_OFFSET + 4 if count else 0
+    return replace(atlas, triangles=triangles, needed=needed, pixels=pixels, side=side)
+
+
+def _face_normal(corners):
+    normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    length = np.linalg.norm(normal, axis=1, keepdims=True)
+    return normal / np.where(length > 0, length, 1)
+
+
+def _separation(corners):
+    spacing = np.spacing(np.abs(corners).astype(np.float32)).max(axis=(1, 2))
+    return np.maximum(TWIN_SEPARATION, TWIN_SEPARATION_STEPS * spacing.astype(np.float64))
+
+
+def _bake_corners(scene):
+    # the corners as build_objects leaves them on the bake mesh: twins moved off their partner, all rounded to float32
+    tris = scene['tris']
+    corners = scene['positions'][tris].astype(np.float64)
+    paired = scene['tri_twin'][:len(tris)] >= 0
+    moved = corners[paired] + _separation(corners[paired])[:, None, None] * _face_normal(corners[paired])[:, None]
+    corners = corners.astype(np.float32).astype(np.float64)
+    corners[paired] = moved.astype(np.float32).astype(np.float64)
+    return corners
+
+
+def atlas_mesh(scene, atlas, width, height):
+    owner = atlas.owner
+    page = _page_corners(scene, width, height)[owner]
+    a = page[:, 0]
+    d1, d2 = page[:, 1] - a, page[:, 2] - a
+    det = d1[:, 0] * d2[:, 1] - d1[:, 1] * d2[:, 0]
+    r = atlas.triangles - a[:, None]
+    u = (r[..., 0] * d2[:, None, 1] - r[..., 1] * d2[:, None, 0]) / det[:, None]
+    v = (d1[:, None, 0] * r[..., 1] - d1[:, None, 1] * r[..., 0]) / det[:, None]
+    # (a corner outside the owner has barycentrics outside [0, 1]; the plane extends the surface there)
+    lam = np.stack([1 - u - v, u, v], axis=-1)
+    bake = _bake_corners(scene)[owner]
+    normal = _face_normal(bake)
+    # the back copy of a both_sides slot sits behind the surface, where the Translucent closure bakes the light from behind
+    offset = np.where(atlas.role == 2, -1.0, 1.0) * _separation(bake)
+    positions = np.einsum('nkb,nbd->nkd', lam, bake) + (offset[:, None] * normal)[:, None]
+    # (a flipped winding would make Cycles shade the owner's back face)
+    swap = np.einsum('nd,nd->n', np.cross(positions[:, 1] - positions[:, 0], positions[:, 2] - positions[:, 0]), normal) <= 0
+    order = np.where(swap[:, None], [0, 2, 1], [0, 1, 2])
+    rows = np.arange(len(owner))[:, None]
+    uv = (atlas.triangles - atlas.slots[:, None] + atlas.pixels[:, None]) / atlas.side
+    normals = np.einsum('nkb,nbd->nkd', lam, scene['normals'].astype(np.float64)[scene['tris'][owner]])
+    tex_uv = np.einsum('nkb,nbd->nkd', lam, flip_v(scene['tex_uv']).astype(np.float64)[scene['tris'][owner]])
+    return dict(positions=positions[rows, order].reshape(-1, 3).astype(np.float32),
+                tris=np.arange(3 * len(owner), dtype=np.int32).reshape(-1, 3),
+                normals=normals[rows, order].reshape(-1, 3).astype(np.float32),
+                tex_uv=tex_uv[rows, order].reshape(-1, 2).astype(np.float32),
+                atlas_uv=uv[rows, order].reshape(-1, 2).astype(np.float32),
+                material_tri=owner.astype(np.int32))
+
+
+def scatter_atlas(atlas, values, buffer_shape):
+    buffer = np.full((*buffer_shape[:2], 3), -1, np.float32)
+    got = values[atlas.pixels[:, 1], atlas.pixels[:, 0]]
+    ok = (got >= 0).all(axis=1)
+    single = (atlas.role == 0) & ok
+    buffer[atlas.slots[single, 1], atlas.slots[single, 0]] = got[single]
+    front = np.flatnonzero(atlas.role == 1)
+    both = ok[front] & ok[atlas.twin[front]]
+    # (the DIFFUSE pass divides by the summed closure colour, so the two-closure page value is the halves' mean)
+    mean = 0.5 * (got[front] + got[atlas.twin[front]])
+    buffer[atlas.slots[front[both], 1], atlas.slots[front[both], 0]] = mean[both]
+    return buffer, int(((atlas.role == 0) & ~ok).sum() + (~both).sum())
 
 
 def warn_if_masks_differ(diffuse_written, emit_written, page):
