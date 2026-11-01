@@ -17,6 +17,7 @@ import tempfile
 from zipfile import BadZipFile
 
 import numpy as np
+from scipy.ndimage import maximum_filter, minimum_filter
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
@@ -687,8 +688,120 @@ def _pack_rectangles(pieces, s):
     return _finish(pages, extents, s)
 
 
+def _fit_residual(source: np.ndarray, target: np.ndarray) -> float:
+    design = np.column_stack([source, np.ones(len(source))])
+    fit = np.linalg.lstsq(design, target, rcond=None)[0]
+    return float(((design @ fit - target) ** 2).sum())
+
+
+def _nest_at(parts, side: int, s: ChartSettings):
+    atlas = xatlas_c.Atlas()
+    for part in parts:
+        atlas.add_uv_mesh((part[3] - part[3].min(axis=0)).astype(np.float32), part[4])
+    atlas.generate(xatlas_c.PackSettings(resolution=side - 2 * s.padding, texels_per_unit=1.0, padding=s.padding,
+                                         bilinear=True, rotate_charts=True, rotate_charts_to_axis=False,
+                                         brute_force=False))
+    pages = [[] for _ in range(max(atlas.page_count, 1))]
+    extent = np.zeros((len(pages), 2))
+    for m, part in enumerate(parts):
+        verts, indices = atlas.vertices(m), atlas.indices(m)
+        placed = (verts['atlas'][indices] >= 0).all(axis=1)
+        if not placed.any() or np.any((verts['atlas'][indices] >= 0).any(axis=1) & ~placed):
+            return None
+        used = np.unique(indices[placed])
+        # (a part moves as one: a second chart or page would need the rectangle layout)
+        if len(np.unique(verts['atlas'][used])) != 1 or len(np.unique(verts['chart'][used])) != 1:
+            return None
+        page = int(verts['atlas'][used[0]])
+        uv = part[3].astype(np.float64)
+        source, target = uv[verts['xref'][used]], verts['uv'][used].astype(np.float64)
+        straight = _fit_residual(source[:, 0], target[:, 0]) + _fit_residual(source[:, 1], target[:, 1])
+        turned = _fit_residual(source[:, 1], target[:, 0]) + _fit_residual(source[:, 0], target[:, 1])
+        # (xatlas swaps x and y for a turned chart and records nothing, and it stretches a chart to whole texels:
+        # only the swap and the position are taken, never the stretch)
+        if turned < straight:
+            uv, source = uv[:, ::-1], source[:, ::-1]
+        moved = (uv + (target.min(axis=0) - source.min(axis=0))).astype(part[3].dtype)
+        pages[page].append((*part[:3], moved, *part[4:]))
+        extent[page] = np.maximum(extent[page], moved.max(axis=0))
+    keep = [i for i, pieces in enumerate(pages) if pieces]
+    if np.any(extent[keep] + 2 * s.padding > side):
+        return None
+    return _finish([pages[i] for i in keep], extent[keep], replace(s, page_max=side))
+
+
+def _nest_pack(parts, s: ChartSettings) -> list[OutPage] | None:
+    top = s.page_max
+    side = max(s.page_min, next_pow2(max(int(_padded_size(part[3], s.padding).max()) for part in parts)))
+    best = None
+    while side <= top:
+        candidate = _nest_at(parts, side, s)
+        if candidate is not None:
+            key = (len(candidate), _pages_area(candidate))
+            if best is None or key < best[0]:
+                best = key, candidate
+        side *= 2
+    return None if best is None else best[1]
+
+
+def _pages_area(pages) -> int:
+    return sum(page.width * page.height for page in pages)
+
+
+def _touched_cells(a, b, c, eps=1e-3):
+    # the texels whose open cell meets the open triangle (a separating-axis test; an edge on a cell boundary touches
+    # only the cell it covers). eps absorbs the float32 rounding of the stored uvs
+    low, high = np.minimum(np.minimum(a, b), c), np.maximum(np.maximum(a, b), c)
+    x0, y0 = np.floor(low + eps).astype(np.int64)
+    x1, y1 = np.ceil(high - eps).astype(np.int64)
+    if x1 <= x0 or y1 <= y0:
+        return np.empty(0, np.int64), np.empty(0, np.int64)
+    xs, ys = np.meshgrid(np.arange(x0, x1), np.arange(y0, y1))
+    xs, ys = xs.ravel(), ys.ravel()
+    keep = np.ones(len(xs), bool)
+    for p, q, r in ((a, b, c), (b, c, a), (c, a, b)):
+        normal = np.array([p[1] - q[1], q[0] - p[0]])
+        reach = sorted((normal @ p, normal @ r))
+        tol = eps * np.hypot(*normal)
+        base = normal[0] * xs + normal[1] * ys
+        keep &= (base + min(0, normal[0]) + min(0, normal[1]) < reach[1] - tol) & \
+                (base + max(0, normal[0]) + max(0, normal[1]) > reach[0] + tol)
+    return xs[keep], ys[keep]
+
+
+def _charts_separated(pages: list[OutPage], s: ChartSettings) -> bool:
+    reach = 2 * s.padding
+    big = np.iinfo(np.int32).max
+    for page in pages:
+        label = np.zeros((page.height, page.width), np.int32)
+        count = 0
+        for material in page.materials:
+            texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            n = len(material.env)
+            edges = np.concatenate([material.tris[:, [0, 1]], material.tris[:, [1, 2]]])
+            graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n))
+            # (a chart is a placed part, which keeps its own vertices: its triangles are one connected component)
+            chart = connected_components(graph, directed=False)[1] + count + 1
+            count = int(chart.max())
+            for tri in material.tris:
+                xs, ys = _touched_cells(*texels[tri])
+                if len(xs) and (xs.min() < 0 or ys.min() < 0 or xs.max() >= page.width or ys.max() >= page.height):
+                    return False
+                id_ = chart[tri[0]]
+                if np.any((label[ys, xs] != 0) & (label[ys, xs] != id_)):
+                    return False
+                label[ys, xs] = id_
+        size = 2 * reach + 1
+        # (a texel with another chart's label anywhere within the reach shows in the filtered maximum or minimum)
+        highest = maximum_filter(label, size=size, mode='constant', cval=0)
+        lowest = minimum_filter(np.where(label == 0, big, label), size=size, mode='constant', cval=big)
+        if np.any((label != 0) & ((highest != label) | (lowest != label))):
+            return False
+    return True
+
+
 def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
-                   s: ChartSettings) -> list[OutPage]:
+                   s: ChartSettings, nest: bool = False) -> list[OutPage]:
     if len(radiosity) != len(groups):
         raise ValueError('one shader radiosity per source group is required')
     top = s.resolved_page_max
@@ -739,4 +852,26 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
             side *= 2
             continue
         logger.info('bake side %d: %d piece(s) split into %d parts', side, split, made)
+        if nest:
+            pages = _nested_or(pages, parts, side_s)
         return pages
+
+
+def _nested_or(rectangles, parts, s):
+    nested = _nest_pack(parts, s)
+    if nested is None:
+        logger.info('nesting: a chart could not be placed whole, keeping the rectangle layout')
+        return rectangles
+    try:
+        _check_caps(nested, s)
+    except CapError as error:
+        logger.info('nesting: %s, keeping the rectangle layout', error)
+        return rectangles
+    if not _charts_separated(nested, s):
+        logger.info('nesting: charts too close, keeping the rectangle layout')
+        return rectangles
+    if (len(nested), _pages_area(nested)) > (len(rectangles), _pages_area(rectangles)):
+        logger.info('nesting: not smaller than the rectangle layout (%d texels against %d), keeping it',
+                    _pages_area(nested), _pages_area(rectangles))
+        return rectangles
+    return nested

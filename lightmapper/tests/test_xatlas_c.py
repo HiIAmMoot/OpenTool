@@ -59,3 +59,31 @@ def test_frozen_missing_library_says_unzip_again(monkeypatch, tmp_path):
     monkeypatch.setattr(xatlas_c, '_find_clang', lambda: pytest.fail('frozen must not compile'))
     with pytest.raises(RuntimeError, match='unzip the download again'):
         xatlas_c.library()
+
+
+def rotated_quad(degrees):
+    turn = np.radians(degrees)
+    rotation = np.array([[np.cos(turn), -np.sin(turn)], [np.sin(turn), np.cos(turn)]])
+    return (np.array([[0, 0], [200, 0], [200, 100], [0, 100]], float) @ rotation.T + 200).astype(np.float32), np.array([[0, 1, 2], [0, 2, 3]])
+
+
+def packed_quad(**options):
+    # (xatlas stretches a chart to whole texels, hence the large quad: the angle moves by about 1/200)
+    uvs, tris = rotated_quad(30)
+    atlas = xatlas_c.Atlas()
+    atlas.add_uv_mesh(uvs, tris)
+    atlas.generate(xatlas_c.PackSettings(resolution=512, texels_per_unit=1.0, padding=2, **options))
+    verts = atlas.vertices(0)
+    out = verts['uv'][atlas.indices(0)]
+    source = uvs[verts['xref'][atlas.indices(0)]]
+    return source, out
+
+
+def test_rotate_charts_to_axis_off_keeps_the_chart_angle():
+    source, out = packed_quad(rotate_charts_to_axis=False)
+    for before, after in zip(source[:, 1] - source[:, 0], out[:, 1] - out[:, 0]):
+        angle = np.arctan2(before[1], before[0])
+        assert min(abs(np.arctan2(after[1], after[0]) - angle), abs(np.arctan2(after[0], after[1]) - angle)) < 1e-3
+    kept = np.ptp(out.reshape(-1, 2), axis=0)
+    _, aligned = packed_quad()
+    assert not np.allclose(np.sort(np.ptp(aligned.reshape(-1, 2), axis=0)), np.sort(kept), atol=1.0)

@@ -1104,3 +1104,271 @@ def test_island_with_no_world_area_is_recharted_alone(caplog):
     assert '0 island(s) split' in caplog.text and '1 island(s) charted normally (no texture or world area)' in caplog.text
     assert island_fit_residual(pages, 0, 5) < 1e-3
     assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2]
+
+
+def rect_group(sizes, name='shader', sid0=0):
+    # separate quads w x h texels at texels_per_unit 1, each with its own texture uvs (uniform scale, so no stretch)
+    pos, uvs, tris = [], [], []
+    for i, (w, h) in enumerate(sizes):
+        base = len(pos)
+        for x, y in ((0, 0), (w, 0), (w, h), (0, h)):
+            pos.append([i * 1000 + x, y, 0])
+            uvs.append([i * 2 + x / 1000, y / 1000])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name, sid0=sid0)
+
+
+def nest_settings(**options):
+    return ChartSettings(texels_per_unit=1.0, page_max='auto', **options)
+
+
+def simple(count=1):
+    return [radiosity(SIMPLE_PARAMETERIZATION)] * count
+
+
+def scattered_islands():
+    sizes = np.random.default_rng(1).uniform(6, 60, (30, 2))
+    return rect_group([tuple(size) for size in sizes])
+
+
+def total_area(pages):
+    return sum(p.width * p.height for p in pages)
+
+
+def same_layout(a, b):
+    assert [(p.width, p.height) for p in a] == [(p.width, p.height) for p in b]
+    for page_a, page_b in zip(a, b):
+        assert len(page_a.materials) == len(page_b.materials)
+        for m, n in zip(page_a.materials, page_b.materials):
+            np.testing.assert_array_equal(m.lm, n.lm)
+            np.testing.assert_array_equal(m.tris, n.tris)
+            np.testing.assert_array_equal(m.surface_ids, n.surface_ids)
+
+
+class NestSpy:
+    def __init__(self, monkeypatch):
+        from lightmapper import charts
+        self.calls = []
+        real = charts._nest_pack
+
+        def spy(parts, s):
+            result = real(parts, s)
+            self.calls.append((parts, s, result))
+            return result
+        monkeypatch.setattr(charts, '_nest_pack', spy)
+
+
+def corners_by_surface(pages):
+    found = {}
+    for page in pages:
+        for m in page.materials:
+            texels = m.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            for tri, sid in zip(m.tris, m.surface_ids):
+                found[int(sid)] = texels[tri]
+    return found
+
+
+def test_hollow_chart_holds_a_smaller_chart():
+    # a frame island (100 texels out, a 60 texel hole) and a 20 texel island, as one group
+    pos, uvs, tris = [], [], []
+    edges = [0, 20, 80, 100]
+    for y in edges:
+        for x in edges:
+            pos.append([x, y, 0])
+            uvs.append([x / 1000, y / 1000])
+    for cy in range(3):
+        for cx in range(3):
+            if (cx, cy) != (1, 1):
+                a = cy * 4 + cx
+                tris.extend([[a, a + 1, a + 5], [a, a + 5, a + 4]])
+    base = len(pos)
+    for x, y in ((0, 0), (20, 0), (20, 20), (0, 20)):
+        pos.append([2000 + x, y, 0])
+        uvs.append([2 + x / 1000, y / 1000])
+    tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs)
+    nested = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    rects = chart_and_pack([group], simple(), nest_settings(), nest=False)
+    assert [(p.width, p.height) for p in nested] == [(128, 128)]
+    assert total_area(rects) > total_area(nested)
+    corners = corners_by_surface(nested)
+    frame = np.concatenate([corners[i] for i in range(16)])
+    small = np.concatenate([corners[16], corners[17]])
+    assert np.all(small.min(axis=0) > frame.min(axis=0)) and np.all(small.max(axis=0) < frame.max(axis=0))
+
+
+def test_nested_charts_keep_the_full_gap():
+    from lightmapper.charts import _charts_separated
+    s = nest_settings()
+    pages = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    assert _charts_separated(pages, s)
+    for page in pages:
+        assert rasterise(page).max() <= 1
+
+
+def test_rectangle_layout_passes_the_gap_check():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=256)
+    # (integer extents put every edge on a texel boundary)
+    pieces = [piece_from_grid(2, 10), piece_from_grid(1, 7), piece_from_grid(3, 9), piece_from_grid(4, 5)]
+    assert _charts_separated(_pack_rectangles(pieces, s), s)
+
+
+def test_charts_closer_than_the_gap_are_not_separated():
+    from lightmapper.charts import _charts_separated
+    s = nest_settings()
+    pages = chart_and_pack([rect_group([(20, 20), (20, 20)])], simple(), s)
+    assert _charts_separated(pages, s)
+    page = pages[0]
+    material = page.materials[0]
+    labels = connected_components_of(material)
+    texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+    centres = [texels[labels == k].mean(axis=0) for k in (0, 1)]
+    axis = int(np.argmax(np.abs(centres[1] - centres[0])))
+    moved = material.lm.copy()
+    step = np.sign(centres[0][axis] - centres[1][axis]) / [page.width, page.height][axis]
+    moved['texcoord'][labels == 1, axis] += step
+    squeezed = [type(page)(page.width, page.height, [type(material)(material.group, material.env, moved,
+                                                                    material.tris, material.surface_ids)])]
+    assert not _charts_separated(squeezed, s)
+
+
+def connected_components_of(material):
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = len(material.env)
+    edges = np.concatenate([material.tris[:, [0, 1]], material.tris[:, [1, 2]]])
+    return connected_components(coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n)), directed=False)[1]
+
+
+def test_nested_pack_keeps_texel_areas(monkeypatch):
+    from lightmapper.charts import _piece_areas, _packing_areas
+    spy = NestSpy(monkeypatch)
+    group = rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
+    pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, _, result = spy.calls[0]
+    assert result is not None and pages is result
+    np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
+
+
+def test_nested_pack_keeps_the_areas_of_parts_with_fractional_extents():
+    # (charts xatlas made already have whole-texel extents, but a bisected part's cut edge does not, and xatlas
+    # stretches such a chart to whole texels when it packs it again)
+    from lightmapper.charts import _nest_pack, _packing_areas, _piece_areas
+    s = ChartSettings(page_max=256)
+    parts = [piece_from_grid(2, 18.65), piece_from_grid(3, 7.3), piece_from_grid(1, 33.45)]
+    pages = _nest_pack(parts, s)
+    assert pages is not None
+    np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
+
+
+def test_nested_pack_only_translates_or_swaps(monkeypatch):
+    spy = NestSpy(monkeypatch)
+    pages = chart_and_pack([rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)], simple(), nest_settings(), nest=True)
+    parts, s, result = spy.calls[0]
+    assert pages is result
+    new = corners_by_surface(pages)
+    for part in parts:
+        old = part[3][part[4]]
+        sids = [int(i) for i in part[5]]
+        moved = np.array([new[i] - s.padding for i in sids])
+        shift = moved - old
+        swapped_shift = moved - old[:, :, ::-1]
+        assert min(np.ptp(shift.reshape(-1, 2), axis=0).max(), np.ptp(swapped_shift.reshape(-1, 2), axis=0).max()) < 1e-3
+
+
+def test_a_turned_chart_is_read_back_swapped(monkeypatch):
+    spy = NestSpy(monkeypatch)
+    # (found by search: thin charts of both orientations, where xatlas turns some to fit them in)
+    group = rect_group([(87, 17), (72, 12), (8, 84), (22, 88), (66, 6), (53, 8), (6, 95), (9, 89), (17, 105), (8, 90),
+                        (50, 14), (99, 13), (78, 16)])
+    pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, s, result = spy.calls[0]
+    assert result is not None and pages is result
+    new = corners_by_surface(pages)
+    turned = 0
+    for part in parts:
+        old = part[3][part[4]]
+        moved = np.array([new[int(i)] - s.padding for i in part[5]])
+        straight = np.ptp((moved - old).reshape(-1, 2), axis=0).max()
+        swapped = np.ptp((moved - old[:, :, ::-1]).reshape(-1, 2), axis=0).max()
+        assert min(straight, swapped) < 1e-3
+        if swapped < straight:
+            turned += 1
+            np.testing.assert_allclose(_tri_area(moved), _tri_area(old), rtol=1e-5)
+    assert turned > 0
+
+
+def _tri_area(corners):
+    ab, ac = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+    return np.abs(ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0])
+
+
+def test_nest_with_a_degenerate_triangle_keeps_every_triangle():
+    from lightmapper.charts import _charts_separated, _packing_areas
+    pos, tris = grid(4)
+    pos = np.vstack([pos, [[20, 0, 0], [21, 0, 0], [22, 0, 0]]]).astype(np.float32)
+    tris = np.vstack([tris, [[25, 26, 27], [0, 0, 1]]])
+    group = make_group(pos, tris)
+    s = ChartSettings(page_max='auto')
+    nested = chart_and_pack([group], [radiosity()], s, nest=True)
+    rects = chart_and_pack([group], [radiosity()], s)
+    assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
+    np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
+    assert _charts_separated(nested, s)
+
+
+def test_nesting_is_deterministic():
+    s = nest_settings()
+    first = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    second = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    same_layout(first, second)
+
+
+def test_nesting_is_never_worse_than_rectangles():
+    s = nest_settings()
+    nested = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    rects = chart_and_pack([scattered_islands()], simple(), s, nest=False)
+    assert (len(nested), total_area(nested)) <= (len(rects), total_area(rects))
+
+
+def test_a_nested_layout_without_the_gap_falls_back_to_rectangles(monkeypatch):
+    from lightmapper import charts
+    s = nest_settings()
+    group = rect_group([(20, 20), (20, 20)])
+    rects = chart_and_pack([group], simple(), s)
+
+    def squeezed(parts, settings):
+        page = rects[0]
+        material = page.materials[0]
+        labels = connected_components_of(material)
+        texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+        centres = [texels[labels == k].mean(axis=0) for k in (0, 1)]
+        axis = int(np.argmax(np.abs(centres[1] - centres[0])))
+        moved = material.lm.copy()
+        moved['texcoord'][labels == 1, axis] += np.sign(centres[0][axis] - centres[1][axis]) / [page.width, page.height][axis]
+        return [type(page)(page.width, page.height, [type(material)(material.group, material.env, moved,
+                                                                    material.tris, material.surface_ids)])]
+    monkeypatch.setattr(charts, '_nest_pack', squeezed)
+    same_layout(chart_and_pack([group], simple(), s, nest=True), rects)
+
+
+def test_a_nested_layout_over_the_material_cap_falls_back(monkeypatch):
+    from lightmapper.charts import _check_caps
+    s = nest_settings(max_materials_per_page=2)
+    groups = [rect_group([(20, 20)], name=f'g{i}', sid0=2 * i) for i in range(3)]
+    spy = NestSpy(monkeypatch)
+    nested = chart_and_pack(groups, simple(3), s, nest=True)
+    rects = chart_and_pack(groups, simple(3), s)
+    assert spy.calls[0][2] is not None and len(spy.calls[0][2]) == 1
+    _check_caps(nested, s)
+    same_layout(nested, rects)
+
+
+def test_the_estimate_never_nests(monkeypatch):
+    from lightmapper import charts
+
+    def refuse(parts, settings):
+        raise AssertionError('the estimate must not nest')
+    monkeypatch.setattr(charts, '_nest_pack', refuse)
+    assert chart_and_pack([scattered_islands()], simple(), nest_settings(), nest=False)
