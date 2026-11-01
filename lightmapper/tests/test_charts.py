@@ -1197,10 +1197,16 @@ def test_hollow_chart_holds_a_smaller_chart():
     assert np.all(small.min(axis=0) > frame.min(axis=0)) and np.all(small.max(axis=0) < frame.max(axis=0))
 
 
-def test_nested_charts_keep_the_full_gap():
+def nesting_wins_group():
+    return rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
+
+
+def test_nested_charts_keep_the_full_gap(monkeypatch):
     from lightmapper.charts import _charts_separated
     s = nest_settings()
-    pages = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    spy = NestSpy(monkeypatch)
+    pages = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    assert spy.calls[0][2] is not None and pages is spy.calls[0][2]
     assert _charts_separated(pages, s)
     for page in pages:
         assert rasterise(page).max() <= 1
@@ -1304,24 +1310,28 @@ def _tri_area(corners):
     return np.abs(ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0])
 
 
-def test_nest_with_a_degenerate_triangle_keeps_every_triangle():
+def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
     from lightmapper.charts import _charts_separated, _packing_areas
     pos, tris = grid(4)
     pos = np.vstack([pos, [[20, 0, 0], [21, 0, 0], [22, 0, 0]]]).astype(np.float32)
     tris = np.vstack([tris, [[25, 26, 27], [0, 0, 1]]])
     group = make_group(pos, tris)
     s = ChartSettings(page_max='auto')
+    spy = NestSpy(monkeypatch)
     nested = chart_and_pack([group], [radiosity()], s, nest=True)
+    assert spy.calls[0][2] is not None and nested is spy.calls[0][2]
     rects = chart_and_pack([group], [radiosity()], s)
     assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
     np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
     assert _charts_separated(nested, s)
 
 
-def test_nesting_is_deterministic():
+def test_nesting_is_deterministic(monkeypatch):
     s = nest_settings()
-    first = chart_and_pack([scattered_islands()], simple(), s, nest=True)
-    second = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    spy = NestSpy(monkeypatch)
+    first = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    second = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    assert first is spy.calls[0][2] and second is spy.calls[1][2] and first is not None
     same_layout(first, second)
 
 

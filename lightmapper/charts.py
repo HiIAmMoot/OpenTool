@@ -486,14 +486,18 @@ def _finish(pages, extent, s: ChartSettings) -> list[OutPage]:
     return result
 
 
+def _page_max_hint(s) -> str:
+    return ' or allow a larger page_max' if s.page_max != 'auto' and s.page_max < AUTO_PAGE_MAX else ''
+
+
 def _check_caps(pages, s):
     if len(pages) > s.max_pages:
         raise CapError(f'{len(pages)} lightmap pages needed, over max_pages ({s.max_pages}): '
-                       'lower texels_per_unit or allow a larger page_max')
+                       'lower texels_per_unit' + _page_max_hint(s))
     for page in pages:
         if len(page.materials) > s.max_materials_per_page:
             raise CapError(f'{len(page.materials)} materials on one page, over max_materials_per_page '
-                           f'({s.max_materials_per_page}): lower texels_per_unit or allow a larger page_max')
+                           f'({s.max_materials_per_page}): lower texels_per_unit' + _page_max_hint(s))
 
 
 def _packing_areas(pages):
@@ -688,10 +692,17 @@ def _pack_rectangles(pieces, s):
     return _finish(pages, extents, s)
 
 
-def _fit_residual(source: np.ndarray, target: np.ndarray) -> float:
+def _fit(source: np.ndarray, target: np.ndarray) -> tuple[float, float]:
+    # (squared residual, scale) of the least-squares map target = scale * source + shift
     design = np.column_stack([source, np.ones(len(source))])
     fit = np.linalg.lstsq(design, target, rcond=None)[0]
-    return float(((design @ fit - target) ** 2).sum())
+    return float(((design @ fit - target) ** 2).sum()), float(fit[0])
+
+
+def _stretch_plausible(source: np.ndarray, scale: float) -> bool:
+    # xatlas only stretches a chart up to whole texels, so a negative scale (a mirror) or one beyond that is a misread
+    extent = float(np.ptp(source))
+    return extent < 1e-9 or 0.999 <= scale <= 1 + 1 / extent + 1e-3
 
 
 def _nest_at(parts, side: int, s: ChartSettings):
@@ -703,10 +714,18 @@ def _nest_at(parts, side: int, s: ChartSettings):
                                          brute_force=False))
     pages = [[] for _ in range(max(atlas.page_count, 1))]
     extent = np.zeros((len(pages), 2))
+    empty = []
+    first = None
     for m, part in enumerate(parts):
         verts, indices = atlas.vertices(m), atlas.indices(m)
         placed = (verts['atlas'][indices] >= 0).all(axis=1)
-        if not placed.any() or np.any((verts['atlas'][indices] >= 0).any(axis=1) & ~placed):
+        if not placed.any():
+            # (a part of degenerate triangles only covers no texel: it rides along with the first placed part)
+            if (verts['atlas'][indices] >= 0).any():
+                return None
+            empty.append(part)
+            continue
+        if np.any((verts['atlas'][indices] >= 0).any(axis=1) & ~placed):
             return None
         used = np.unique(indices[placed])
         # (a part moves as one: a second chart or page would need the rectangle layout)
@@ -715,15 +734,28 @@ def _nest_at(parts, side: int, s: ChartSettings):
         page = int(verts['atlas'][used[0]])
         uv = part[3].astype(np.float64)
         source, target = uv[verts['xref'][used]], verts['uv'][used].astype(np.float64)
-        straight = _fit_residual(source[:, 0], target[:, 0]) + _fit_residual(source[:, 1], target[:, 1])
-        turned = _fit_residual(source[:, 1], target[:, 0]) + _fit_residual(source[:, 0], target[:, 1])
+        (sx, scale_sx), (sy, scale_sy) = _fit(source[:, 0], target[:, 0]), _fit(source[:, 1], target[:, 1])
+        (tx, scale_tx), (ty, scale_ty) = _fit(source[:, 1], target[:, 0]), _fit(source[:, 0], target[:, 1])
+        straight, turned = sx + sy, tx + ty
         # (xatlas swaps x and y for a turned chart and records nothing, and it stretches a chart to whole texels:
         # only the swap and the position are taken, never the stretch)
         if turned < straight:
             uv, source = uv[:, ::-1], source[:, ::-1]
+            scales = (scale_tx, scale_ty)
+        else:
+            scales = (scale_sx, scale_sy)
+        if not all(_stretch_plausible(source[:, k], scales[k]) for k in (0, 1)):
+            return None
         moved = (uv + (target.min(axis=0) - source.min(axis=0))).astype(part[3].dtype)
         pages[page].append((*part[:3], moved, *part[4:]))
         extent[page] = np.maximum(extent[page], moved.max(axis=0))
+        if first is None:
+            first = page, moved.min(axis=0)
+    if first is None:
+        return None
+    for part in empty:
+        uv = part[3]
+        pages[first[0]].append((*part[:3], (uv - uv.min(axis=0) + first[1]).astype(uv.dtype), *part[4:]))
     keep = [i for i, pieces in enumerate(pages) if pieces]
     if np.any(extent[keep] + 2 * s.padding > side):
         return None
@@ -780,7 +812,8 @@ def _charts_separated(pages: list[OutPage], s: ChartSettings) -> bool:
             n = len(material.env)
             edges = np.concatenate([material.tris[:, [0, 1]], material.tris[:, [1, 2]]])
             graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n))
-            # (a chart is a placed part, which keeps its own vertices: its triangles are one connected component)
+            # (a connected component stands for a chart; a part that is several components only gives false
+            # negatives, which fall back to the rectangle layout safely)
             chart = connected_components(graph, directed=False)[1] + count + 1
             count = int(chart.max())
             for tri in material.tris:
