@@ -1360,6 +1360,10 @@ def bake_page(page, receivers, image, h, w, job, mask_image=None, diffuse_scale=
         return (np.zeros((h, w, 3), np.float32), np.zeros((h, w, 3), np.float32),
                 np.zeros((h, w), np.bool_))
     size_page_image(image, w, h)
+    if job.get('whole_page_tiles') or job.get('test_whole_page_tiles'):
+        # (the page is one tile, so Cycles writes no tile files; tile borders also move adaptive sampling's stopping point)
+        bpy.context.scene.cycles.use_auto_tile = True
+        bpy.context.scene.cycles.tile_size = 3 * max(w, h)
     try:
         return _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale, atlas)
     finally:

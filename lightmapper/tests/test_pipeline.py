@@ -252,6 +252,15 @@ def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
 
 
+@pytest.mark.parametrize('free, tiles', [(64 * memory.GB, True), (1, False)])
+def test_pipeline_decides_tiles_from_free_memory(tiny, monkeypatch, free, tiles):
+    tags, settings, work = tiny
+    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: free)
+    api().bake(tags, 'level', 'room', settings, work=work)
+    assert json.loads((work / 'job.json').read_text())['whole_page_tiles'] is tiles
+    assert json.loads((work / 'summary.json').read_text())['whole_page_tiles'] is tiles
+
+
 @pytest.mark.parametrize('free', [64 * memory.GB, None])
 def test_summary_records_the_memory_check(tiny, monkeypatch, free):
     tags, settings, work = tiny

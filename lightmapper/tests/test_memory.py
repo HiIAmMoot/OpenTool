@@ -42,6 +42,15 @@ def test_a_bigger_level_needs_more_memory_at_the_same_max_resolution():
     assert big > small
 
 
+def test_whole_page_tiles_need_room_and_a_small_enough_page(counts):
+    page = [(2048, 2048)]
+    need = memory.bake_bytes(counts, page) + memory.PER_TILE_SUB_TEXEL * 9 * 2048 * 2048
+    assert memory.whole_page_tiles(counts, page, need)
+    assert not memory.whole_page_tiles(counts, page, need - 1)
+    assert not memory.whole_page_tiles(counts, [(4096, 4096)], 10**15)
+    assert not memory.whole_page_tiles(counts, page, None)
+
+
 def test_the_largest_page_decides_the_page_term(monkeypatch, message_model):
     monkeypatch.setattr(memory, 'PER_PAGE_TEXEL', 2)
     monkeypatch.setattr(memory, 'PER_TRIANGLE', 3)

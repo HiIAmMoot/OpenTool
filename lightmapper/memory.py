@@ -14,6 +14,9 @@ PER_SUB_TEXEL: int = 271
 PER_PAGE_TEXEL: int = 63
 PER_TRIANGLE: int = 0
 PER_VERTEX: int = 1771
+PER_TILE_SUB_TEXEL: int = 101
+# Cycles' tile limit (tile.h:120): a page whose sub-texel side is bigger cannot be one tile
+MAX_TILE = 8192
 MARGIN = 1.15
 GB = 10**9
 PAGE_SIDES = (256, 512, 1024, 2048, 4096)
@@ -53,6 +56,15 @@ def scene_term(counts) -> int:
 def bake_bytes(counts, pages) -> int:
     w, h = max(pages, key=lambda page: page[0] * page[1], default=(0, 0))
     return ceil(MARGIN * (page_term(w, h) + resident_term(pages) + scene_term(counts)))
+
+
+def whole_page_tiles(counts, pages, free: int | None) -> bool:
+    if free is None or not pages:
+        return False
+    w, h = max(pages, key=lambda page: page[0] * page[1])
+    if 3 * max(max(page) for page in pages) > MAX_TILE:
+        return False
+    return bake_bytes(counts, pages) + PER_TILE_SUB_TEXEL * 9 * w * h <= free
 
 
 class MEMORYSTATUSEX(ctypes.Structure):

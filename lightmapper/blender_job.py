@@ -149,7 +149,7 @@ def lamp_batches(owners: list[int], main_has_room: bool) -> list[list[int]]:
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
               s: Settings, sources: str = 'all', textures: list | None = None,
               choice: DeviceChoice | None = None, vertex_pass: str = 'cpu',
-              lights: list[SceneLight] = ()) -> Path:
+              lights: list[SceneLight] = (), whole_page_tiles: bool = False) -> Path:
     if sources not in SOURCES:
         raise ValueError(f'sources must be one of {SOURCES}, not {sources!r}')
     if vertex_pass not in ('cpu', 'skip'):
@@ -256,6 +256,7 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'vertex_pass': vertex_pass,
         'ignore_normals_mode': s.ignore_normals_mode,
         'ambiguous_twin_groups': ambiguous_twins,
+        'whole_page_tiles': whole_page_tiles,
     }
     path = work / 'job.json'
     path.write_text(json.dumps(job, indent=2))

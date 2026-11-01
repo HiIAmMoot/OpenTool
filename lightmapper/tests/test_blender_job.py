@@ -112,7 +112,7 @@ def test_write_job_files_load_back(tmp_path):
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
         'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ignore_normals_mode', 'ambiguous_twin_groups',
-        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays', 'lights', 'adaptive_sampling'])
+        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays', 'lights', 'adaptive_sampling', 'whole_page_tiles'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -144,6 +144,17 @@ def test_ignore_normals_flags_survive_job_exchange(tmp_path, flagged):
 def test_job_carries_adaptive_sampling(tmp_path, adaptive):
     write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(adaptive_sampling=adaptive))
     assert json.loads((tmp_path / 'job.json').read_text())['adaptive_sampling'] is adaptive
+
+
+@pytest.mark.parametrize('tiles', [True, False])
+def test_job_carries_whole_page_tiles(tmp_path, tiles):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), whole_page_tiles=tiles)
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is tiles
+
+
+def test_job_whole_page_tiles_defaults_off(tmp_path):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings())
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is False
 
 
 def test_job_adaptive_sampling_defaults_on(tmp_path):
