@@ -674,7 +674,7 @@ def downsample_and_owned(rgb, scale=None):
         count = written.reshape(n, 3, w // 3, 3).sum(axis=(1, 3))
         values = part if scale is None else part * scale[3 * first:3 * end, :, None]
         out = masked[:3 * n]
-        # (one work array for every strip, where np.where made a new one each time)
+        # (reused across strips, so a page allocates one strip-sized work array, not one per strip)
         out.fill(0)
         np.copyto(out, values, where=written[:, :, None])
         total = out.reshape(n, 3, w // 3, 3, 3).sum(axis=(1, 3))
