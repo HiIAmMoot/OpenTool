@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 from dataclasses import replace
 from pathlib import Path
 import subprocess
@@ -727,7 +728,8 @@ def test_top_up_keeps_the_page_and_does_not_mask_the_emission_pass(tmp_path):
 
 
 @pytest.mark.blender
-def test_a_mask_is_full_size_only_while_its_page_tops_up(tmp_path, blender_exe):
+@pytest.mark.parametrize('atlas_path', [False, True], ids=['page-path', 'atlas-path'])
+def test_a_mask_is_full_size_only_while_its_page_tops_up(tmp_path, blender_exe, atlas_path):
     import json
 
     edge = ((1.5 / 16, 1.5 / 16), (9.5 / 16, 1.5 / 16), (9.5 / 16, 9.5 / 16), (1.5 / 16, 9.5 / 16))
@@ -735,6 +737,10 @@ def test_a_mask_is_full_size_only_while_its_page_tops_up(tmp_path, blender_exe):
     receivers = [dict(quad=floor(0, 4, 0, 4, z=n, lm=edge), page=n, casts=False) for n in range(3)]
     s = Settings(samples=32, bounces=1, vertex_rays=1)
     write_job(tmp_path, build(receivers), pages, [sun()], {}, s)
+    if not atlas_path:
+        job = json.loads((tmp_path / 'job.json').read_text())
+        job['test_atlas_page_path'] = True
+        (tmp_path / 'job.json').write_text(json.dumps(job))
     done = subprocess.run(
         [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
          str(Path(__file__).with_name('mask_images_driver.py')), '--', str(tmp_path)],
@@ -749,10 +755,16 @@ def test_a_mask_is_full_size_only_while_its_page_tops_up(tmp_path, blender_exe):
             if other != seen['page']:
                 assert size == [1, 1], seen
         full_reads += seen['masks'][seen['page']] == [16, 16]
-    # the edge quad needs top-up tiers, and only those reads see a full-size mask
-    assert full_reads >= 3
-    # (two reads per page, the first bake and the emit pass, see a one-texel mask)
-    assert full_reads == len(sizes['during']) - 3 * 2
+    if atlas_path:
+        # the tiers bake into the atlas, so the page's reads (the first bake and the emit pass) never see a mask
+        assert full_reads == 0
+        assert len(sizes['during']) == 3 * 2
+    else:
+        # the edge quad needs top-up tiers, and only those reads see a full-size mask
+        assert full_reads >= 3
+        # (two reads per page, the first bake and the emit pass, see a one-texel mask)
+        assert full_reads == len(sizes['during']) - 3 * 2
+    assert sizes['atlas'] == [1, 1]
     # a mask that is back to one texel must still read as all ones, or the emit pass would be masked
     assert all(a['size'] == [1, 1] and a['min'] == 1.0 for a in sizes['after']), sizes['after']
 
@@ -1354,3 +1366,405 @@ def test_page_without_glow_keeps_its_flagged_receivers_black(tmp_path):
     full = glow_run(tmp_path / 'full', scene, [(8, 8)] * 3, sources, True)
     assert full[2].max() > 0.05
     assert_rounding_only(cropped, full)
+
+
+# ---------- edge top-ups on the atlas
+
+ATLAS_DRIVER = Path(__file__).with_name('atlas_driver.py')
+TIER_LINE = re.compile(r'atlas tier (\d+): slots (\d+), side (\d+), atlas pixels baked (\d+) \(([\d.]+)\)')
+FALLBACK_LINE = re.compile(r'atlas tier (\d+): page bake \((.*)\)')
+ATLAS_RUN = {'name': 'A', 'job': {'seed': 0}}
+
+
+def page_run(name, seed=0, **job):
+    return {'name': name, 'job': {'seed': seed, 'test_atlas_page_path': True, **job}}
+
+
+def device_choice(device):
+    from lightmapper.gpu import choose
+    return replace(choose('auto', None), cycles=() if device == 'CPU' else (device,), required=device != 'CPU')
+
+
+class AtlasBake:
+    def __init__(self, root, runs):
+        self.root = root
+        self.report = json.loads((root / 'atlas.json').read_text())
+
+    def out(self, name):
+        with np.load(self.root / f'out_{name}.npz') as data:
+            return {key: data[key] for key in data.files}
+
+    def topped_up(self, name, page=0):
+        with np.load(self.root / f'masks_{name}.npz') as data:
+            mask = data[f'mask_{page}']
+        return mask & self.out(name)[f'written_{page}']
+
+    def log(self, name):
+        return self.report[name]['log']
+
+    def tiers(self, name):
+        return [tuple(int(v) for v in m.groups()[:4]) for m in map(TIER_LINE.search, self.log(name)) if m]
+
+    def fallbacks(self, name):
+        return [(int(m.group(1)), m.group(2)) for m in map(FALLBACK_LINE.search, self.log(name)) if m]
+
+    def tier_calls(self, name):
+        tiers, base_next = [], True
+        for call in self.report[name]['calls']:
+            if call['type'] == 'EMIT':
+                base_next = True
+            elif base_next:
+                base_next = False
+            else:
+                tiers.append(call)
+        return tiers
+
+
+def atlas_bake(tmp_path, blender_exe, scene, pages, suns, runs, device='CPU', samples=72 * 16, texel_samples=72 * 16,
+               textures=None, lights=(), **settings):
+    s = Settings(**{**dict(samples=samples, texel_samples=texel_samples, bounces=1, adaptive_sampling=False,
+                           w_sun=1.0, w_emit=1.0, w_amb=1.0, w_light=1.0, albedo_scale=1.0, albedo_fallback=0.5,
+                           ignore_normals_mode='tool', vertex_rays=1), **settings})
+    write_job(tmp_path, scene, list(pages), suns, {}, s, 'all', textures=textures, choice=device_choice(device),
+              vertex_pass='skip', lights=list(lights))
+    (tmp_path / 'driver.json').write_text(json.dumps({'runs': runs}))
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python', str(ATLAS_DRIVER),
+         '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return AtlasBake(tmp_path, runs)
+
+
+def equivalence(a, p0, p1, selected):
+    """The spike's criteria on texels: (a) the bias of A - P0 and (b) A against P1 as P0 is, over 16 groups."""
+    A, P0, P1 = a[selected], p0[selected], p1[selected]
+    n = len(A)
+    assert n >= 32, f'only {n} topped-up texels to judge'
+    diff = A - P0
+    error = diff.std(axis=0, ddof=1) / np.sqrt(n)
+    result = {'n': n, 'bias_z': (np.abs(diff.mean(axis=0)) / np.maximum(error, 1e-30)).tolist(),
+              'bias_ok': bool((np.abs(diff.mean(axis=0)) <= 3 * error).all())}
+    after, before = np.abs(A - P1).sum(axis=1), np.abs(P0 - P1).sum(axis=1)
+    group = np.arange(n) % 16
+    for name, stat in (('mean', np.mean), ('p99', lambda x: np.percentile(x, 99))):
+        delta = stat(after) - stat(before)
+        per = [stat(after[group == g]) - stat(before[group == g]) for g in range(16)]
+        se = np.std(per, ddof=1) / 4
+        result[name] = {'delta': float(delta), 'se': float(se), 'ratio': float(delta / se) if se > 0 else 0.0,
+                        'ok': bool(delta <= 3 * se + 1e-6 * stat(before))}
+    return result
+
+
+def assert_equivalent(label, a, p0, p1, selected):
+    result = equivalence(a, p0, p1, selected)
+    print(f'ATLAS_EQUIVALENCE {label} {json.dumps(result)}')
+    assert result['bias_ok'], (label, result)
+    assert result['mean']['ok'] and result['p99']['ok'], (label, result)
+    return result
+
+
+def compare_runs(label, bake, selected=None):
+    a, p0, p1 = (bake.out(name)['page_0'] for name in ('A', 'P0', 'P1'))
+    return assert_equivalent(label, a, p0, p1, bake.topped_up('A') if selected is None else selected)
+
+
+def chart32(theta, centre, half, page=32):
+    c, s = np.cos(np.radians(theta)), np.sin(np.radians(theta))
+    return tuple((float((centre[0] + half * (c * x - s * y)) / page), float((centre[1] + half * (s * x + c * y)) / page))
+                 for x, y in ((-1, -1), (1, -1), (1, 1), (-1, 1)))
+
+
+def soft_sun(direction=(0.4, 0.2, 1), classes=(0,), strength=3.0, angle=0.12):
+    direction = np.float64(direction)
+    return Sun(direction / np.linalg.norm(direction), angle, np.float64([1, 1, 1]), strength, classes)
+
+
+def edge_scene(**extra):
+    # a rotated chart on a 32 x 32 page, so its edge texels own few sub-texels, with a roof throwing a penumbra on it
+    ground = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (16, 16), 9.3)), **extra)
+    return build([ground], [dict(quad=floor(2, 5, 1, 4, z=1.5))])
+
+
+@pytest.mark.blender
+def test_top_ups_bake_only_the_atlas(tmp_path, blender_exe):
+    bake = atlas_bake(tmp_path, blender_exe, edge_scene(), [(32, 32)], [soft_sun()], [ATLAS_RUN, page_run('P0')])
+    tiers = bake.tiers('A')
+    calls = bake.tier_calls('A')
+    assert tiers and not bake.fallbacks('A'), bake.log('A')
+    assert len(calls) == len(tiers)
+    for call, (n, slots, side, baked) in zip(calls, tiers):
+        assert all(name.startswith('atlas') for name in call['selected']), call['selected']
+        assert call['images']['atlas'] == [side, side]
+        assert call['images']['page_0'] == [1, 1]
+        for info in call['objects'].values():
+            assert info['visible'] == {'visible_camera': True, 'visible_diffuse': False, 'visible_glossy': False,
+                                       'visible_shadow': False, 'visible_transmission': False,
+                                       'visible_volume_scatter': False}
+        assert sum(info['triangles'] for info in call['objects'].values()) == slots
+    # the first and the last bake still see the page's own receivers, at full size then
+    first, last = bake.report['A']['calls'][0], bake.report['A']['calls'][-1]
+    assert all(name.startswith('recv') for name in first['selected'] + last['selected'])
+    assert first['images']['page_0'] == last['images']['page_0'] == [96, 96]
+    for name in ('A', 'P0'):
+        print(f'ATLAS_TIMING {name} page seconds {float(bake.out(name)["seconds_pages"]):.2f} '
+              f'tiers {len(bake.tiers(name))} samples {[c["samples"] for c in bake.tier_calls(name)]}')
+    assert not bake.tiers('P0')
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('device', TWIN_DEVICES)
+@pytest.mark.parametrize('slivers', [False, True], ids=['R1-R4', 'R5'])
+def test_atlas_top_up_matches_page_top_up(tmp_path, blender_exe, bake_module, device, slivers):
+    from atlas_scenes import PAGE, spike_scene
+
+    scene, regions, suns = spike_scene(slivers)
+    k = 32 if device == 'CPU' else 128
+    bake = atlas_bake(tmp_path, blender_exe, scene, [(PAGE, PAGE)], suns,
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)], device=device, samples=72 * k,
+                      texel_samples=72 * k, vertex_rays=16)
+    seconds = {name: bake.report[name]['seconds'] for name in ('A', 'P0', 'P1')}
+    tiers = bake.tiers('A')
+    print(f'ATLAS_RUN_TIME {device} {"R5" if slivers else "R1-R4"} {json.dumps(seconds)} tiers {tiers} '
+          f'fallbacks {bake.fallbacks("A")}')
+    assert tiers
+    if not slivers:
+        assert not bake.fallbacks('A'), bake.log('A')
+    selected = bake.topped_up('A')
+    a, p0, p1 = (bake.out(name)['page_0'] for name in ('A', 'P0', 'P1'))
+    # the regions' (a) statistic, for diagnosis only
+    with np.load(tmp_path / 'scene.npz') as data:
+        owner = bake_module.subtexel_owner({key: data[key] for key in data.files}, 0, PAGE, PAGE)
+    texel_owner = owner.reshape(PAGE, 3, PAGE, 3).max(axis=(1, 3))[::-1]
+    names = np.array(regions)
+    by_region = {}
+    for region in sorted(set(regions)):
+        mine = selected & (texel_owner >= 0) & (names[np.maximum(texel_owner, 0)] == region)
+        if mine.sum() > 2:
+            diff = (a - p0)[mine]
+            by_region[region] = {'n': int(mine.sum()), 'mean': diff.mean(axis=0).tolist(),
+                                 'bias_z': (np.abs(diff.mean(axis=0)) / (diff.std(axis=0, ddof=1) / np.sqrt(len(diff)) + 1e-30)).tolist()}
+    report = json.loads((tmp_path / 'atlas.json').read_text())
+    report['regions_a'] = by_region
+    (tmp_path / 'atlas.json').write_text(json.dumps(report))
+    print(f'ATLAS_REGIONS {device} {json.dumps(by_region)}')
+    assert_equivalent(f'{device} {"R5" if slivers else "R1-R4"}', a, p0, p1, selected)
+    interior = bake.out('A')['written_0'] & ~selected
+    if device == 'CPU':
+        np.testing.assert_array_equal(a[interior], p0[interior])
+    else:
+        # (two GPU bakes of one seed differ by about 1e-6, the spike's noise floor, before any atlas is involved)
+        np.testing.assert_allclose(a[interior], p0[interior], rtol=1e-5)
+
+
+@pytest.mark.blender
+def test_back_only_material_keeps_only_the_translucent_closure(tmp_path, blender_exe):
+    texture = np.zeros((16, 16, 4), np.uint8)
+    texture[..., 0] = np.linspace(40, 255, 16)[None, :]
+    texture[..., 1] = np.linspace(40, 255, 16)[:, None]
+    texture[..., 2:] = 128, 255
+    scene = build([dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (16, 16), 9.3)), ignore_normals=True, texture=0)])
+    bake = atlas_bake(tmp_path, blender_exe, scene, [(32, 32)], [soft_sun()], [ATLAS_RUN], textures=[texture])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    materials = [m for call in bake.tier_calls('A') for info in call['objects'].values() for m in info['materials']]
+    back = [m for m in materials if 'BSDF_TRANSLUCENT' in m['types']]
+    front = [m for m in materials if 'BSDF_DIFFUSE' in m['types']]
+    assert back and front
+    assert all('BSDF_DIFFUSE' not in m['types'] for m in back)
+    assert all('BSDF_TRANSLUCENT' not in m['types'] for m in front)
+    # both halves take their colour from the same texture
+    assert all('TEX_IMAGE' in m['colours']['BSDF_TRANSLUCENT'] for m in back)
+    assert all('TEX_IMAGE' in m['colours']['BSDF_DIFFUSE'] for m in front)
+
+
+def cutout_texture():
+    texture = np.zeros((16, 16, 4), np.uint8)
+    texture[..., 0] = np.linspace(40, 255, 16)[None, :]
+    texture[..., 1] = np.linspace(40, 255, 16)[:, None]
+    texture[..., 2:] = 128, 255
+    # the hole is one band of rows (the diffuse pass divides the colour out, so only the cut-out shows the texture), which
+    # the rotated chart's edge texels cross, and a mirrored v would put it on the opposite side
+    texture[:4, :, 3] = 0
+    return texture
+
+
+@pytest.mark.blender
+def test_atlas_top_up_reads_textures_and_cutouts(tmp_path, blender_exe):
+    scene = build([dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (16, 16), 9.3)), texture=0, cutout=True)])
+    bake = atlas_bake(tmp_path, blender_exe, scene, [(32, 32)], [soft_sun()],
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)], textures=[cutout_texture()])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    a, p0 = bake.out('A')['page_0'], bake.out('P0')['page_0']
+    selected = bake.topped_up('A')
+    hole = selected & (p0.sum(axis=2) < 1e-6)
+    assert hole.sum() > 4, 'the cut-out must cross the topped-up texels'
+    np.testing.assert_allclose(a[hole], p0[hole], atol=1e-6)
+    compare_runs('cutout', bake, selected & ~hole)
+
+
+@pytest.mark.blender
+def test_atlas_top_up_keeps_tint(tmp_path, blender_exe):
+    pane = dict(quad=floor(0, 8, 0, 8, z=1, lm=chart32(-17, (24, 16), 4.7)), casts=False, tint=(0.5, 0.8, 1))
+    ground = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (8, 16), 4.7)))
+    scene = build([ground, pane])
+    bake = atlas_bake(tmp_path, blender_exe, scene, [(32, 32)], [soft_sun((0.5, 0.1, 1))],
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    # (the bake ray itself is no shadow ray, so the tint cannot show in the pane copy's own value: its material is checked
+    # for the shadow-ray switch, so the copy is built as its source is)
+    materials = [m for call in bake.tier_calls('A') for info in call['objects'].values() for m in info['materials']]
+    assert any('LIGHT_PATH' in m['types'] and 'BSDF_TRANSPARENT' in m['types'] for m in materials)
+    selected = bake.topped_up('A')
+    columns = np.arange(32)[None, :] >= 16
+    compare_runs('tint floor', bake, selected & ~columns)
+    compare_runs('tint pane', bake, selected & columns)
+
+
+@pytest.mark.blender
+def test_atlas_top_up_in_a_lamp_batch(tmp_path, blender_exe):
+    wall = dict(quad=wall_x(7, -2, 8, 0, 3))
+    ground = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (16, 16), 9.3)))
+    lamp_job = {'lamps_only': True, 'lamp_batch': 0, 'suns': [], 'ambient': {}, 'vertex_pass': 'skip'}
+    bake = atlas_bake(tmp_path, blender_exe, build([ground], [wall]), [(32, 32)], [],
+                      [{**ATLAS_RUN, 'job': {**ATLAS_RUN['job'], **lamp_job}},
+                       page_run('P0', 0, **lamp_job), page_run('P1', 1, **lamp_job)],
+                      lights=[lamp_light((3, 4, 1.5))])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    selected = bake.topped_up('A')
+    assert bake.out('P0')['page_0'][selected].mean() > 0.003, 'the lamp must light the page'
+    compare_runs('lamp batch', bake)
+
+
+@pytest.mark.blender
+def test_atlas_objects_keep_their_light_links(tmp_path, blender_exe):
+    lit = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (8, 16), 4.7)))
+    unlit = dict(quad=floor(10, 18, 0, 8, lm=chart32(-11, (24, 16), 4.7)), cls=1)
+    bake = atlas_bake(tmp_path, blender_exe, build([lit, unlit]), [(32, 32)], [soft_sun()],
+                      [ATLAS_RUN, page_run('P0')])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    a, p0 = bake.out('A')['page_0'], bake.out('P0')['page_0']
+    selected = bake.topped_up('A')
+    columns = np.arange(32)[None, :] >= 16
+    assert selected[:, :16].any() and selected[:, 16:].any()
+    # the sun lights class 0 only, so the class 1 copies stay dark and the class 0 copies are lit
+    assert a[selected & columns].max() < 1e-3
+    assert p0[selected & columns].max() < 1e-3
+    np.testing.assert_allclose(a[selected & ~columns].mean(), p0[selected & ~columns].mean(), rtol=0.03)
+    assert a[selected & ~columns].mean() > 0.3
+
+
+@pytest.mark.blender
+def test_atlas_objects_keep_lamp_links(tmp_path, blender_exe):
+    flagged = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (8, 16), 4.7)), ignore_normals=True)
+    plain = dict(quad=floor(10, 18, 0, 8, lm=chart32(-11, (24, 16), 4.7)))
+    bake = atlas_bake(tmp_path, blender_exe, build([flagged, plain]), [(32, 32)], [],
+                      [ATLAS_RUN, page_run('P0')], lights=[lamp_light((14, 4, 1.5))])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    objects = [(name, info) for call in bake.tier_calls('A') for name, info in call['objects'].items()]
+    assert any(info['flagged'] for _, info in objects) and any(not info['flagged'] for _, info in objects)
+    for name, info in objects:
+        assert ('lamp_receivers' in info['collections']) == (not info['flagged']), (name, info)
+    a, p0 = bake.out('A')['page_0'], bake.out('P0')['page_0']
+    selected = bake.topped_up('A')
+    columns = np.arange(32)[None, :] >= 16
+    # the flagged receiver takes no lamp light either way, the plain one does
+    assert a[selected & ~columns].max() < 1e-6 and p0[selected & ~columns].max() < 1e-6
+    assert p0[selected & columns].mean() > 0.003
+    np.testing.assert_allclose(a[selected & columns].mean(), p0[selected & columns].mean(), rtol=0.05)
+
+
+@pytest.mark.blender
+def test_atlas_object_casts_no_shadow(tmp_path, blender_exe):
+    # the roof owns whole texels, so only the ground tops up; its shadow must reach the ground's copies and no copy may cast one
+    whole = chart32(0, (28, 28), 3)
+    ground = dict(quad=floor(0, 8, 0, 8, lm=chart32(23, (13, 13), 8.5)), casts=False)
+    roof = dict(quad=floor(1, 6, 1, 6, z=1, lm=whole))
+    bake = atlas_bake(tmp_path, blender_exe, build([ground, roof]), [(32, 32)], [soft_sun((0.1, 0.05, 1))],
+                      [ATLAS_RUN, page_run('P0', 0), page_run('P1', 1)])
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    for call in bake.tier_calls('A'):
+        assert all(not info['visible']['visible_shadow'] for info in call['objects'].values())
+    compare_runs('shadow', bake)
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('radiance', [0, 4])
+def test_flagged_edges_keep_their_correction(tmp_path, blender_exe, radiance):
+    left = ((0, 0), (2 / 3, 0), (2 / 3, 1), (0, 1))
+    right = ((2 / 3, 0), (1, 0), (1, 1), (2 / 3, 1))
+    receivers = [dict(quad=floor(0, 4, 0, 4, lm=left), ignore_normals=True),
+                 dict(quad=floor(10, 14, 0, 4, lm=right))]
+    panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(radiance,) * 3, casts=False)] if radiance else []
+    bake = atlas_bake(tmp_path, blender_exe, build(receivers, panels), [(1, 1)], [sun(strength=np.pi)],
+                      [ATLAS_RUN], samples=1024, texel_samples=2048)
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    out = bake.out('A')
+    # six flagged samples take the panel, three unflagged samples take the sun; the vertex page keeps half the panel
+    np.testing.assert_allclose(out['page_0'], 2 / 3 * radiance + 1 / 3, rtol=0.05)
+    np.testing.assert_allclose(out['diffuse_0'], 1 / 3 * radiance + 1 / 3, rtol=0.05)
+
+
+@pytest.mark.blender
+def test_glow_run_atlas_has_one_copy_per_slot(tmp_path, blender_exe):
+    from lightmapper.blender_job import glow_box
+
+    inset = ((1.5 / 16, 1.5 / 16), (13.2 / 16, 1.5 / 16), (13.2 / 16, 13.2 / 16), (1.5 / 16, 13.2 / 16))
+    scene = build([dict(quad=floor(-8, 8, -8, 8, z=1, lm=inset), ignore_normals=True),
+                   dict(quad=floor(-4, 2, -4, 2, lm=inset), page=1)])
+    glow = np.zeros((16, 16, 3), np.float32)
+    glow[:8] = 4
+    box = glow_box(glow)
+    x0, y0, x1, y1 = box
+    np.savez(tmp_path / 'glow_pages.npz', page_0=glow[y0:y1, x0:x1], box_0=np.array([x0, y0, x1, y1, 16, 16], np.int32))
+    glow_job = {'glow': True, 'glow_pages': 'glow_pages.npz', 'suns': [], 'ambient': {}, 'lights': [], 'bounces': 0,
+                'vertex_pass': 'skip'}
+    bake = atlas_bake(tmp_path, blender_exe, scene, [(16, 16), (16, 16)], [],
+                      [{**ATLAS_RUN, 'job': {**ATLAS_RUN['job'], **glow_job}},
+                       page_run('P0', 0, **glow_job), page_run('P1', 1, **glow_job)],
+                      ignore_normals_mode='enhanced', samples=72 * 32, texel_samples=72 * 32)
+    assert bake.tiers('A') and not bake.fallbacks('A'), bake.log('A')
+    for call, (n, slots, side, baked) in zip(bake.tier_calls('A'), bake.tiers('A')):
+        assert sum(info['triangles'] for info in call['objects'].values()) == slots
+        assert all('BSDF_TRANSLUCENT' not in m['types'] for info in call['objects'].values() for m in info['materials'])
+    # (every slot is a front copy: no back copies in Enhanced mode)
+    assert bake.report['A']['roles'] and all(r[1] == r[2] == 0 for r in bake.report['A']['roles'])
+    selected = bake.topped_up('A', 1)
+    assert selected.sum() >= 32 and bake.out('P0')['page_1'][selected].mean() > 0.05
+    assert_equivalent('glow', bake.out('A')['page_1'], bake.out('P0')['page_1'], bake.out('P1')['page_1'], selected)
+
+
+@pytest.mark.blender
+def test_unowned_subtexel_tier_bakes_through_the_mask(tmp_path, blender_exe):
+    bake = atlas_bake(tmp_path, blender_exe, edge_scene(), [(32, 32)], [soft_sun()],
+                      [{**ATLAS_RUN, 'unowned': True}, page_run('P0')])
+    assert not bake.tiers('A')
+    assert len(bake.fallbacks('A')) == len(bake.tier_calls('A')) >= 1, bake.log('A')
+    for call in bake.tier_calls('A'):
+        assert call['images']['page_0'] == [96, 96] and call['images']['atlas'] == [1, 1]
+        assert all(name.startswith('recv') for name in call['selected'])
+    # (the same seeds and samples through the same masks as the page path)
+    np.testing.assert_array_equal(bake.out('A')['page_0'], bake.out('P0')['page_0'])
+
+
+@pytest.mark.blender
+def test_unwritten_atlas_slot_bakes_the_tier_through_the_mask(tmp_path, blender_exe):
+    bake = atlas_bake(tmp_path, blender_exe, edge_scene(), [(32, 32)], [soft_sun()],
+                      [{**ATLAS_RUN, 'unwritten': True}, page_run('P0')])
+    assert len(bake.fallbacks('A')) == len(bake.tiers('A')) >= 1, bake.log('A')
+    assert all('unwritten' in reason for _, reason in bake.fallbacks('A'))
+    np.testing.assert_array_equal(bake.out('A')['page_0'], bake.out('P0')['page_0'])
+
+
+@pytest.mark.blender
+def test_atlas_objects_are_removed_after_each_tier(tmp_path, blender_exe):
+    bake = atlas_bake(tmp_path, blender_exe, edge_scene(ignore_normals=True), [(32, 32)], [soft_sun()], [ATLAS_RUN])
+    run = bake.report['A']
+    assert len(bake.tiers('A')) >= 2, bake.log('A')
+    before = run['before']
+    assert run['after'] == before
+    for call in bake.tier_calls('A'):
+        assert call['counts']['objects'] - before['objects'] == len(call['selected'])
+        assert call['counts']['meshes'] - before['meshes'] == len(call['selected'])
+        assert call['counts']['materials'] - before['materials'] == sum(
+            len(info['materials']) for info in call['objects'].values())

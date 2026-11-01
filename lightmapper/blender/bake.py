@@ -154,6 +154,13 @@ def make_images(textures_path, pages, masked=False):
     return textures, page_images, mask_images
 
 
+def make_atlas_image():
+    # one atlas image for the run, one texel until a tier sizes it
+    image = bpy.data.images.new('atlas', 1, 1, alpha=False, float_buffer=True, is_data=True)
+    image.colorspace_settings.name = 'Non-Color'
+    return image
+
+
 def size_page_image(image, w, h):
     image.generated_width, image.generated_height = 3 * w, 3 * h
 
@@ -170,7 +177,7 @@ def reset_mask(image):
 
 
 def make_material(name, texture, cutout, emission, job, page_image, tint=(), emit_only=False, mask_image=None,
-                  both_sides=False, zero_albedo=False, glow_image=None, glow_transform=None):
+                  both_sides=False, zero_albedo=False, glow_image=None, glow_transform=None, back_only=False):
     material = bpy.data.materials.new(name)
     material.use_nodes = True
     nodes, links = material.node_tree.nodes, material.node_tree.links
@@ -206,10 +213,15 @@ def make_material(name, texture, cutout, emission, job, page_image, tint=(), emi
             links.new(colour.links[0].from_socket, back.inputs['Color'])
         else:
             back.inputs['Color'].default_value = colour.default_value
-        add = nodes.new('ShaderNodeAddShader')
-        links.new(shader, add.inputs[0])
-        links.new(back.outputs['BSDF'], add.inputs[1])
-        shader = add.outputs['Shader']
+        if back_only:
+            # (the atlas bakes the behind half on its own copy: the DIFFUSE pass divides by the summed closure colour,
+            # so the page's two-closure value is the mean of the halves)
+            shader = back.outputs['BSDF']
+        else:
+            add = nodes.new('ShaderNodeAddShader')
+            links.new(shader, add.inputs[0])
+            links.new(back.outputs['BSDF'], add.inputs[1])
+            shader = add.outputs['Shader']
     if emit_only:
         # unlightmapped emitters have no diffuse bounce: their back face must pass gather rays
         shader = nodes.new('ShaderNodeBsdfTransparent').outputs['BSDF']
@@ -435,7 +447,53 @@ def lamp_free_run(job):
     return bool(job.get('glow')) or not job['lights']
 
 
-def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=(), glow_transforms=()):
+def receiver_material(name, prop, job, textures, page, image, mask_image=None, glow_images=(), glow_transforms=(),
+                      **options):
+    tex, cut, emit, tint, flagged = prop
+    enhanced = job.get('ignore_normals_mode') == 'enhanced'
+    settings = dict(both_sides=flagged and not enhanced,
+                    zero_albedo=flagged and enhanced and not glow_images,
+                    glow_image=glow_images[page] if glow_images and flagged else None,
+                    glow_transform=glow_transforms[page] if glow_transforms and flagged else None)
+    settings.update(options)
+    return make_material(name, textures[tex] if tex >= 0 else None, cut, emit, job, image, tint,
+                         mask_image=mask_image, **settings)
+
+
+@dataclass
+class AtlasSource:
+    # a receiver object with what an atlas copy of any of its triangles needs: the scene triangles it holds (ascending)
+    # and each one's material key
+    obj: object
+    picked: np.ndarray
+    tri_props: list
+    page: int
+
+
+@dataclass
+class AtlasInputs:
+    scene: dict
+    page: int
+    sources: list
+    textures: list
+    image: object
+    two_sided: np.ndarray
+    job: dict = None
+    glow_images: tuple = ()
+    glow_transforms: tuple = ()
+
+
+def atlas_inputs(scene_data, job, page, sources, textures, image, glow_images=(), glow_transforms=()):
+    # test_atlas_page_path is test-only, never written by write_job
+    if job.get('test_atlas_page_path'):
+        return None
+    flags = scene_data.get('tri_ignore_normals', np.zeros(len(scene_data['tris']), bool))
+    return AtlasInputs(scene_data, page, [s for s in sources if s.page == page], textures, image,
+                       flags & (job.get('ignore_normals_mode') != 'enhanced'), job, glow_images, glow_transforms)
+
+
+def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_images=(), glow_transforms=(),
+                  sources=None):
     """Receivers per page, class, shadow and sun visibility; occluders per material and shadow."""
     positions, tris = scene_data['positions'], scene_data['tris']
     receivers = []
@@ -474,14 +532,9 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
                       tuple(float(c) for c in scene_data['tri_tint'][t]) if tinted[t] else (), bool(flags[t]))
                      for t in picked]
         distinct = sorted(set(tri_props))
-        materials = [make_material(f'recv_{page}_{cls}_{n}', textures[tex] if tex >= 0 else None, cut, emit,
-                                   job, page_images[page], tint,
-                                   mask_image=mask_images[page] if mask_images else None,
-                                   both_sides=flagged and job.get('ignore_normals_mode') != 'enhanced',
-                                   zero_albedo=flagged and job.get('ignore_normals_mode') == 'enhanced' and not glow_images,
-                                   glow_image=glow_images[page] if glow_images and flagged else None,
-                                   glow_transform=glow_transforms[page] if glow_transforms and flagged else None)
-                     for n, (tex, cut, emit, tint, flagged) in enumerate(distinct)]
+        materials = [receiver_material(f'recv_{page}_{cls}_{n}', prop, job, textures, page, page_images[page],
+                                       mask_images[page] if mask_images else None, glow_images, glow_transforms)
+                     for n, prop in enumerate(distinct)]
         obj = make_object(f'recv_{page}_{cls}_{int(casts)}', bake_positions,
                           {UV_TEXTURE: flip_v(scene_data['tex_uv'][used]),
                            UV_LIGHTMAP: flip_v(scene_data['lm_uv'][used])},
@@ -490,6 +543,8 @@ def build_objects(scene_data, job, textures, page_images, mask_images=(), glow_i
         obj['sun_facing'] = key[sun_from:].tolist()
         obj['flagged'] = bool(flags[picked].any())
         receivers.append((obj, page, cls))
+        if sources is not None:
+            sources.append(AtlasSource(obj, picked, tri_props, page))
 
     occluders = []
     occ_tris = scene_data['occ_tris']
@@ -1245,6 +1300,47 @@ def scatter_atlas(atlas, values, buffer_shape):
     return buffer, int(((atlas.role == 0) & ~ok).sum() + (~both).sum())
 
 
+def atlas_objects(inputs, atlas, mesh):
+    """One object per source holding the slots its triangles own, linked where the source is linked."""
+    roles = {0: {}, 1: dict(both_sides=False), 2: dict(both_sides=True, back_only=True)}
+    objects = []
+    for number, source in enumerate(inputs.sources):
+        slots = np.flatnonzero(np.isin(atlas.owner, source.picked))
+        if not len(slots):
+            continue
+        corners = (3 * slots[:, None] + np.arange(3)).ravel()
+        props = [source.tri_props[i] for i in np.searchsorted(source.picked, atlas.owner[slots])]
+        keys = [(prop, int(role)) for prop, role in zip(props, atlas.role[slots])]
+        distinct = sorted(set(keys))
+        materials = [receiver_material(f'atlas_{inputs.page}_{number}_{n}', prop, inputs.job, inputs.textures,
+                                       inputs.page, inputs.image, None, inputs.glow_images, inputs.glow_transforms,
+                                       **roles[role])
+                     for n, (prop, role) in enumerate(distinct)]
+        obj = make_object(f'atlas_{inputs.page}_{number}', mesh['positions'][corners],
+                          {UV_TEXTURE: mesh['tex_uv'][corners], UV_LIGHTMAP: mesh['atlas_uv'][corners]},
+                          np.arange(3 * len(slots), dtype=np.int32).reshape(-1, 3), materials,
+                          [distinct.index(key) for key in keys], False, mesh['normals'][corners])
+        obj.visible_camera = True
+        obj.visible_diffuse = obj.visible_glossy = obj.visible_transmission = False
+        obj.visible_volume_scatter = obj.visible_shadow = False
+        obj['flagged'] = source.obj['flagged']
+        # (read now: add_suns and add_lamps linked the source after it was built, and a copy has to be lit as it is)
+        for collection in bpy.data.collections:
+            if source.obj.name in collection.objects:
+                collection.objects.link(obj)
+        objects.append(obj)
+    return objects
+
+
+def remove_atlas_objects(objects):
+    for obj in objects:
+        mesh, materials = obj.data, list(obj.data.materials)
+        bpy.data.objects.remove(obj)
+        bpy.data.meshes.remove(mesh)
+        for material in materials:
+            bpy.data.materials.remove(material)
+
+
 def warn_if_masks_differ(diffuse_written, emit_written, page):
     # the page's written mask comes from the diffuse pass alone; the emit pass should write the same texels
     differs = not np.array_equal(diffuse_written, emit_written)
@@ -1254,59 +1350,124 @@ def warn_if_masks_differ(diffuse_written, emit_written, page):
     return differs
 
 
-def bake_page(page, receivers, image, h, w, job, mask_image=None, diffuse_scale=None):
+def bake_page(page, receivers, image, h, w, job, mask_image=None, diffuse_scale=None, atlas=None):
     chosen = [obj for obj, p, _ in receivers if p == page]
     if not chosen:
         return (np.zeros((h, w, 3), np.float32), np.zeros((h, w, 3), np.float32),
                 np.zeros((h, w), np.bool_))
     size_page_image(image, w, h)
     try:
-        return _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale)
+        return _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale, atlas)
     finally:
         release_page_image(image)
 
 
-def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, w, job, diffuse_scale=None):
+def page_tier(image, mask_image, mask, buffer, h, w, pixels):
+    mask_image.generated_width, mask_image.generated_height = w, h
+    pixels.fill(0)
+    pixels[mask] = 1
+    mask_image.pixels.foreach_set(pixels.ravel())
+    clear_page(image, buffer)
+    bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
+                        target='IMAGE_TEXTURES')
+    return read_page(image, buffer, 3 * h, 3 * w)
+
+
+def atlas_tier(n, mask, inputs, owner, written, h, w):
+    """The tier's sub-texels baked on atlas copies and scattered back to the page, or None to bake the tier on the page."""
+    plan = plan_atlas(written, mask, owner, inputs.two_sided)
+    if plan is None:
+        log(f'atlas tier {n}: page bake (a written sub-texel has no owning triangle)')
+        return None
+    plan = place_atlas(inputs.scene, plan, w, h)
+    if plan is None:
+        log(f'atlas tier {n}: page bake (no atlas layout)')
+        return None
+    objects = atlas_objects(inputs, plan, atlas_mesh(inputs.scene, plan, w, h))
+    image, side = inputs.image, plan.side
+    values = np.empty(side * side * 4, np.float32)
+    try:
+        image.generated_width = image.generated_height = side
+        image.pixels.foreach_set(np.full(side * side * 4, -1, np.float32))
+        select_only(objects)
+        bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
+                            target='IMAGE_TEXTURES')
+        image.pixels.foreach_get(values)
+    finally:
+        remove_atlas_objects(objects)
+    values = values.reshape(side, side, 4)[:, :, :3]
+    slots = len(plan.slots)
+    baked = int((values >= 0).all(axis=2).sum())
+    log(f'atlas tier {n}: slots {slots}, side {side}, atlas pixels baked {baked} ({baked / slots:.2f})')
+    raw, missing = scatter_atlas(plan, values, (3 * h, 3 * w))
+    # (merge_extra weights a tier by the base bake's owned counts, so a tier with a slot missing is never merged)
+    if missing:
+        log(f'atlas tier {n}: page bake ({missing} of {slots} slots unwritten)')
+        return None
+    return raw
+
+
+def top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, w, job, diffuse_scale=None,
+                       atlas=None, written=None):
     """Bake again, only where a texel owns few sub-texels, with other seeds, and merge by sample count."""
     cycles = bpy.context.scene.cycles
     base_spp = cycles.samples
     tiers = plan_extra_passes(owned, base_spp, job['texel_samples'])
     extra = []
     extra_corrected = []
-    pixels = np.empty((h, w, 4), np.float32)
+    pixels = None
     seed = cycles.seed
+    owner = selected = active = None
+    # (the page's own image is not needed while the tiers bake on the atlas, so it is held at one texel)
+    held = False
+    if atlas is not None and tiers:
+        selected, active = list(bpy.context.selected_objects), bpy.context.view_layer.objects.active
+        owner = subtexel_owner(atlas.scene, atlas.page, w, h)
+        release_page_image(image)
+        held = True
     try:
         for n, (spp, mask) in enumerate(tiers):
             # (a repeated seed would repeat the noise instead of averaging it away)
             cycles.seed = seed + 1 + n
             cycles.samples = spp
-            mask_image.generated_width, mask_image.generated_height = w, h
-            pixels.fill(0)
-            pixels[mask] = 1
-            mask_image.pixels.foreach_set(pixels.ravel())
-            clear_page(image, buffer)
-            bpy.ops.object.bake(type='DIFFUSE', pass_filter={'DIRECT', 'INDIRECT'}, margin=0, use_clear=False,
-                                target='IMAGE_TEXTURES')
-            raw = read_page(image, buffer, 3 * h, 3 * w)
+            raw = atlas_tier(n, mask, atlas, owner, written, h, w) if held else None
+            if raw is None:
+                if held:
+                    size_page_image(image, w, h)
+                    select_only(selected, active)
+                if pixels is None:
+                    pixels = np.empty((h, w, 4), np.float32)
+                raw = page_tier(image, mask_image, mask, buffer, h, w, pixels)
+                if held:
+                    release_page_image(image)
             extra.append(downsample_written(raw)[0])
             if diffuse_scale is not None:
                 extra_corrected.append(downsample_written(raw, diffuse_scale)[0])
     finally:
         cycles.seed, cycles.samples = seed, base_spp
         reset_mask(mask_image)
+        if held:
+            size_page_image(image, w, h)
+            release_page_image(atlas.image)
+            select_only(selected, active)
     diffuse = merge_extra(diffuse, owned, base_spp, tiers, extra)
     corrected = (merge_extra(corrected, owned, base_spp, tiers, extra_corrected)
                  if diffuse_scale is not None else diffuse)
     return diffuse, corrected
 
 
-def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
-    view_layer = bpy.context.view_layer
+
+
+def select_only(objects, active=None):
     for obj in bpy.context.scene.objects:
         obj.select_set(False)
-    for obj in chosen:
+    for obj in objects:
         obj.select_set(True)
-    view_layer.objects.active = chosen[0]
+    bpy.context.view_layer.objects.active = active or objects[0]
+
+
+def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None, atlas=None):
+    select_only(chosen)
     # a covered edge can miss every sub-texel; zero cannot distinguish that from a baked shadow
     buffer = np.empty(3 * h * 3 * w * 4, np.float32)
     clear_page(image, buffer)
@@ -1316,8 +1477,9 @@ def _bake_page(page, chosen, image, h, w, job, mask_image, diffuse_scale=None):
     diffuse, written, owned = downsample_and_owned(raw)
     corrected = downsample_written(raw, diffuse_scale)[0] if diffuse_scale is not None else diffuse
     if mask_image is not None:
-        diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned, image, mask_image,
-                                               buffer, h, w, job, diffuse_scale)
+        # (the top-up clears the buffer this view reads)
+        diffuse, corrected = top_up_edge_texels(diffuse, corrected, owned, image, mask_image, buffer, h, w, job,
+                                               diffuse_scale, atlas, (raw >= 0).all(axis=2) if atlas is not None else None)
     if job.get('lamps_only'):
         return corrected[::-1].copy(), diffuse[::-1].copy(), written[::-1].copy()
     clear_page(image, buffer)
@@ -1936,8 +2098,10 @@ def main():
         if job.get('glow'):
             glow_images, glow_transforms = load_glow_images(os.path.join(root, job['glow_pages']), len(job['pages']),
                                                             job.get('test_glow_uncropped'))
+        sources = []
+        atlas_image = make_atlas_image() if mask_images else None
         receivers, occluders = build_objects(scene_data, job, textures, page_images, mask_images, glow_images,
-                                             glow_transforms)
+                                             glow_transforms, sources)
         if not job.get('lamps_only'):
             add_suns(job, receivers, occluders)
         add_lamps(job, receivers, occluders, job.get('lamp_batch', 0))
@@ -1948,7 +2112,10 @@ def main():
             out[f'page_{i}'], diffuse, out[f'written_{i}'] = bake_page(i, receivers, page_images[i], h, w, job,
                                                                    mask_images[i] if mask_images else None,
                                                                    receiver_diffuse_scale(
-                                                                        scene_data, i, w, h, enhanced=job.get('ignore_normals_mode') == 'enhanced'))
+                                                                        scene_data, i, w, h, enhanced=job.get('ignore_normals_mode') == 'enhanced'),
+                                                                   atlas_inputs(scene_data, job, i, sources, textures,
+                                                                                atlas_image, glow_images,
+                                                                                glow_transforms) if atlas_image is not None else None)
             diffuse_pages.append(diffuse)
             out[f'diffuse_{i}'] = diffuse
             out['seconds_pages'] = np.float64(out['seconds_pages'] + time.perf_counter() - began)
