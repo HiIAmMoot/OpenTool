@@ -1179,7 +1179,8 @@ def run_receiver_groups(root, blender_exe, edit_job=None):
 
 
 def flagged_and_plain_floors():
-    # (side by side on the page: texels they would share resolve by object order or by the rasterizer)
+    # (side by side on the page: the pipeline never puts flagged and unflagged triangles in one chart, as charts are built
+    # per shader group with padding)
     left = ((0, 0), (0.5, 0), (0.5, 1), (0, 1))
     right = ((0.5, 0), (1, 0), (1, 1), (0.5, 1))
     return [dict(quad=floor(0, 4, 0, 4, lm=left), ignore_normals=True), dict(quad=floor(10, 14, 0, 4, lm=right))]
@@ -1233,14 +1234,23 @@ def test_glow_run_merges_flagged_receivers(tmp_path, blender_exe):
 
 
 @pytest.mark.blender
-def test_merged_object_bakes_what_two_objects_baked(tmp_path):
+@pytest.mark.parametrize('emissive', [False, True])
+@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
+def test_merged_object_bakes_what_two_objects_baked(tmp_path, mode, emissive):
     s = Settings(samples=64, bounces=1, w_sun=1.0, w_emit=1.0, w_amb=1.0, vertex_rays=1, device='cpu',
-                 albedo_fallback=0.5, ignore_normals_mode='tool')
+                 albedo_fallback=0.5, ignore_normals_mode=mode)
+    floors = flagged_and_plain_floors()
+    if emissive:
+        # (an unflagged emitter without sun bits merges with the flagged floor in the main run)
+        low = ((0.5, 0), (1, 0), (1, 0.5), (0.5, 0.5))
+        high = ((0.5, 0.5), (1, 0.5), (1, 1), (0.5, 1))
+        floors[1] = dict(quad=floor(10, 14, 0, 4, lm=low))
+        floors.append(dict(quad=floor(20, 24, 0, 4, lm=high), emission=(2, 2, 2)))
     panels = [dict(quad=floor(-100, 104, -100, 104, z=-1), emission=(4, 4, 4), casts=False)]
 
     def baked(name, split):
         root = tmp_path / name
-        write_job(root, build(flagged_and_plain_floors(), panels), [(16, 16)], [sun(classes=(1,))], {}, s)
+        write_job(root, build(floors, panels), [(16, 16)], [sun(classes=(1,))], {}, s)
         if split:
             job = json.loads((root / 'job.json').read_text())
             job['test_split_flagged'] = True
