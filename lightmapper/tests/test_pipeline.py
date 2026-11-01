@@ -1635,6 +1635,7 @@ def test_bake_after_the_glow_run_is_unchanged(tiny, monkeypatch):
     run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
     want = (Path(__file__).parent / 'data' / 'enhanced_bake.bitmap').read_bytes()
     assert (tiny[0] / 'copy.bitmap').read_bytes() == want
+    assert not (tiny[2] / 'raw_pages.npz').exists()
 
 
 def put_cutout_maps(tags):

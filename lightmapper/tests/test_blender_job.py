@@ -598,6 +598,26 @@ def test_glow_box_is_the_non_zero_sub_texels():
     assert blender_job.glow_box(page) == (0, 1, 7, 5)
 
 
+def test_glow_run_hands_over_its_pages_before_blender_starts(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(8, 8)], make_suns(), AMBIENT, s)
+    lit = np.zeros((8, 8, 3), np.float32)
+    lit[2:4, 2:4] = 1
+    handed, held = [lit], []
+    real = blender_job._run_blender
+
+    def spy(*args):
+        callee = sys._getframe(1)
+        assert callee.f_code.co_name == 'run_blender_glow'
+        held.append((len(callee.f_locals['pages']), len(callee.f_locals['cropped'])))
+        return real(*args)
+
+    monkeypatch.setattr(blender_job, '_run_blender', spy)
+    blender_job.run_blender_glow(work, s, handed)
+    assert held == [(0, 0)] and handed == []
+
+
 def test_glow_job_holds_only_cropped_pages(tmp_path, fake):
     work = tmp_path / 'work'
     s = Settings(blender=fake)

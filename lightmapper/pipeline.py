@@ -573,6 +573,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         seconds['blender_glow'] = perf_counter() - started
         with np.load(work / 'raw_pages.npz') as data:
             raw_pages = [data[f'page_{i}'] for i in range(len(pages))]
+        (work / 'raw_pages.npz').unlink()
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
         stage('glow')

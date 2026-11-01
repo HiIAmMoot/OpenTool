@@ -375,6 +375,7 @@ def glow_box(source: np.ndarray) -> tuple[int, int, int, int] | None:
     return int(columns[0]), int(rows[0]), int(columns[-1]) + 1, int(rows[-1]) + 1
 
 
+# consumes `pages` (the callee's own reference to every page would keep them alive through the Blender run)
 def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[list[np.ndarray], str]:
     work = Path(work)
     cropped = {}
