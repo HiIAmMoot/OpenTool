@@ -33,7 +33,7 @@ from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARA
 from .pages import DenoiseWorker, finish_pages, quantise
 from .progress import GLOW_PLANNED
 from .radiosity import finalize, query_points
-from .raster import coverage, texel_contribution
+from .raster import coverage, texel_contribution, triangle_weights
 from .settings import Settings
 from .terminator import flat_light_term, flat_sun_term, prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
@@ -279,6 +279,22 @@ def _kept_baked(work: Path, manifest: kept.Manifest, page_count: int):
 class SceneEstimate:
     counts: memory.SceneCounts
     pages: list[tuple[int, int]]
+    # 9 * w * h over the pages with any triangle that ignores normals
+    flagged_sub_texels: int = 0
+    device: str = 'gpu'
+
+
+def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine, bounces: int = 1) -> memory.StageInputs:
+    # (the glow run is skipped without bounces)
+    glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' and bounces > 0 else 0
+    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow)
+    return replace(inputs, whole_page_tiles=memory.whole_page_tiles(inputs, machine))
+
+
+def _scene_estimate(scene, pages, device: str) -> SceneEstimate:
+    sizes = [(p.width, p.height) for p in pages]
+    return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
+                         memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes), device)
 
 
 def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
@@ -295,7 +311,8 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     pages = _charts(input_file, geometry, radiosity, s, Path(charts))
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
-    return SceneEstimate(memory.SceneCounts.from_scene(scene), [(p.width, p.height) for p in pages])
+    # (no GPU probe: the setting alone says whether the CPU constants apply)
+    return _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
 
 
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
@@ -430,16 +447,20 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     else:
         scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
                                           s.scenery_emission)
-        check = memory.check_bake_memory(memory.SceneCounts.from_scene(scene),
-                                         [(p.width, p.height) for p in pages], s.page_max)
+        sizes = [(p.width, p.height) for p in pages]
+        machine = memory.read_machine()
+        stages_in = stage_inputs(_scene_estimate(scene, pages, 'cpu' if choice.setting == 'cpu' else 'gpu'),
+                                 s.ignore_normals_mode, machine, s.bounces)
+        check = memory.check_bake_memory(stages_in, s.page_max, machine)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)
         # (a calibration run bakes no lamps, so it neither reads nor counts them)
         lights, light_counts = scene_lights(scenario_tag, tags, bsp_number, bsp_tag) if sources == 'all' else ([], {})
-        write_job(work, scene, [(p.width, p.height) for p in pages], lighting.suns,
+        write_job(work, scene, sizes, lighting.suns,
                   lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
-                  vertex_pass='skip', lights=lights)
+                  vertex_pass='skip', lights=lights, whole_page_tiles=stages_in.whole_page_tiles,
+                  glow_sub_texels=stages_in.glow_sub_texels)
     stage('scene')
     # (decided here, not at the page assembly, because the app lays its progress bar out for the glow run before the
     # Blender stage starts)
@@ -509,6 +530,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             result = with_vertex_pass(result, vp)
         else:
             result = with_vertex_pass(result, cpu_pass())
+        # (the pass has its copy and the finish never reads these)
+        result = replace(result, diffuse_pages=None)
         stage('vertex_pass')
         if keep:
             kept.save_baked(work)
@@ -530,19 +553,28 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         warnings.append(ambiguous_warning(job['ambiguous_twin_groups']))
     boundaries = (prepare_boundaries(scene, job_suns, s.reach, result.edge_sun_lit)
                   if result.vertex_sun_lit is not None else None)
+    # (the glow scene is the bake scene's own charts: one page's owner map then serves the sun term and both gathers)
+    one_grid = texel_scene is not None and all(
+        np.array_equal(texel_scene[key], getattr(scene, name)) for key, name in
+        (('lm_uv', 'lm_uv'), ('tris', 'tris'), ('tri_page', 'tri_page')))
     for i, page in enumerate(pages):
         rows = scene.tri_page == i
         mask, cls = coverage(scene.lm_uv, scene.tris[rows], scene.tri_class[rows], page.width, page.height)
         raw = result.pages[i]
+        grid = triangle_weights(scene.lm_uv, scene.tris[rows], 3 * page.width, 3 * page.height) if one_grid else None
         if result.vertex_sun_lit is not None:
             raw = raw + sun_term(scene, job_suns, result.vertex_sun_lit, i, page.width, page.height,
-                                 s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries)
+                                 s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries, grid=grid)
         if enhanced:
-            gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
+            owner = grid[0] if one_grid else None
+            # (the weights are 450 MB on a big page and nothing below reads them)
+            grid = None
+            gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb, owner=owner)[0]
             raw = raw + gathered
             from .raster import flagged_source
             if not reuse:
-                glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb))
+                glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb, owner=owner))
+            owner = None
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)
@@ -552,17 +584,26 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         masks.append(mask)
         class_maps.append(cls)
         utilisation.append(float(mask.mean()))
+    # (nothing below reads the baked pages, and the loop's last page and gather would stay in these names)
+    result = replace(result, pages=None)
+    raw = gathered = texel_scene = None
     glow_device = manifest.glow_device if reuse else 'off'
     if reuse and kept_glow is not None:
         raw_pages = [raw + added for raw, added in zip(raw_pages, kept_glow)]
     if glow_runs:
         # (the glow pages are the light the flagged surfaces received: `raw_pages` hold their own emission too, which
         # would come back off them as albedo times emission)
+        np.savez(work / 'raw_pages.npz', **{f'page_{i}': raw for i, raw in enumerate(raw_pages)})
+        raw_pages = None
         started = perf_counter()
         glow, glow_device = run_blender_glow(work, s, glow_pages)
+        glow_pages = None
         if keep:
             kept.save_glow(work, glow)
         seconds['blender_glow'] = perf_counter() - started
+        with np.load(work / 'raw_pages.npz') as data:
+            raw_pages = [data[f'page_{i}'] for i in range(len(pages))]
+        (work / 'raw_pages.npz').unlink()
         # (the glow bake already zeroes the flagged sub-texels, so a mixed texel gets only its unflagged share)
         raw_pages = [raw + added for raw, added in zip(raw_pages, glow)]
         stage('glow')
@@ -648,10 +689,9 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'devices': {**({} if reuse else choice.summary()), 'page_bake': result.device, 'vertex_pass': vertex_device,
                     'denoise': denoise_device, 'glow_pass': glow_device, 'glow_reason': glow_reason},
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
+        'whole_page_tiles': bool(main_job.get('whole_page_tiles', False)),
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
-        'memory': None if check is None else {
-            'estimate_gb': round(check.estimate / memory.GB, 2),
-            'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},
+        'memory': None if check is None else memory.summary(stages_in, check),
         'rays': {'samples': result.samples_used, 'texel_samples': result.texel_samples_used,
                  'vertex_rays': s.vertex_rays if vertex_device != 'cpu' else s.resolved_cpu_vertex_rays()},
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))

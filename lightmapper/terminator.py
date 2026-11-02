@@ -44,9 +44,9 @@ def prepare_boundaries(scene, suns, reach, edge_sun_lit=None):
     return SunBoundaries(away, None, _segment_tables(scene, suns, reach, scene.tris, edge_sun_lit, facing))
 
 
-def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
+def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None, grid=None):
     """(height, width, 3) light to add to page `page`'s raw float image; `suns` are the job's suns, `lit` the vertex
-    pass's (query, sun) result."""
+    pass's (query, sun) result. `grid` is the page's `triangle_weights` result when the caller already has it."""
     term = np.zeros((height, width, 3), np.float32)
     rows = np.flatnonzero(scene.tri_page == page)
     if not len(rows) or not len(suns):
@@ -71,7 +71,7 @@ def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, bo
     # the bake averages a texel's 3x3 sub-texels that a triangle covers, so the term is built on that grid and
     # averaged the same way: a texel on a seam takes the added light for the sub-texels of the face that lacks it
     # and the baked light for the others
-    owner, weights = triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
+    owner, weights = grid if grid is not None else triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
     covered = owner >= 0
     count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
     # only sub-texels of a triangle that is away for some sun can take a term; the rest would run the distance
@@ -82,6 +82,10 @@ def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, bo
     sampled = boundaries.segments
     edge_lit = boundaries.edge_lit[rows] if boundaries.edge_lit is not None else None
     corners32 = corners.astype(np.float32)
+    # (one float32 conversion for every sun and chunk, laid out sun-first so a chunk's gather is contiguous)
+    corner32 = np.ascontiguousarray(corner.astype(np.float32).transpose(2, 0, 1))
+    power32 = power.astype(np.float32)
+    reach32 = np.float32(reach)
     sub = np.zeros((len(tri), 3), np.float32)
     # chunked so the (n, 3, 3) corner gather and the distance temporaries stay a bounded size on a big page
     for start in range(0, len(tri), CHUNK):
@@ -89,13 +93,23 @@ def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, bo
         t, w = tri[part], weight[part]
         around = corners32[t]
         point = np.einsum('nc,nck->nk', w, around)
+        # none of this depends on the sun, so the 16 suns of a level do not each redo it
+        lit_geometry = _lit_geometry(point, around, edge_lit is not None)
+        segment_geometry = _segment_geometry(point, around, rows[t], sampled[0]) if sampled is not None else None
+        scaled = np.empty((len(t), 3), np.float32)
+        accumulated = sub[part]
         for k in range(len(suns)):
-            value = np.einsum('nc,nc->n', w, corner[t, :, k].astype(np.float32))
-            distance = _lit_distance(point, around, edge_lit[t, :, k] if edge_lit is not None else None,
+            value = np.einsum('nc,nc->n', w, corner32[k][t])
+            distance = _lit_distance(lit_geometry, edge_lit[t, :, k] if edge_lit is not None else None,
                                      visible[t, :, k] >= 1)
             if sampled is not None:
-                distance = np.minimum(distance, _segment_distance(point, around, rows[t], sampled[k]))
-            sub[part] += (value * np.maximum(0, 1 - distance / np.float32(reach)))[:, None] * power[k].astype(np.float32)
+                distance = np.minimum(distance, _segment_nearest(segment_geometry, point, *sampled[k][4:]))
+            distance /= reach32
+            np.subtract(1, distance, out=distance)
+            np.maximum(0, distance, out=distance)
+            distance *= value
+            np.multiply(distance[:, None], power32[k], out=scaled)
+            accumulated += scaled
     sub_image = np.zeros((3 * height, 3 * width, 3), np.float32)
     sub_image[wanted] = sub
     total = sub_image.reshape(height, 3, width, 3, 3).sum(axis=(1, 3), dtype=np.float64)
@@ -300,9 +314,17 @@ def _segment_tables(scene, suns, reach, tris, lit, facing=None):
     return tables
 
 
-def _segment_distance(point, corners, tri, table):
-    slots, reverse, counts, starts, before, after = table
-    best = np.full(len(point), np.inf, np.float32)
+def _length(vectors):
+    # (a third of np.linalg.norm's time, and the same bits: both add x*x, y*y, z*z in that order)
+    return np.sqrt(np.einsum('nk,nk->n', vectors, vectors))
+
+
+def _segment_geometry(point, corners, tri, table):
+    """What `_segment_nearest` needs of each triangle edge that does not depend on the sun: the edge's start and
+    direction, the point's place along it, and the cell it falls in. Every sun's table shares `table`'s first four
+    arrays (only `before` and `after` differ)."""
+    slots, reverse, counts, starts = table[:4]
+    edges = []
     for c in range(3):
         flipped = reverse[tri, c, None]
         a = np.where(flipped, corners[:, (c + 1) % 3], corners[:, c])
@@ -313,25 +335,49 @@ def _segment_distance(point, corners, tri, table):
         n = counts[slot]
         n32 = n.astype(np.float32)
         cell = np.minimum((np.clip(f, 0, 1) * n32).astype(np.int64), n - 1)
-        address = starts[slot] + cell
+        edges.append((a, along, f, n, n32, starts[slot] + cell))
+    return edges
+
+
+def _segment_nearest(edges, point, before, after):
+    best = np.full(len(point), np.inf, np.float32)
+    for a, along, f, n, n32, address in edges:
         for index in (before[address], after[address]):
             valid = (index >= 0) & (index < n)
             lo = index.astype(np.float32) / n32
             hi = (index + 1).astype(np.float32) / n32
-            near = a + np.clip(f, lo, hi)[:, None] * along
-            best = np.minimum(best, np.where(valid, np.linalg.norm(point - near, axis=1), np.inf))
+            near = np.clip(f, lo, hi)[:, None] * along
+            near += a
+            np.subtract(point, near, out=near)
+            best = np.minimum(best, np.where(valid, _length(near), np.inf))
     return best
 
 
-def _lit_distance(point, corners, edge_lit, corner_lit):
-    """Per point, the distance to the nearest lit edge or lit corner of its triangle (inf with none)."""
-    best = np.full(len(point), np.inf, np.float32)
+def _segment_distance(point, corners, tri, table):
+    return _segment_nearest(_segment_geometry(point, corners, tri, table), point, *table[4:])
+
+
+def _lit_geometry(point, corners, with_edges):
+    """The distances from each point to its triangle's three edges (when the level has lit edges) and three corners,
+    which the sun only masks."""
+    edges, vertices = [], []
     for c in range(3):
         a, b = corners[:, c], corners[:, (c + 1) % 3]
-        if edge_lit is not None:
+        if with_edges:
             along = b - a
             t = np.einsum('nk,nk->n', point - a, along) / np.maximum(np.einsum('nk,nk->n', along, along), 1e-30)
             near = a + np.clip(t, 0, 1)[:, None] * along
-            best = np.minimum(best, np.where(edge_lit[:, c], np.linalg.norm(point - near, axis=1), np.inf))
-        best = np.minimum(best, np.where(corner_lit[:, c], np.linalg.norm(point - a, axis=1), np.inf))
+            edges.append(_length(point - near))
+        vertices.append(_length(point - a))
+    return edges, vertices
+
+
+def _lit_distance(geometry, edge_lit, corner_lit):
+    """Per point, the distance to the nearest lit edge or lit corner of its triangle (inf with none)."""
+    edges, vertices = geometry
+    best = np.full(len(vertices[0]), np.inf, np.float32)
+    for c in range(3):
+        if edge_lit is not None:
+            best = np.minimum(best, np.where(edge_lit[:, c], edges[c], np.inf))
+        best = np.minimum(best, np.where(corner_lit[:, c], vertices[c], np.inf))
     return best

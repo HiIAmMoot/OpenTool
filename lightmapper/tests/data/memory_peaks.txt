@@ -1,0 +1,16 @@
+memory_peaks.csv: measured peak process-tree commit (tree_bytes) per stage, for test_estimate_covers_the_measured_peaks.
+
+Each row is the largest peak among the repeats of one configuration, read from the kept bakes under
+.superpowers/sdd/release-0.2.2-b/cache (peaks.json, tree role) on an RTX 4060 laptop (OptiX), bloodgulch and timberland
+at the Normal and Ultra presets. The source column names the folder.
+- blender: any bake (cache/49c8abe76760, _dirty/*, 01bcca80bcdf, f1114ee51112, a66af450f487), with and without whole-page
+  tiles, adaptive sampling off and on.
+- vertex: after the vertex-memory fixes, from b6/<level>/after9b/replay.json (timberland Ultra, monaco Ultra). bloodgulch
+  never runs the texel gather the fixes changed, so its largest bake stands; timberland Normal is the only row from before
+  the fixes. bloodgulch Normal's vertex row was left out: its repeats ranged 0.29 to 0.95 GB, run-to-run noise on a ~1 GB
+  scene far below any warning.
+- glow: _dirty/timberland-Ultra-* only (the only level with flagged triangles that was baked on the tiled code).
+- finish: newest code only (_dirty/*, 01bcca80bcdf).
+glow_sub_texels is 9 * w * h over the pages holding a flagged triangle (read from each scene.npz) in Enhanced mode, else 0.
+Monaco has a vertex row only: its other stages were measured before the memory fixes and are not used.
+No CPU bake was measured; the CPU device uses the same constants.
