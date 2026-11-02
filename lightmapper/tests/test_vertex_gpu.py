@@ -776,3 +776,101 @@ def test_gpu_child_returns_the_lamp_throughput(tmp_path, vendor):
     result = vertex_gpu.run_in_child(tmp_path, pages, adapter_for(vendor), 300)
     assert np.array_equal(result.light_flat, expected.light_flat) and result.light_flat[0].any()
     assert np.array_equal(result.irradiance, expected.irradiance)
+
+
+# ---------- the texel sun-ray pass holds a block of rays, not all of them
+
+def many_suns_texel_case(tmp_path, suns=7):
+    case = texel_scene('flagged_bounce')
+    case['suns'] = [sun((0.15 * k, 0.1 * k, 1.0)) for k in range(suns)]
+    run_driver(tmp_path, **case)
+    with np.load(tmp_path / 'pages.npz') as data:
+        return [data[f'page_{i}'] for i in range(len(data.files))], len(case['texel']) * suns
+
+
+def assert_same_bytes(split, whole):
+    for field in dataclasses.fields(whole):
+        a, b = getattr(whole, field.name), getattr(split, field.name)
+        if isinstance(a, np.ndarray):
+            assert a.dtype == b.dtype and a.shape == b.shape and a.tobytes() == b.tobytes(), field.name
+        else:
+            assert a == b, field.name
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('limit', [5, 7, 18])
+def test_texel_sun_rays_in_blocks_give_the_same_bytes(tmp_path, vendor, monkeypatch, limit):
+    pages, _ = many_suns_texel_case(tmp_path)
+    whole = load_and_run(tmp_path, pages, adapter_for(vendor))
+    assert whole.texel_rgb.any()
+    seen = []
+    real = vertex_gpu._dispatch
+
+    def recording(kernel, count, **kwargs):
+        if 'shadow_count' in kwargs['vars']:
+            seen.append(count)
+        return real(kernel, count, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', recording)
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', limit)
+    split = load_and_run(tmp_path, pages, adapter_for(vendor))
+    # 18 texels x 7 suns: 5 and 7 cut every sun's rows unevenly (a texel's seven rays land in seven blocks), 18 is a block per sun
+    assert max(seen) <= limit and len(seen) >= 7 * -(-18 // limit)
+    assert_same_bytes(split, whole)
+
+
+@pytest.mark.blender
+def test_texel_sun_ray_arrays_are_gone_before_the_bounce_pass(tmp_path, vendor, monkeypatch):
+    pages, total = many_suns_texel_case(tmp_path)
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', 20)
+    held = []
+    real = vertex_gpu._gather_texel_reflection
+
+    def watching(*args, **kwargs):
+        # (numpy arrays are not tracked by gc, so what the calling frames still name is read from their locals)
+        frame, names = sys._getframe(1), []
+        while frame:
+            names += [(frame.f_code.co_name, name) for name, value in frame.f_locals.items()
+                      for array in (value if isinstance(value, tuple) else (value,))
+                      if isinstance(array, np.ndarray) and array.ndim and array.shape[0] >= total]
+            frame = frame.f_back
+        held.append(names)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_gather_texel_reflection', watching)
+    load_and_run(tmp_path, pages, adapter_for(vendor))
+    assert held and not any(held), held
+
+
+def test_shadow_dispatches_are_chunked_and_float32(tmp_path, vendor, device, monkeypatch):
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', 7)
+    arrays, job = scene_folder(tmp_path, 10, [sun((0.2, 0.1, 1.0))])
+    seen = []
+    real = vertex_gpu._upload
+
+    def recording(device, array, dtype, writable=False):
+        if writable and array.ndim == 2 and array.shape[1] == 4:
+            seen.append(array.dtype)
+        return real(device, array, dtype, writable)
+    monkeypatch.setattr(vertex_gpu, '_upload', recording)
+    pages = [np.zeros((16, 16, 3), np.float32)]
+    split = run_vertex_pass(arrays, job, [], pages, device)
+    assert len(seen) >= 2 and all(dtype == np.float32 for dtype in seen)
+    monkeypatch.undo()
+    assert_same_bytes(split, run_vertex_pass(arrays, job, [], pages, device))
+
+
+@pytest.mark.parametrize('limit', [1, 4, 7, 10 ** 9])
+def test_sun_ray_blocks_are_sun_rays_cut_into_blocks_of_one_sun(limit):
+    count = 11
+    pos = np.random.default_rng(3).uniform(-1, 1, (count, 3)).astype(np.float32)
+    normal = np.float32([[0, 0, 1]] * count)
+    scene = dict(query_pos=pos, query_normal=normal, query_class=np.int16([0, 1] * 5 + [0]))
+    suns = [dict(direction=[0.1 * k, 0.2, 1.0], classes=[0] if k % 2 else [0, 1], strength=1., color=[1, 1, 1])
+            for k in range(3)]
+    job = dict(suns=suns)
+    usable, n, *_ = query_frames(scene['query_normal'], 0)
+    whole = sun_rays(scene, job, usable, n)
+    blocks = list(vertex_gpu.sun_ray_blocks(scene, job, usable, n, limit))
+    assert all(1 <= len(block[0]) <= limit and len(set(block[1])) == 1 for block in blocks)
+    assert len(blocks) >= (-(-count // limit) if limit < count else 3)
+    for part, whole_part in zip(zip(*blocks), whole):
+        assert np.concatenate(part).tobytes() == whole_part.tobytes()

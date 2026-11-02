@@ -10,6 +10,7 @@ at full strength from either side. Both batches share the scene buffers and the 
 
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
+import itertools
 import json
 from pathlib import Path
 import subprocess
@@ -32,6 +33,9 @@ RAYS_PER_DISPATCH = 66600960
 # chunk near 270 MB on a GPU with little memory, where the dispatch cap alone would allow 66.6M luminances
 MAX_LUMINANCES_PER_CHUNK = 16777216
 LAMP_RAY_CHUNK = 2 ** 21
+# a shadow dispatch's rays, and a texel sun-ray block: both keep the working set a few hundred MB where all 48M texel
+# sun rays of a big map at once took several GB; a ray's result does not depend on its dispatch, so the split is invisible
+SHADOW_RAYS_PER_CHUNK = 2 ** 22
 SKIP_LIMIT = 256
 SHADERS = Path(__file__).with_name('shaders')
 
@@ -117,25 +121,30 @@ def _unit(direction):
     return d / np.linalg.norm(d)
 
 
-def sun_rays(scene, job, usable, n):
-    """(query, sun, origin, direction, cosine) of every sun ray the CPU pass casts, ordered by sun then query."""
+def sun_ray_blocks(scene, job, usable, n, limit):
+    """sun_rays one block at a time, in the same order: (query, sun, origin, direction, cosine) of at most limit rays,
+    each block from a single sun."""
     pos = scene['query_pos'].astype(np.float64)
     visible = sun_facing_queries(scene, job['suns'])
     ignore_normals = scene.get('query_ignore_normals', np.zeros(len(pos), bool))
     flagged = ignore_normals.any()
-    query, sun, cosine, direction = [], [], [], []
     for k, s in enumerate(job['suns']):
         d = _unit(s['direction'])
         c = np.where(ignore_normals, 1.0, n @ d) if flagged else n @ d
         rows = np.flatnonzero(usable & (c > 0) & np.isin(scene['query_class'], s['classes'])
                               & (ignore_normals | visible[:, k]))
-        query.append(rows)
-        sun.append(np.full(len(rows), k, np.int64))
-        cosine.append(c[rows])
-        direction.append(np.tile(d, (len(rows), 1)))
-    query, sun = np.concatenate(query + [np.empty(0, np.int64)]), np.concatenate(sun + [np.empty(0, np.int64)])
-    direction = np.concatenate(direction + [np.empty((0, 3))])
-    return (query, sun, pos[query] + RAY_EPSILON * direction, direction,
+        for first in range(0, len(rows), limit):
+            part = rows[first:first + limit]
+            direction = np.tile(d, (len(part), 1))
+            yield part, np.full(len(part), k, np.int64), pos[part] + RAY_EPSILON * direction, direction, c[part]
+
+
+def sun_rays(scene, job, usable, n):
+    """(query, sun, origin, direction, cosine) of every sun ray the CPU pass casts, ordered by sun then query."""
+    blocks = list(sun_ray_blocks(scene, job, usable, n, np.iinfo(np.int64).max))
+    query, sun, origin, direction, cosine = ([block[i] for block in blocks] for i in range(5))
+    return (np.concatenate(query + [np.empty(0, np.int64)]), np.concatenate(sun + [np.empty(0, np.int64)]),
+            np.concatenate(origin + [np.empty((0, 3))]), np.concatenate(direction + [np.empty((0, 3))]),
             np.concatenate(cosine + [np.empty(0)]))
 
 
@@ -345,17 +354,25 @@ def _ambient_of(table, cls):
     return table[np.clip(cls + 1, 0, None)] * (cls >= -1)[:, None]
 
 
-def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, lamps=(), on_lamp=None):
+def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, lamps=(), on_lamp=None,
+           shadow_blocks=None, on_shadow=None):
     """(carried rgb, escaped) per shadow ray from the kernels; each gather dispatch's luminances go to
     reduce(ids, lum, hemi, solid_angle) as they land, so no matrix of every ray's luminance is ever held. The
     lamp blocks (LampRays) are cast after the shadow rays, one block at a time, each handed to on_lamp(rays,
-    carried, escaped) as it lands."""
+    carried, escaped) as it lands. With shadow_blocks (an iterator of (query, sun, origin, direction, cosine), in place
+    of shadow_rays) the lamp blocks are cast first and each block of shadow rays is handed to on_shadow(query, sun,
+    carried, escaped) as it lands, so a caller that sums them in sun order adds in the order it would after all of them;
+    nothing is returned."""
+    if shadow_blocks is not None:
+        shadow_rays = (np.empty((0, 3)), np.empty((0, 3)))
     rays = int(job['vertex_rays'])
     origins, dirs = shadow_rays
     carried, escaped = np.ones((len(origins), 3)), np.ones(len(origins), bool)
     if not len(arrays['tris']):
         for block in lamps:
             on_lamp(block, np.ones((len(block.point), 3)), np.ones(len(block.point), bool))
+        for query, sun, *_ in shadow_blocks or ():
+            on_shadow(query, sun, np.ones((len(query), 3)), np.ones(len(query), bool))
         return carried, escaped
     cap = dispatch_cap(device)
     if rays > cap:
@@ -412,10 +429,11 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, 
 
     def cast_shadows(origin, direction, limit, skip):
         carried, escaped = np.ones((len(origin), 3)), np.ones(len(origin), bool)
-        for first in range(0, len(origin), cap):
-            chunk = slice(first, first + cap)
+        step = min(cap, SHADOW_RAYS_PER_CHUNK)
+        for first in range(0, len(origin), step):
+            chunk = slice(first, first + step)
             with _stage('shadow'):
-                out = _upload(device, np.zeros((len(origin[chunk]), 4)), np.float32, writable=True)
+                out = _upload(device, np.zeros((len(origin[chunk]), 4), np.float32), np.float32, writable=True)
                 _dispatch(shadow, len(origin[chunk]), vars=dict(
                     shared, shadow_origin=_upload(device, origin[chunk], np.float32),
                     shadow_dir=_upload(device, direction[chunk], np.float32),
@@ -427,10 +445,15 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, 
         return carried, escaped
 
     # (broadcast views: every sun and edge ray has the one limit and no skip, and a full array of each costs 16 bytes a ray)
-    carried, escaped = cast_shadows(origins, dirs, np.broadcast_to(np.float64(RAY_LENGTH), len(origins)),
-                                    np.broadcast_to(np.int64(-1), len(origins)))
+    def cast_unbounded(origin, direction):
+        return cast_shadows(origin, direction, np.broadcast_to(np.float64(RAY_LENGTH), len(origin)),
+                            np.broadcast_to(np.int64(-1), len(origin)))
+    if shadow_blocks is None:
+        carried, escaped = cast_unbounded(origins, dirs)
     for block in lamps:
         on_lamp(block, *cast_shadows(block.origin, block.direction, block.limit, block.skip))
+    for query, sun, origin, direction, _ in shadow_blocks or ():
+        on_shadow(query, sun, *cast_unbounded(origin, direction))
     del keep
     return carried, escaped
 
@@ -524,9 +547,10 @@ def _gather_texels(scene, job, textures, pages, device):
     probe = dict(scene, query_pos=scene['texel_pos'], query_normal=scene['texel_normal'],
                  query_class=scene['texel_class'], query_ignore_normals=np.ones(count, bool))
     probe.pop('query_inverse', None)
-    query, sun_index, origin, direction, _ = sun_rays(probe, job, usable, n)
+    blocks = sun_ray_blocks(probe, job, usable, n, SHADOW_RAYS_PER_CHUNK)
+    first_block = next(blocks, None)
     lights = job.get('lights') or []
-    lamp_rays = 0
+    lamp_rays = sun_ray_count = 0
 
     def on_lamp(lamp, carried, escaped):
         nonlocal lamp_rays
@@ -534,15 +558,24 @@ def _gather_texels(scene, job, textures, pages, device):
         strength = np.float64(lights[int(lamp.light[0])]['strength'])
         rgb[lamp.point[rows]] += strength * carried[rows] * lamp.factor[rows, None] / np.pi
         lamp_rays += int((lamp.limit > 0).sum())
-    if len(query) or lights:
+
+    def on_shadow(query, sun, carried, escaped):
+        nonlocal sun_ray_count
+        sun_ray_count += len(query)
+        # (a block holds one sun and distinct texels, and the blocks come in sun order, so each texel's light adds in
+        # the order the whole list gave)
+        rows = np.flatnonzero(escaped)
+        if len(rows):
+            light = job['suns'][int(sun[0])]
+            rgb[query[rows]] += np.float64(light['color']) * light['strength'] / np.pi * carried[rows]
+    if first_block is not None or lights:
         arrays = _scene_arrays(scene, textures, pages, True)
         table = np.zeros_like(ambient_table(job, scene['texel_class'], arrays['class_of']))
-        carried, escaped = _trace(device, arrays, table, job, [], (origin, direction), None, rgb=True,
-                                  lamps=iter_lamp_rays(scene['texel_pos'], n, np.ones(count, bool), usable, lights),
-                                  on_lamp=on_lamp)
-        for k, sun in enumerate(job['suns']):
-            rows = np.flatnonzero((sun_index == k) & escaped)
-            rgb[query[rows]] += np.float64(sun['color']) * sun['strength'] / np.pi * carried[rows]
+        _trace(device, arrays, table, job, [], None, None, rgb=True,
+               lamps=iter_lamp_rays(scene['texel_pos'], n, np.ones(count, bool), usable, lights), on_lamp=on_lamp,
+               shadow_blocks=itertools.chain([] if first_block is None else [first_block], blocks), on_shadow=on_shadow)
+        # (the scene arrays are rebuilt for each reflection pass, so none of this stays held through the bounces)
+        del arrays, table, first_block, blocks
 
     def install(base, values):
         return [p + texel_contribution(scene, i, p.shape[1], p.shape[0], values)[0] for i, p in enumerate(base)]
@@ -555,7 +588,7 @@ def _gather_texels(scene, job, textures, pages, device):
     emitted, casts = _gather_texel_reflection(scene, dict(job, gather_pages=False, gather_emission=True), textures,
                                               pages, device, None)
     rgb += emitted
-    casts += len(query) + lamp_rays
+    casts += sun_ray_count + lamp_rays
     # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
     # the ordinary samples')
     stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
