@@ -213,14 +213,6 @@ def test_whole_page_tiles_use_the_blender_stage_against_ram(small_model):
     assert not memory.whole_page_tiles(StageInputs(SceneCounts(0, 0), []), machine(10**15))
 
 
-def test_glow_tiles_use_the_glow_stage_term(small_model):
-    base = StageInputs(SceneCounts(0, 0), [(2048, 2048)], glow_sub_texels=100)
-    need = memory.stage_bytes(replace(base, whole_page_tiles=True))['glow']
-    assert need > memory.stage_bytes(replace(base, whole_page_tiles=True))['blender']
-    assert memory.whole_page_tiles(base, machine(need), 'glow')
-    assert not memory.whole_page_tiles(base, machine(need - 1), 'glow')
-
-
 def test_messages_exact(monkeypatch):
     only(monkeypatch, 'blender', BLENDER_BASE=20 * GB)
     pages = StageInputs(SceneCounts(0, 0), [(1024, 1024)])
@@ -268,11 +260,28 @@ def test_glow_peak_names_traditional(monkeypatch):
     assert 'Traditional' not in other
 
 
-def test_suggestion_scales_the_glow_with_the_page(monkeypatch):
+def test_suggestion_keeps_the_glow_total(monkeypatch):
+    # (the flagged pages repack into more, smaller pages, so their total stays about the same)
     only(monkeypatch, 'glow', GLOW_PER_GLOW_SUB_TEXEL=1000)
-    glow = StageInputs(SceneCounts(0, 0), [(2048, 2048)], glow_sub_texels=9 * 2048 * 2048)
-    assert memory.suggest_page_max(glow, 9 * 1024 * 1024 * 1000) == 1024
-    assert memory.suggest_page_max(glow, 9 * 1024 * 1024 * 1000 - 1) == 512
+    glow = StageInputs(SceneCounts(0, 0), [(2048, 2048)], glow_sub_texels=10**6)
+    assert memory.suggest_page_max(glow, 10**9) == 1024
+    assert memory.suggest_page_max(glow, 10**9 - 1) is None
+
+
+def test_suggestion_for_a_level_of_several_full_size_pages():
+    level = StageInputs(SceneCounts(38951, 106283), [(2048, 2048)] * 2, glow_sub_texels=75_497_472)
+    assert memory.peak_bytes(level)[1] > 12 * GB
+    assert memory.suggest_page_max(level, 12 * GB) == 1024
+    smaller = replace(level, pages=[(1024, 1024)] * 2)
+    assert memory.peak_bytes(smaller)[1] < 12 * GB
+
+
+def test_suggestion_keeps_the_total_page_texels(monkeypatch):
+    only(monkeypatch, 'vertex', VERTEX_PER_PAGE_TEXEL=1000)
+    level = StageInputs(SceneCounts(0, 0), [(2048, 2048)] * 4)
+    # (the vertex stage follows the page texels, which a smaller Max resolution does not shrink)
+    assert memory.suggest_page_max(level, 4 * 2048 * 2048 * 1000 - 1) is None
+    assert memory.suggest_page_max(level, 4 * 2048 * 2048 * 1000) == 1024
 
 
 def test_suggestion_without_pages_or_a_fitting_side():
@@ -282,6 +291,25 @@ def test_suggestion_without_pages_or_a_fitting_side():
 
 def test_format_gb():
     assert [memory.format_gb(n) for n in (9_840_000_000, 10_400_000_000, 25_462_081_056)] == ['9.8', '10', '25']
+
+
+def test_summary_ceiling_is_null_when_unknown(small_model):
+    check = memory.check_bake_memory(inputs(), 2048, Machine(2000, 2500, None))
+    assert memory.summary(inputs(), check)['ceiling_gb'] is None
+
+
+def test_glow_tiles_against_the_free_memory(small_model):
+    base = StageInputs(SceneCounts(0, 0), [(2048, 2048)], glow_sub_texels=100)
+    need = memory.stage_bytes(replace(base, whole_page_tiles=True))['glow']
+    assert memory.glow_whole_page_tiles(base, need)
+    assert not memory.glow_whole_page_tiles(base, need - 1)
+    assert not memory.glow_whole_page_tiles(base, None)
+    assert not memory.glow_whole_page_tiles(replace(base, pages=[(4096, 4096)]), 10**15)
+
+
+def test_free_physical_bytes_reads_this_computer():
+    free = memory.free_physical_bytes()
+    assert isinstance(free, int) and free > 0
 
 
 def test_summary(small_model):

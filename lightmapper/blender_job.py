@@ -14,7 +14,8 @@ import time
 
 import numpy as np
 
-from .memory import SceneCounts, StageInputs, out_of_memory_message, read_machine, whole_page_tiles
+from .memory import (SceneCounts, StageInputs, free_physical_bytes, glow_whole_page_tiles, out_of_memory_message,
+                     read_machine)
 from .formats.lights import SceneLight
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
@@ -408,8 +409,8 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[
     sizes = [tuple(p) for p in job['pages']]
     glow = sum(9 * w * h for i, (w, h) in enumerate(sizes) if f'page_{i}' in held)
     device = 'cpu' if job.get('device') == 'cpu' else 'gpu'
-    tiles = whole_page_tiles(StageInputs(SceneCounts.from_npz(work / 'scene.npz'), sizes, device, glow),
-                             read_machine(), 'glow')
+    tiles = glow_whole_page_tiles(StageInputs(SceneCounts.from_npz(work / 'scene.npz'), sizes, device, glow),
+                                  free_physical_bytes())
     job.update(whole_page_tiles=tiles, glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')
     (work / 'job_glow.json').write_text(json.dumps(job, indent=2))

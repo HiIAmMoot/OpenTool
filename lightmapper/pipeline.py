@@ -284,17 +284,17 @@ class SceneEstimate:
     device: str = 'gpu'
 
 
-def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine) -> memory.StageInputs:
-    glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' else 0
+def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine, bounces: int = 1) -> memory.StageInputs:
+    # (the glow run is skipped without bounces)
+    glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' and bounces > 0 else 0
     inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow)
     return replace(inputs, whole_page_tiles=memory.whole_page_tiles(inputs, machine))
 
 
-def _scene_estimate(scene, pages, choice) -> SceneEstimate:
+def _scene_estimate(scene, pages, device: str) -> SceneEstimate:
     sizes = [(p.width, p.height) for p in pages]
     return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
-                         memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes),
-                         'cpu' if choice is not None and choice.setting == 'cpu' else 'gpu')
+                         memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes), device)
 
 
 def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
@@ -311,12 +311,8 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     pages = _charts(input_file, geometry, radiosity, s, Path(charts))
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
-    try:
-        choice = gpu.probe_choice(s.device)
-    except gpu.DeviceError:
-        # (the bake itself reports a device it cannot use; the estimate only needs to know the CPU constants apply)
-        choice = None
-    return _scene_estimate(scene, pages, choice)
+    # (no GPU probe: the setting alone says whether the CPU constants apply)
+    return _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
 
 
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
@@ -453,7 +449,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
                                           s.scenery_emission)
         sizes = [(p.width, p.height) for p in pages]
         machine = memory.read_machine()
-        stages_in = stage_inputs(_scene_estimate(scene, pages, choice), s.ignore_normals_mode, machine)
+        stages_in = stage_inputs(_scene_estimate(scene, pages, 'cpu' if choice.setting == 'cpu' else 'gpu'),
+                                 s.ignore_normals_mode, machine, s.bounces)
         check = memory.check_bake_memory(stages_in, s.page_max, machine)
         if not check.fits:
             logger.warning('%s', check.message)

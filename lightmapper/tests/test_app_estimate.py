@@ -59,6 +59,15 @@ def test_describe_counts_the_glow_stage_only_in_enhanced_mode(result, monkeypatc
     assert 'Traditional' in text
 
 
+def test_describe_has_no_glow_without_bounces(result, monkeypatch):
+    from opentool.estimate import describe
+    monkeypatch.setattr(memory, 'GLOW_PER_GLOW_SUB_TEXEL', 1000)
+    result.flagged_sub_texels = 9 * GB // 1000
+    machine = memory.Machine(15 * GB, 15 * GB, 15 * GB)
+    assert describe(result, 1024, machine, 'enhanced', 0)[1] == 'fits'
+    assert describe(result, 1024, machine, 'enhanced', 1)[1] == 'risk'
+
+
 def test_describe_decides_tiles_from_the_machine(result, monkeypatch):
     from opentool.estimate import describe
     monkeypatch.setattr(memory, 'PER_TILE_SUB_TEXEL', 10**9)
@@ -94,6 +103,9 @@ def test_run_estimate_uses_chart_settings_and_level_cache(monkeypatch, tmp_path)
     tags, scenario, bsp, settings, cache = seen[0]
     assert (tags, scenario, bsp) == (tmp_path, 'level', 'room')
     assert settings == Settings(texels_per_unit=8.0, page_max=2048)
+    run_estimate(EstimateInputs(tmp_path, 'level', 'room', 8.0, 2048, 'enhanced', 'cpu', 0))
+    assert seen[1][3] == Settings(texels_per_unit=8.0, page_max=2048, ignore_normals_mode='enhanced', device='cpu',
+                                  bounces=0)
     assert cache == runner.chart_cache_path(tmp_path, 'level', 'room')
 
 

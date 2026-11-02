@@ -278,10 +278,15 @@ def test_glow_run_has_no_lights(tmp_path, monkeypatch):
     assert json.loads((tmp_path / 'job_glow.json').read_text())['lights'] == []
 
 
-@pytest.mark.parametrize('machine, tiles', [(Machine(10**13, 10**13, None), True), (Machine(1, 1, 1), False), (None, False)])
-def test_glow_run_decides_its_own_tiles(tmp_path, monkeypatch, machine, tiles):
+GLOW_TILED = memory.stage_bytes(StageInputs(SceneCounts(2, 6), [(16, 8)], 'gpu', 9 * 16 * 8, True))['glow']
+
+
+@pytest.mark.parametrize('free, tiles', [(GLOW_TILED, True), (GLOW_TILED - 1, False), (10**13, True), (None, False)])
+def test_glow_run_decides_its_own_tiles_from_the_free_memory(tmp_path, monkeypatch, free, tiles):
     write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), whole_page_tiles=not tiles)
-    monkeypatch.setattr(blender_job, 'read_machine', lambda: machine)
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: free)
+    # (the installed memory is no guide here: the page stage's arrays may still be held when the glow run starts)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: Machine(1, 1, 1))
 
     def stop(*args):
         raise BlenderError('stopped before Blender')

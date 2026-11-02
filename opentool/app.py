@@ -207,7 +207,7 @@ class App:
             entry.grid(row=index, column=1, sticky='ew', pady=2)
             self.advanced_entries[name] = entry
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
-            if name in ('texels_per_unit', 'page_max'):
+            if name in ('texels_per_unit', 'page_max', 'bounces'):
                 value.trace_add('write', lambda *_args: self._inputs_changed())
         self.adaptive_check = ttk.Checkbutton(
             self.advanced_frame, text='Adaptive sampling', variable=self.adaptive_var)
@@ -287,6 +287,8 @@ class App:
         controls = ttk.Frame(self.frame)
         controls.grid(row=13, column=0, sticky='ew', pady=(12, 0))
         self.bake_button = ttk.Button(controls, text='Bake', command=self.start_bake, state='disabled')
+        # (the CPU and GPU constants may differ, so the estimate follows the device)
+        self.device_var.trace_add('write', lambda *_args: self._inputs_changed())
         self.bake_button.pack(side='left')
         self.write_again_button = ttk.Button(controls, text='Write again', command=self.start_write_again, state='disabled')
         self.write_again_button.pack(side='left', padx=(6, 0))
@@ -418,7 +420,14 @@ class App:
             return None
         return EstimateInputs(self._tags, self._scenario, self.bsp_var.get(),
                               values['texels_per_unit'], values['page_max'],
-                              dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()])
+                              dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
+                              self._device_value(), self._bounces())
+
+    def _bounces(self) -> int:
+        try:
+            return presets.parse_advanced({'bounces': self.advanced_vars['bounces'].get()}).get('bounces', 1)
+        except ValueError:
+            return 1
 
     def _inputs_changed(self):
         # (a preset writes its fields one at a time; _select_preset estimates once when all are in)
@@ -836,7 +845,7 @@ class App:
                     continue
                 try:
                     text, state = estimate_module.describe(
-                        result, inputs.page_max, read_machine(), inputs.ignore_normals_mode)
+                        result, inputs.page_max, read_machine(), inputs.ignore_normals_mode, inputs.bounces)
                 except Exception as exc:
                     result = exc
                     text, state = errors.explain(exc), 'error'

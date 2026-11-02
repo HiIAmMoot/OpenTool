@@ -220,6 +220,7 @@ def test_estimate_starts_no_blender(tiny, monkeypatch, tmp_path):
 
     for name in ('run_blender', 'write_job'):
         monkeypatch.setattr(api(), name, refuse)
+    monkeypatch.setattr(gpu, 'probe_choice', refuse)
     estimate = api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
     assert estimate.pages
 
@@ -290,18 +291,22 @@ def test_estimate_scene_counts_flagged_sub_texels_and_device():
                             occ_positions=np.zeros((2, 3)), tri_page=np.int16([0, 0, 1]),
                             tri_ignore_normals=np.bool_([False, True, False]))
     pages = [SimpleNamespace(width=4, height=2), SimpleNamespace(width=8, height=8)]
-    found = api()._scene_estimate(scene, pages, SimpleNamespace(setting='cpu'))
+    found = api()._scene_estimate(scene, pages, 'cpu')
     assert found == api().SceneEstimate(memory.SceneCounts(4, 6), [(4, 2), (8, 8)], 9 * 4 * 2, 'cpu')
     scene.tri_ignore_normals = None
-    assert api()._scene_estimate(scene, pages, SimpleNamespace(setting='auto')).flagged_sub_texels == 0
-    assert api()._scene_estimate(scene, pages, SimpleNamespace(setting='auto')).device == 'gpu'
-    assert api()._scene_estimate(scene, pages, None).device == 'gpu'
+    assert api()._scene_estimate(scene, pages, 'gpu').flagged_sub_texels == 0
 
 
-def test_estimate_scene_reads_the_device_from_the_probe(tiny, monkeypatch, tmp_path):
+@pytest.mark.parametrize('device, want', [('cpu', 'cpu'), ('auto', 'gpu'), ('nvidia', 'gpu')])
+def test_estimate_scene_reads_the_device_from_the_setting(tiny, monkeypatch, tmp_path, device, want):
     tags, settings, work = tiny
-    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose('cpu', []))
-    assert api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz').device == 'cpu'
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('probed the GPU')
+
+    monkeypatch.setattr(gpu, 'probe_choice', refuse)
+    found = api().estimate_scene(tags, 'level', 'room', replace(settings, device=device), tmp_path / 'charts.npz')
+    assert found.device == want
 
 
 @pytest.mark.parametrize('mode, glow', [('enhanced', 9 * 64 * 64), ('tool', 0)])
@@ -310,6 +315,12 @@ def test_stage_inputs_count_the_glow_sub_texels_only_in_enhanced_mode(mode, glow
     inputs = api().stage_inputs(estimate, mode, BIG_MACHINE)
     assert (inputs.glow_sub_texels, inputs.whole_page_tiles, inputs.device) == (glow, True, 'gpu')
     assert api().stage_inputs(estimate, mode, None).whole_page_tiles is False
+
+
+def test_stage_inputs_have_no_glow_without_bounces():
+    estimate = api().SceneEstimate(memory.SceneCounts(1, 3), [(64, 64)], 9 * 64 * 64, 'gpu')
+    assert api().stage_inputs(estimate, 'enhanced', BIG_MACHINE, bounces=0).glow_sub_texels == 0
+    assert api().stage_inputs(estimate, 'enhanced', BIG_MACHINE, bounces=2).glow_sub_texels == 9 * 64 * 64
 
 
 def cpu_info():

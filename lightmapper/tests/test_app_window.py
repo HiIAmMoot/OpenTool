@@ -1357,7 +1357,6 @@ def test_non_chart_field_starts_no_estimate(ready_app_with_fake):
     previous = app.memory_label['text'], app.estimate_state
     app.advanced_vars['samples'].set('512')
     app.advanced_vars['vertex_rays'].set('8192')
-    app.device_var.set('CPU only')
     app._update_device_hint()
     app.root.update()
     assert len(fake.calls) == 1
@@ -1440,6 +1439,11 @@ def test_memory_risk_asks_before_baking(ready_app, monkeypatch, answer, new_name
     if answer:
         pump_app(app, lambda: not app.busy)
         assert len(started) == 1
+        assert [q[0] for q in asked] == (['Not enough memory'] if new_names else
+                                       ['Not enough memory', 'Replace your tags?'])
+    else:
+        assert not app.busy and started == []
+        assert len(asked) == 1
 
 
 def test_the_page_file_level_does_not_ask_before_baking(ready_app, monkeypatch):
@@ -2049,3 +2053,14 @@ def test_changing_the_ignore_normals_mode_estimates_again(ready_app_with_fake):
     app.ignore_normals_var.set(other)
     finish_estimate(app, fake)
     assert fake.calls[1].ignore_normals_mode == dict(presets.IGNORE_NORMALS)[other]
+
+
+def test_estimate_asks_for_the_users_device_and_bounces(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    assert (fake.calls[0].device, fake.calls[0].bounces) == ('auto', 1)
+    app.device_var.set('CPU only')
+    finish_estimate(app, fake)
+    assert fake.calls[1].device == 'cpu'
+    app.advanced_vars['bounces'].set('0')
+    finish_estimate(app, fake, 2)
+    assert fake.calls[2].bounces == 0
