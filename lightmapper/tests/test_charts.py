@@ -1699,3 +1699,23 @@ def test_an_island_of_only_zero_area_triangles_does_not_block_nesting():
     pages = _nested_or(rects, parts, s)
     assert pages is not rects and total_area(pages) < total_area(rects)
     assert sorted(int(i) for p in pages for m in p.materials for i in m.surface_ids) == sorted(list(range(16)) + [0, 1, 2])
+
+
+def test_auto_never_cuts_a_chart_that_needs_the_full_shape():
+    # (a 700 x 200 chart of 50-texel cells needs 1024 x 512; a page a step down would cut it)
+    pos, uvs, tris = [], [], []
+    for y in range(5):
+        for x in range(15):
+            pos.append([50 * x, 50 * y, 0])
+            uvs.append([50 * x / 1000, 50 * y / 1000])
+    for y in range(4):
+        for x in range(14):
+            a = 15 * y + x
+            tris += [[a, a + 1, a + 16], [a, a + 16, a + 15]]
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs)
+    pages = chart_and_pack([group], simple(), nest_settings())
+    corners = corners_by_surface(pages)
+    where = {int(sid): k for k, p in enumerate(pages) for m in p.materials for sid in m.surface_ids}
+    assert len(set(where.values())) == 1
+    quad = np.concatenate([corners[i] for i in range(len(tris))])
+    assert sorted(np.round(np.ptp(quad, axis=0))) == [200, 700]

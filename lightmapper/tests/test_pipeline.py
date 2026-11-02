@@ -253,21 +253,21 @@ def test_chart_cache_key_carries_auto_and_nest(tmp_path):
     assert len(keys) == 4
 
 
-def test_bake_combines_equal_pages_at_write(two_pages):
+def test_bake_repacks_the_charts_at_write(two_pages):
     tags, settings, work = two_pages
     out = api().bake(tags, 'level', 'room', settings, work=work)
     summary = json.loads((work / 'summary.json').read_text())
-    assert summary['pages'] == 1 and summary['sizes'] == [[16, 8]]
+    assert summary['pages'] == 1 and summary['sizes'] == [[8, 16]]
     assert summary['bake_sizes'] == [[8, 8], [8, 8]] and len(summary['utilisation']) == 1
     assert summary['page_max_resolved'] == 64
     assert len(summary['clipped_fraction']) == 1
     with np.load(work / 'float_pages.npz') as data:
-        assert data.files == ['page_0'] and data['page_0'].shape == (8, 16, 3)
-    assert [p.shape for p in out.float_pages] == [(8, 16, 3)]
+        assert data.files == ['page_0'] and data['page_0'].shape == (16, 8, 3)
+    assert [p.shape for p in out.float_pages] == [(16, 8, 3)]
     bsp = read_tag(resolve_reference_path(tags, 'sbsp', 'room'))
     assert len(bsp.root.block('lightmaps')) == 2
     bitmap = read_tag(resolve_reference_path(tags, 'bitm', 'room'))
-    assert [(b.get('width'), b.get('height')) for b in bitmap.root.block('bitmaps')] == [(16, 8)]
+    assert [(b.get('width'), b.get('height')) for b in bitmap.root.block('bitmaps')] == [(8, 16)]
     from lightmapper.diff import bitmap_pages
     from lightmapper.formats.vertices import decode_r5g6b5
     from lightmapper.pages import quantise
@@ -275,7 +275,7 @@ def test_bake_combines_equal_pages_at_write(two_pages):
         np.testing.assert_array_equal(pixels, decode_r5g6b5(quantise(image, settings)))
 
 
-def test_the_combine_is_capped_at_the_layouts_resolved_max(two_pages, monkeypatch):
+def test_the_repack_is_capped_at_the_layouts_resolved_max(two_pages, monkeypatch):
     from lightmapper.charts import PackedPages
     real = api()._charts
 
@@ -307,8 +307,21 @@ def test_written_layout_samples_the_baked_light(two_pages, monkeypatch, tmp_path
 
     monkeypatch.setattr(api(), 'run_blender', blender)
     combined = api().bake(tags, 'level', 'room', settings, work=work / 'a', out_bsp='combined')
-    monkeypatch.setattr(api(), 'plan_combine', lambda sizes, *a, **k: [combine.Placement(w, h, ((i, 0, 0),))
-                                                                        for i, (w, h) in enumerate(sizes)])
+    plan = api().written_plan
+    moved = []
+
+    def spy(pages, *args):
+        found = plan(pages, *args)
+        moved.extend(found[0])
+        return found
+    monkeypatch.setattr(api(), 'written_plan', spy)
+    api().bake(tags, 'level', 'room', settings, work=work / 'c', out_bsp='combined2')
+    # (each bake page is one block here; the second moves off its own page's origin)
+    assert len(moved) == 1 and len(moved[0].moves) == 2
+    assert any((m.to_x, m.to_y) != (m.x, m.y) for m in moved[0].moves)
+    monkeypatch.setattr(api(), 'written_plan', lambda pages, *a: ([combine.WrittenPage(
+        p.width, p.height, (combine.Move(i, 0, 0, p.width, p.height, 0, 0, False),)) for i, p in enumerate(pages)],
+        (64, 64)))
     plain = api().bake(tags, 'level', 'room', settings, work=work / 'b', out_bsp='plain')
     assert len(plain.float_pages) == 2 and len(combined.float_pages) == 1
 

@@ -421,11 +421,30 @@ def _split_oversized(pieces, side: int, padding: int) -> tuple[list, int, int]:
     return parts, split, made
 
 
-def auto_page_max(parts, s: ChartSettings) -> int:
-    # the smallest power of two (AUTO_PAGE_MIN up, within the hard cap) that holds the biggest chart whole with its
-    # padding. parts are the charts after anything over the cap is cut, so none of them is bigger than the cap
-    biggest = max(int(_padded_size(part[3], s.padding).max()) for part in parts)
-    return min(max(AUTO_PAGE_MIN, s.page_min, next_pow2(biggest)), AUTO_PAGE_MAX)
+def next_step(shape: tuple[int, int]) -> tuple[int, int]:
+    # one step down the page ladder: the longer side halves, so a square drops to half its height first.
+    # Shapes are kept wide (width >= height); a chart turns to fit
+    width, height = shape
+    return (width, height // 2) if width == height else (height, height)
+
+
+def ladder_shape(sizes, top: int, bottom: int) -> tuple[int, int]:
+    # the smallest step down from top x top that holds every (w, h) either way round, its longer side at least bottom
+    longest = max(max(size) for size in sizes)
+    shortest = max(min(size) for size in sizes)
+    shape = (top, top)
+    while True:
+        step = next_step(shape)
+        if step[0] < bottom or step[1] < 1 or longest > step[0] or shortest > step[1]:
+            return shape
+        shape = step
+
+
+def auto_page_max(parts, s: ChartSettings) -> tuple[int, int]:
+    # Auto is the page shape that holds the biggest chart whole with its padding (AUTO_PAGE_MIN up, within the hard
+    # cap); the bake side is its longer side. parts are the charts after anything over the cap is cut
+    return ladder_shape([tuple(_padded_size(part[3], s.padding)) for part in parts], AUTO_PAGE_MAX,
+                        max(AUTO_PAGE_MIN, s.page_min))
 
 
 def _widest_triangle(pieces, padding: int) -> tuple[int, str]:
@@ -931,7 +950,7 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
         # on pages or materials fail)
         pieces, split, made = _split_oversized(pieces, top, s.padding)
         logger.info('auto Max resolution: %d piece(s) over %d cut into %d parts', split, top, made)
-        side = max(auto_page_max(pieces, s), next_pow2(widest))
+        side = max(max(auto_page_max(pieces, s)), next_pow2(widest))
     else:
         side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
     while True:

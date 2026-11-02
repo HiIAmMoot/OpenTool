@@ -23,7 +23,7 @@ import numpy as np
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
-from .combine import combine_arrays, combine_layout, plan_combine
+from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, whole_pages, written_shape
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, point_clusters, read_geometry
@@ -253,6 +253,23 @@ def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path, nes
         pages = chart_and_pack(geometry.groups, radiosity, chart_s, nest=nest)
         save_charts(cache, pages, key)
     return pages
+
+
+def written_plan(pages, page_max_resolved: int, s: Settings):
+    # the repack the write applies, a function of the bake's layout and settings alone, so a write again repeats it
+    chart_s = _chart_settings(s)
+    blocks = chart_blocks(pages, chart_s.padding)
+    shape = written_shape(blocks, page_max_resolved, s.page_max == 'auto')
+    plan = plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages)
+    # (a repack that saves neither pages nor texels writes the bake pages as they are)
+    kept = whole_pages(pages)
+    if (len(plan), _plan_texels(plan)) >= (len(kept), _plan_texels(kept)):
+        return kept, shape
+    return plan, shape
+
+
+def _plan_texels(plan) -> int:
+    return sum(page.width * page.height for page in plan)
 
 
 def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
@@ -653,7 +670,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             denoise_seconds = denoise_worker.seconds
             denoise_device = denoise_worker.device
             warnings.extend(denoise_worker.warnings)
-    pixels = [quantise(finished, s) for finished in float_pages]
     vectors = finalize(result.vertex_vector, result.vertex_irradiance, scene.query_normal,
                        s.radiosity_mode, s.radiosity_scale)[inverse]
     offset = 0
@@ -661,17 +677,17 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         for material in page.materials:
             material.lm['incident_radiosity'] = vectors[offset:offset + len(material.env)]
             offset += len(material.env)
-    # (the bake ran on small pages; the written bitmap holds them combined, and everything the write and the summary
-    # report about pages describes those)
+    # (the bake ran on its own pages; the written bitmap holds the charts repacked, and everything the write and the
+    # summary report about pages describes those)
     page_max_resolved = getattr(pages, 'page_max', 0) or (
         s.page_max if isinstance(s.page_max, int) else max(max(p.width, p.height) for p in pages))
-    plan = plan_combine([(p.width, p.height) for p in pages], [len(p.materials) for p in pages],
-                        page_max_resolved, s.max_materials_per_page, s.max_pages)
+    plan, page_shape = written_plan(pages, page_max_resolved, s)
     bake_sizes = [[p.width, p.height] for p in pages]
-    float_pages = combine_arrays(float_pages, plan)
-    pixels = combine_arrays(pixels, plan)
-    masks = combine_arrays(masks, plan)
-    pages = combine_layout(pages, plan)
+    float_pages = repack_arrays(float_pages, plan)
+    # (quantised after the move: the dither follows the written position, so the bitmap is the written float page's)
+    pixels = [quantise(finished, s) for finished in float_pages]
+    masks = repack_arrays(masks, plan)
+    pages = repack_layout(pages, plan)
     utilisation = [float(mask.mean()) for mask in masks]
     clipped = [float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.
                for finished, mask in zip(float_pages, masks)]
@@ -703,7 +719,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'bake_sizes': bake_sizes,
-        'page_max_resolved': page_max_resolved,
+        'page_max_resolved': page_max_resolved, 'page_shape': list(page_shape),
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'written_paths': written_paths,

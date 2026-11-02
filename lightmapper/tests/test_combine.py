@@ -2,127 +2,211 @@ import numpy as np
 import pytest
 
 from lightmapper import raster
-from lightmapper.charts import CapError
-from lightmapper.combine import Placement, combine_arrays, combine_layout, plan_combine
-from lightmapper.formats.bsp import OutMaterial, OutPage
-from lightmapper.formats.vertices import LM
+from lightmapper.charts import CapError, ChartSettings, _charts_separated, _pack_rectangles, ladder_shape, next_step
+from lightmapper.combine import (Move, WrittenPage, chart_blocks, plan_repack, repack_arrays, repack_layout,
+                                 written_shape)
+from lightmapper.formats.bsp import SourceGroup
+from lightmapper.formats.vertices import ENV, LM
 
-EXAMPLES = [
-    ([(512, 512)] * 5, [(1024, 1024), (512, 512)]),
-    ([(512, 512)] * 21, [(2048, 2048), (1024, 1024), (512, 512)]),
-    ([(1024, 1024)] * 13, [(4096, 2048), (2048, 2048), (1024, 1024)]),
-    ([(2048, 2048)] * 12, [(4096, 4096)] * 3),
-    ([(512, 512)] * 6 + [(512, 128)], [(1024, 1024), (1024, 512), (512, 128)]),
-    ([(512, 512)] * 2 + [(512, 128)], [(1024, 512), (512, 128)]),
-    ([(256, 512)], [(256, 512)]),
-]
+PADDING = 4
 
 
-def plan_sizes(plan):
-    return sorted((p.width, p.height) for p in plan)
+def rect_pieces(sizes, sid0=0):
+    # one chart per size, w x h texels, each its own group so a test can tell them apart
+    pieces = []
+    for i, (w, h) in enumerate(sizes):
+        env = np.zeros(4, ENV)
+        env['position'] = [[0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0]]
+        tris = np.array([[0, 1, 2], [0, 2, 3]], np.int32)
+        group = SourceGroup(('senv', f'g{i}', 0, 0, -1), None, env, tris, np.arange(sid0 + 2 * i, sid0 + 2 * i + 2))
+        pieces.append((i, group, np.arange(4), env['position'][:, :2].astype(np.float64), tris, group.surface_ids))
+    return pieces
 
 
-@pytest.mark.parametrize('sizes, expected', EXAMPLES)
-def test_worked_examples(sizes, expected):
-    plan = plan_combine(sizes, [1] * len(sizes), 4096)
-    assert plan_sizes(plan) == sorted(expected)
+def bake_pages(sizes, side):
+    pieces = rect_pieces(sizes)
+    return _pack_rectangles(pieces, ChartSettings(page_max=side, padding=PADDING)), pieces
 
 
-def test_page_max_caps_the_combined_pages():
-    sizes = [(512, 512)] * 5
-    assert plan_sizes(plan_combine(sizes, [1] * 5, 512)) == [(512, 512)] * 5
-    assert plan_sizes(plan_combine(sizes, [1] * 5, 1024)) == [(512, 512), (1024, 1024)]
+def where(written):
+    # (written page, x, y, width, height) of each chart, found from its group
+    found = {}
+    for k, page in enumerate(written):
+        for m in page.materials:
+            texels = m.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            low, high = texels.min(axis=0), texels.max(axis=0)
+            found[m.group] = (k, *low, *(high - low))
+    return found
 
 
-@pytest.mark.parametrize('sizes, expected', EXAMPLES)
-def test_written_texels_equal_baked_texels(sizes, expected):
-    plan = plan_combine(sizes, [1] * len(sizes), 4096)
-    assert sum(p.width * p.height for p in plan) == sum(w * h for w, h in sizes)
-    assert sorted(i for p in plan for i, _, _ in p.sources) == list(range(len(sizes)))
+# ---------- the ladder
 
 
-def test_material_cap_leaves_a_run_uncombined():
-    four = [(512, 512)] * 4
-    assert plan_sizes(plan_combine(four, [600] * 4, 4096)) == [(1024, 512), (1024, 512)]
-    assert plan_sizes(plan_combine(four, [1100] * 4, 4096)) == [(512, 512)] * 4
-    assert plan_sizes(plan_combine(four, [500] * 4, 4096)) == [(1024, 1024)]
+@pytest.mark.parametrize('shape, step', [((2048, 2048), (2048, 1024)), ((2048, 1024), (1024, 1024)),
+                                         ((1024, 1024), (1024, 512)), ((512, 256), (256, 256))])
+def test_each_step_halves_the_longer_side(shape, step):
+    assert next_step(shape) == step
 
 
-def test_too_many_written_pages_refuse():
-    with pytest.raises(CapError):
-        plan_combine([(512, 512)] * 128, [1] * 128, 512, max_pages=127)
+@pytest.mark.parametrize('size, shape', [((1500, 600), (2048, 1024)), ((600, 1500), (2048, 1024)),
+                                         ((1500, 1100), (2048, 2048)), ((1024, 512), (1024, 512)),
+                                         ((1025, 10), (2048, 1024)), ((100, 90), (256, 128))])
+def test_the_shape_is_the_smallest_step_that_holds_the_chart(size, shape):
+    assert ladder_shape([size], 4096, 256) == shape
 
 
-def test_same_input_same_plan():
-    sizes = [(512, 512)] * 6 + [(512, 128)] * 3
-    assert plan_combine(sizes, [1] * 9, 4096) == plan_combine(sizes, [1] * 9, 4096)
+def test_a_square_drops_to_half_its_height_first():
+    assert ladder_shape([(2000, 1000)], 4096, 256) == (2048, 1024)
+    assert ladder_shape([(2000, 1100)], 4096, 256) == (2048, 2048)
 
 
-def random_pages(rng, count=4, size=64):
-    return [rng.random((size, size, 3), dtype=np.float32) for _ in range(count)]
+# ---------- the blocks a bake page holds
 
 
-def test_quadrants_are_the_source_pages_bit_for_bit():
-    rng = np.random.default_rng(1)
-    pages = random_pages(rng)
-    plan = plan_combine([(64, 64)] * 4, [1] * 4, 4096)
-    (out,) = combine_arrays(pages, plan)
-    assert out.shape == (128, 128, 3)
-    for i, ox, oy in plan[0].sources:
-        assert np.array_equal(out[oy:oy + 64, ox:ox + 64], pages[i])
+def test_each_rectangle_chart_is_one_block_of_its_padded_size():
+    pages, _ = bake_pages([(30, 20), (10, 40), (50, 5)], 128)
+    blocks = chart_blocks(pages, PADDING)
+    assert sorted((b.width, b.height) for b in blocks) == sorted([(38, 28), (18, 48), (58, 13)])
 
 
-def out_material(rng, count=6):
-    lm = np.zeros(count, LM)
-    lm['incident_radiosity'] = rng.random((count, 3), dtype=np.float32)
-    # a 2^-12 grid keeps the remap into the 128 page exact in float32
-    lm['texcoord'] = rng.integers(4 * 64, 60 * 64 + 1, (count, 2)) / 4096
-    return OutMaterial(0, np.zeros(count), lm, np.zeros((1, 3), np.int32), np.zeros(1, np.int32))
+# ---------- the repack
 
 
-def test_remapped_uv_samples_the_same_value():
-    rng = np.random.default_rng(2)
-    arrays = random_pages(rng)
-    pages = [OutPage(64, 64, [out_material(rng)]) for _ in range(4)]
-    plan = plan_combine([(64, 64)] * 4, [1] * 4, 4096)
-    (page,) = combine_layout(pages, plan)
-    (combined,) = combine_arrays(arrays, plan)
-    for k, material in enumerate(page.materials):
-        old = pages[k].materials[0].lm['texcoord']
-        got = raster.sample_bilinear(combined, material.lm['texcoord'])
-        assert np.allclose(got, raster.sample_bilinear(arrays[k], old), atol=1e-6)
+def big_and_small():
+    # three charts that need 1024 x 512 (none fits 512 x 512 either way round), then many small ones
+    return [(700, 200)] * 3 + [(80, 80)] * 120
 
 
-def test_nothing_to_combine_is_identity():
-    rng = np.random.default_rng(3)
-    sizes = [(64, 32), (128, 64), (32, 32)]
-    pages = [OutPage(w, h, [out_material(rng)]) for w, h in sizes]
-    arrays = [rng.random((h, w, 3), dtype=np.float32) for w, h in sizes]
-    plan = plan_combine(sizes, [1] * 3, 4096)
-    out = combine_layout(pages, plan)
-    for page, original in zip(out, [pages[p.sources[0][0]] for p in plan]):
-        assert (page.width, page.height) == (original.width, original.height)
-        assert page.materials[0].lm.tobytes() == original.materials[0].lm.tobytes()
-    for new, p in zip(combine_arrays(arrays, plan), plan):
-        assert np.array_equal(new, arrays[p.sources[0][0]])
+def test_charts_that_need_the_auto_shape_stay_whole_on_auto_pages():
+    pages, pieces = bake_pages(big_and_small(), 1024)
+    blocks = chart_blocks(pages, PADDING)
+    shape = written_shape(blocks, 1024, auto=True)
+    assert shape == (1024, 512)
+    plan = plan_repack(blocks, shape)
+    written = repack_layout(pages, plan)
+    places = where(written)
+    for i in range(3):
+        k, x, y, w, h = places[i]
+        assert (written[k].width, written[k].height) == (1024, 512)
+        assert {round(w), round(h)} == {700, 200}
+
+
+def test_smaller_charts_fill_the_free_space_on_auto_pages():
+    pages, pieces = bake_pages(big_and_small(), 1024)
+    blocks = chart_blocks(pages, PADDING)
+    plan = plan_repack(blocks, (1024, 512))
+    written = repack_layout(pages, plan)
+    places = where(written)
+    auto = {places[i][0] for i in range(3)}
+    # (two big charts take 416 of the 512 rows on a page, and leave a 316-texel column beside them)
+    on_auto = [i for i in range(3, 123) if places[i][0] in auto]
+    assert len(on_auto) >= 50
+    rest = {places[i][0] for i in range(3, 123)} - auto
+    assert rest and all(written[k].width <= 512 and written[k].height <= 512 for k in rest)
+    assert _charts_separated(written, ChartSettings(page_max=1024, padding=PADDING), pieces)
+
+
+def test_the_rest_go_on_pages_one_step_down():
+    pages, pieces = bake_pages([(700, 200)] + [(200, 200)] * 30, 1024)
+    blocks = chart_blocks(pages, PADDING)
+    plan = plan_repack(blocks, (1024, 512))
+    written = repack_layout(pages, plan)
+    places = where(written)
+    auto = places[0][0]
+    assert all(written[k].width <= 512 and written[k].height <= 512 for k in range(len(written)) if k != auto)
+    # (four 208-texel charts fit a 512 page)
+    assert len(written) <= 1 + -(-30 // 4)
+
+
+def test_a_fixed_max_resolution_is_the_shape():
+    pages, _ = bake_pages([(100, 100)] * 4, 512)
+    assert written_shape(chart_blocks(pages, PADDING), 512, auto=False) == (512, 512)
+
+
+def test_written_pages_keep_the_gap_and_every_triangle():
+    pages, pieces = bake_pages(big_and_small(), 1024)
+    blocks = chart_blocks(pages, PADDING)
+    written = repack_layout(pages, plan_repack(blocks, (1024, 512)))
+    assert _charts_separated(written, ChartSettings(page_max=1024, padding=PADDING), pieces)
+    assert sorted(int(i) for p in written for m in p.materials for i in m.surface_ids) == list(range(2 * 123))
+
+
+def test_moved_charts_sample_the_same_light():
+    pages, _ = bake_pages(big_and_small(), 1024)
+    rng = np.random.default_rng(7)
+    arrays = [rng.random((p.height, p.width, 3), dtype=np.float32) for p in pages]
+    blocks = chart_blocks(pages, PADDING)
+    plan = plan_repack(blocks, (1024, 512))
+    written, moved = repack_layout(pages, plan), repack_arrays(arrays, plan)
+    old = {m.group: (k, m) for k, p in enumerate(pages) for m in p.materials}
+    for page, image in zip(written, moved):
+        for m in page.materials:
+            k, before = old[m.group]
+            got = raster.sample_bilinear(image, m.lm['texcoord'])
+            assert np.allclose(got, raster.sample_bilinear(arrays[k], before.lm['texcoord']), atol=1e-5)
+
+
+def test_a_turned_chart_is_transposed_with_its_texels():
+    # a tall chart on a wide page has to turn
+    pages, _ = bake_pages([(40, 900)], 1024)
+    blocks = chart_blocks(pages, PADDING)
+    plan = plan_repack(blocks, written_shape(blocks, 1024, auto=True))
+    assert plan[0].moves[0].swapped and (plan[0].width, plan[0].height) == (1024, 64)
+    rng = np.random.default_rng(8)
+    arrays = [rng.random((p.height, p.width, 3), dtype=np.float32) for p in pages]
+    (page,), (image,) = repack_layout(pages, plan), repack_arrays(arrays, plan)
+    got = raster.sample_bilinear(image, page.materials[0].lm['texcoord'])
+    assert np.allclose(got, raster.sample_bilinear(arrays[0], pages[0].materials[0].lm['texcoord']), atol=1e-5)
 
 
 def test_incident_radiosity_rides_along():
-    rng = np.random.default_rng(4)
-    pages = [OutPage(64, 64, [out_material(rng)]) for _ in range(4)]
-    plan = plan_combine([(64, 64)] * 4, [1] * 4, 4096)
-    (page,) = combine_layout(pages, plan)
-    for k, material in enumerate(page.materials):
-        assert np.array_equal(material.lm['incident_radiosity'], pages[k].materials[0].lm['incident_radiosity'])
-        assert material.lm.dtype == LM
+    pages, _ = bake_pages(big_and_small(), 1024)
+    rng = np.random.default_rng(9)
+    for p in pages:
+        for m in p.materials:
+            m.lm['incident_radiosity'] = rng.random((len(m.lm), 3), dtype=np.float32)
+    written = repack_layout(pages, plan_repack(chart_blocks(pages, PADDING), (1024, 512)))
+    old = {m.group: m for p in pages for m in p.materials}
+    for p in written:
+        for m in p.materials:
+            assert m.lm.dtype == LM
+            assert np.array_equal(m.lm['incident_radiosity'], old[m.group].lm['incident_radiosity'])
+
+
+def test_same_input_same_plan():
+    pages, _ = bake_pages(big_and_small(), 1024)
+    assert plan_repack(chart_blocks(pages, PADDING), (1024, 512)) == \
+        plan_repack(chart_blocks(pages, PADDING), (1024, 512))
+
+
+def test_the_material_cap_holds_on_written_pages():
+    pages, _ = bake_pages([(20, 20)] * 12, 128)
+    plan = plan_repack(chart_blocks(pages, PADDING), (128, 128), max_materials=5)
+    written = repack_layout(pages, plan)
+    assert all(len(p.materials) <= 5 for p in written) and len(written) >= 3
+
+
+def test_too_many_written_pages_refuse():
+    pages, _ = bake_pages([(100, 100)] * 6, 128)
+    with pytest.raises(CapError, match='lightmap pages'):
+        plan_repack(chart_blocks(pages, PADDING), (128, 128), max_pages=5)
 
 
 @pytest.mark.parametrize('dtype', [np.uint16, np.uint32, np.bool_])
-def test_combine_keeps_the_dtype(dtype):
+def test_repack_keeps_the_dtype(dtype):
+    pages, _ = bake_pages([(20, 20)] * 4, 64)
     rng = np.random.default_rng(5)
-    arrays = [(rng.random((16, 16)) * 100).astype(dtype) for _ in range(4)]
-    plan = plan_combine([(16, 16)] * 4, [1] * 4, 4096)
-    (out,) = combine_arrays(arrays, plan)
-    assert out.dtype == np.dtype(dtype) and out.shape == (32, 32)
-    for i, ox, oy in plan[0].sources:
-        assert np.array_equal(out[oy:oy + 16, ox:ox + 16], arrays[i])
+    arrays = [(rng.random((p.height, p.width)) * 100).astype(dtype) for p in pages]
+    for out in repack_arrays(arrays, plan_repack(chart_blocks(pages, PADDING), (64, 64))):
+        assert out.dtype == np.dtype(dtype)
+
+
+def test_a_whole_page_move_is_identity():
+    rng = np.random.default_rng(3)
+    pages, _ = bake_pages([(20, 20)] * 4, 64)
+    arrays = [rng.random((p.height, p.width, 3), dtype=np.float32) for p in pages]
+    plan = [WrittenPage(p.width, p.height, (Move(i, 0, 0, p.width, p.height, 0, 0, False),)) for i, p in enumerate(pages)]
+    for new, old in zip(repack_layout(pages, plan), pages):
+        assert [m.lm.tobytes() for m in new.materials] == [m.lm.tobytes() for m in old.materials]
+    for new, old in zip(repack_arrays(arrays, plan), arrays):
+        assert np.array_equal(new, old)
