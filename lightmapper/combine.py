@@ -131,6 +131,12 @@ class _Page:
         self.placed = []
         self.materials = set()
 
+    def room(self) -> tuple[int, int]:
+        # (the largest free area and the longest free side, or nothing left)
+        if not len(self.free):
+            return 0, 0
+        return int((self.free[:, 2] * self.free[:, 3]).max()), int(self.free[:, 2:].max())
+
     def best(self, span):
         # (leftover short side, free rectangle, swapped) of the tightest fit, or None
         found = None
@@ -163,8 +169,13 @@ class _Page:
 def _fill(page: _Page, pending: list[int], blocks: list[Block], max_materials: int) -> list[int]:
     # places each pending block that still fits, in order, and gives back the ones that did not
     left = []
+    # (the largest free rectangle bounds what can still go in, which skips most tries on a full page)
+    room = page.room()
     for k in pending:
         block = blocks[k]
+        if block.width * block.height > room[0] or max(block.width, block.height) > room[1]:
+            left.append(k)
+            continue
         keys = {(block.page, m) for m in block.materials}
         found = page.best((block.width, block.height)) if len(page.materials | keys) <= max_materials else None
         if found is None:
@@ -173,6 +184,7 @@ def _fill(page: _Page, pending: list[int], blocks: list[Block], max_materials: i
         _, slot, swapped = found
         w, h = (block.height, block.width) if swapped else (block.width, block.height)
         x, y = page.place(slot, w, h)
+        room = page.room()
         page.moves.append(Move(block.page, block.x, block.y, block.width, block.height, x, y, swapped))
         page.placed.append(k)
         page.materials |= keys

@@ -453,13 +453,13 @@ def step_up(shape: tuple[int, int]) -> tuple[int, int]:
     return (width, width) if width != height else (2 * width, width)
 
 
-def written_pages(pages, shape: tuple[int, int], s: ChartSettings) -> int:
+def written_pages(pages, shape: tuple[int, int], s: ChartSettings, blocks=None) -> int:
     # how many pages the write repacks this layout onto at this shape, the count the Auto target is judged by.
     # (imported here: combine builds on this module)
     from .combine import chart_blocks, plan_repack
+    blocks = chart_blocks(pages, s.padding) if blocks is None else blocks
     try:
-        return len(plan_repack(chart_blocks(pages, s.padding), shape, s.page_min, s.max_materials_per_page,
-                               s.max_pages))
+        return len(plan_repack(blocks, shape, s.page_min, s.max_materials_per_page, s.max_pages))
     except CapError:
         return s.max_pages + 1
 
@@ -1054,7 +1054,14 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
     cap = (s.page_cap, s.page_cap)
     shape = auto_page_max(pieces, s)
     estimate_shape = None
-    nests, layouts = {}, {}
+    nests, layouts, block_cache = {}, {}, {}
+
+    def count_of(layout, shape):
+        # (two shapes of one bake side count the same layout, so its blocks are worked out once)
+        from .combine import chart_blocks
+        if id(layout) not in block_cache:
+            block_cache[id(layout)] = (layout, chart_blocks(layout, s.padding))
+        return written_pages(layout, shape, s, block_cache[id(layout)][1])
 
     def rect_layout(shape):
         # (shapes with one longer side share a bake side, and so the same pack, or the same cap failure)
@@ -1076,7 +1083,7 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
                 raise
             shape = step_up(shape)
             continue
-        count = written_pages(rectangles, shape, s)
+        count = count_of(rectangles, shape)
         if estimate_shape is None and (count <= min(AUTO_TARGET_PAGES, s.max_pages) or shape == cap):
             estimate_shape = shape
         layout = rectangles
@@ -1092,7 +1099,7 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
                 shape = step_up(shape)
                 continue
             if nested is not rectangles and _blocks_fit(nested, shape, s):
-                layout, count = nested, written_pages(nested, shape, s)
+                layout, count = nested, count_of(nested, shape)
         if count > min(AUTO_TARGET_PAGES, s.max_pages) and shape != cap:
             shape = step_up(shape)
             continue
@@ -1105,7 +1112,7 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
         # (the bake settled first; the estimate's shape is where the rectangles alone get within the target)
         probe = step_up(probe)
         try:
-            within = written_pages(rect_layout(probe)[0], probe, s) <= min(AUTO_TARGET_PAGES, s.max_pages)
+            within = count_of(rect_layout(probe)[0], probe) <= min(AUTO_TARGET_PAGES, s.max_pages)
         except CapError:
             within = False
         if within or probe == cap:

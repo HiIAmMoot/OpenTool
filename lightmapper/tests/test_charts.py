@@ -1791,7 +1791,7 @@ def test_a_fixed_max_refuses_before_the_bake_when_the_write_needs_too_many_pages
     from lightmapper import charts
     shapes = []
 
-    def too_many(pages, shape, s):
+    def too_many(pages, shape, s, blocks=None):
         shapes.append(shape)
         return s.max_pages + 1
     monkeypatch.setattr(charts, 'written_pages', too_many)
@@ -1804,7 +1804,7 @@ def test_auto_at_the_cap_refuses_when_the_write_needs_too_many_pages(monkeypatch
     from lightmapper import charts
     monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
     monkeypatch.setattr(charts, 'AUTO_PAGE_MIN', 256)
-    monkeypatch.setattr(charts, 'written_pages', lambda pages, shape, s: s.max_pages + 1)
+    monkeypatch.setattr(charts, 'written_pages', lambda pages, shape, s, blocks=None: s.max_pages + 1)
     with pytest.raises(CapError) as caught:
         chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings())
     assert caught.value.page_max == 'auto'
