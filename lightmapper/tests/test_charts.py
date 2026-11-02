@@ -1719,3 +1719,35 @@ def test_auto_never_cuts_a_chart_that_needs_the_full_shape():
     assert len(set(where.values())) == 1
     quad = np.concatenate([corners[i] for i in range(len(tris))])
     assert sorted(np.round(np.ptp(quad, axis=0))) == [200, 700]
+
+
+def written_count(pages, shape):
+    from lightmapper.charts import written_pages
+    return written_pages(pages, shape, nest_settings())
+
+
+def test_auto_steps_the_shape_up_until_ten_pages_or_fewer():
+    # 75 charts of 68 padded texels: three to a 256 x 128 page would be 25 pages, nine to a 256 x 256 page are 9
+    pages = chart_and_pack([rect_group([(60, 60)] * 75)], simple(), nest_settings())
+    assert pages.page_shape == (256, 256)
+    assert written_count(pages, (256, 128)) == 25
+    assert written_count(pages, pages.page_shape) <= 10
+
+
+def test_auto_within_the_page_target_keeps_the_shape_the_biggest_chart_needs():
+    pages = chart_and_pack([rect_group([(60, 60)] * 9)], simple(), nest_settings())
+    assert pages.page_shape == (256, 128)
+
+
+def test_auto_at_the_cap_may_stay_above_ten_pages(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 512)
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MIN', 256)
+    pages = chart_and_pack([rect_group([(400, 400)] * 12)], simple(), nest_settings())
+    assert pages.page_shape == (512, 512) and written_count(pages, (512, 512)) == 12
+
+
+def test_the_estimate_and_the_bake_choose_the_same_shape():
+    group = rect_group([(60, 60)] * 75)
+    assert chart_and_pack([group], simple(), nest_settings(), nest=True).page_shape == \
+        chart_and_pack([group], simple(), nest_settings(), nest=False).page_shape

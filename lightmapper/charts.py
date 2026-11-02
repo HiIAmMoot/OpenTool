@@ -29,11 +29,13 @@ from .gather import SIMPLE_PARAMETERIZATION, ShaderRadiosity
 
 logger = logging.getLogger(__name__)
 # identical input bytes and settings can have incompatible layouts under a different packing algorithm
-CACHE_VERSION = 13
+CACHE_VERSION = 14
 # the hard cap on a page side, and so on what 'auto' may come to (the most MCC accepts)
 AUTO_PAGE_MAX = 4096
 # the smallest side 'auto' settles on, however small the biggest chart is
 AUTO_PAGE_MIN = 256
+# Auto steps its page shape up the ladder until the written pages are this many or fewer (owner decision)
+AUTO_TARGET_PAGES = 10
 # xatlas always charts at this side, whatever the pages end up being, so the layout of a chart never depends on page_max
 CHART_SIDE = 4096
 # the bake side the search for the smallest page side starts from
@@ -44,10 +46,13 @@ class PackedPages(list):
     # the Max resolution the layout was made for: the fixed value, or what 'auto' came to for this level and density.
     # The written pages are capped at it, so the combine at write needs it and a cached layout has to carry it
     page_max: int = 0
+    # the shape every written page but the last is, so the write repacks onto what the estimate counted
+    page_shape: tuple[int, int] = ()
 
 
 def save_charts(path: Path, pages: list[OutPage], key: str):
     arrays = {'meta': json.dumps({'version': CACHE_VERSION, 'key': key, 'page_max': getattr(pages, 'page_max', 0),
+                                  'page_shape': list(getattr(pages, 'page_shape', ())),
                                   'pages': [[p.width, p.height, len(p.materials)] for p in pages]})}
     for i, page in enumerate(pages):
         for j, material in enumerate(page.materials):
@@ -85,6 +90,7 @@ def load_charts(path: Path, key: str) -> list[OutPage] | None:
                 pages.append(OutPage(width, height, materials))
             pages = PackedPages(pages)
             pages.page_max = int(meta['page_max'])
+            pages.page_shape = tuple(int(side) for side in meta['page_shape'])
     except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
         # an interrupted or damaged cache is disposable; gather and charts can rebuild it.
         return None
@@ -426,6 +432,23 @@ def next_step(shape: tuple[int, int]) -> tuple[int, int]:
     # Shapes are kept wide (width >= height); a chart turns to fit
     width, height = shape
     return (width, height // 2) if width == height else (height, height)
+
+
+def step_up(shape: tuple[int, int]) -> tuple[int, int]:
+    # one step up the page ladder, the reverse of next_step
+    width, height = shape
+    return (width, width) if width != height else (2 * width, width)
+
+
+def written_pages(pages, shape: tuple[int, int], s: ChartSettings) -> int:
+    # how many pages the write repacks this layout onto at this shape, the count the Auto target is judged by.
+    # (imported here: combine builds on this module)
+    from .combine import chart_blocks, plan_repack
+    try:
+        return len(plan_repack(chart_blocks(pages, s.padding), shape, s.page_min, s.max_materials_per_page,
+                               s.max_pages))
+    except CapError:
+        return s.max_pages + 1
 
 
 def ladder_shape(sizes, top: int, bottom: int) -> tuple[int, int]:
@@ -842,6 +865,12 @@ def _nest_pack(parts, s: ChartSettings, margin: int | None = None) -> list[OutPa
     return None if best is None else best[1]
 
 
+def _blocks_fit(pages, shape, s) -> bool:
+    from .combine import chart_blocks
+    return all(max(b.width, b.height) <= shape[0] and min(b.width, b.height) <= shape[1]
+               for b in chart_blocks(pages, s.padding))
+
+
 def _pages_area(pages) -> int:
     return sum(page.width * page.height for page in pages)
 
@@ -945,14 +974,11 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
     if widest > top:
         raise TriangleTooWide(shader, widest, top)
     if s.page_max == 'auto':
-        # (cut at the cap first, so what is left is what 'auto' must fit whole; the bake side is then the Max
-        # resolution itself, because a smaller side would cut that chart again, and it only rises when the caps
-        # on pages or materials fail)
+        # (cut at the cap first, so what is left is what 'auto' must fit whole)
         pieces, split, made = _split_oversized(pieces, top, s.padding)
         logger.info('auto Max resolution: %d piece(s) over %d cut into %d parts', split, top, made)
-        side = max(max(auto_page_max(pieces, s)), next_pow2(widest))
-    else:
-        side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
+        return _auto_pack(pieces, widest, s, nest)
+    side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
     while True:
         side_s = replace(s, page_max=side)
         parts, split, made = _split_oversized(pieces, side, s.padding)
@@ -969,11 +995,44 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
         if nest:
             pages = _nested_or(pages, parts, side_s)
         pages = PackedPages(pages)
-        pages.page_max = side if s.page_max == 'auto' else s.page_max
+        pages.page_max = s.page_max
+        pages.page_shape = (s.page_max, s.page_max)
         return pages
 
 
-def _nested_or(rectangles, parts, s):
+def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages:
+    # Auto starts from the shape the biggest chart needs, which never shrinks, so no chart is cut. While the write
+    # would make more than AUTO_TARGET_PAGES pages of it, or the caps fail, the shape steps up the ladder, to the cap.
+    # The count is taken on the rectangle layout, which the estimate makes too, so both arrive at the same shape
+    top = s.page_cap
+    shape = auto_page_max(pieces, s)
+    while True:
+        side = max(max(shape), next_pow2(widest))
+        side_s = replace(s, page_max=side)
+        parts, split, made = _split_oversized(pieces, side, s.padding)
+        try:
+            pages = _pack_rectangles(parts, side_s)
+            _check_caps(pages, side_s)
+            count = written_pages(pages, shape, s)
+        except CapError:
+            if shape == (top, top):
+                raise
+            count = None
+        if shape != (top, top) and (count is None or count > AUTO_TARGET_PAGES):
+            shape = step_up(shape)
+            continue
+        break
+    logger.info('auto page shape %dx%d: %d written page(s); bake side %d, %d piece(s) split into %d parts',
+                *shape, count, side, split, made)
+    if nest:
+        pages = _nested_or(pages, parts, side_s, shape)
+    pages = PackedPages(pages)
+    pages.page_max = side
+    pages.page_shape = shape
+    return pages
+
+
+def _nested_or(rectangles, parts, s, shape=None):
     units = _nest_units(parts)
     # xatlas places each chart stretched to whole texels and we keep it unstretched, so a hollow chart's inner edge
     # can sit up to a texel nearer what nests in it than xatlas left. A texel more of xatlas padding on every chart
@@ -995,6 +1054,10 @@ def _nested_or(rectangles, parts, s):
         nested = None
     if nested is None:
         logger.info('nesting: %s, keeping the rectangle layout', reason)
+        return rectangles
+    if shape is not None and not _blocks_fit(nested, shape, s):
+        # (charts nested into each other move as one block at the write, which a half-height shape may not hold)
+        logger.info('nesting: a nested block does not fit the %dx%d page shape, keeping the rectangle layout', *shape)
         return rectangles
     # (a tie keeps the rectangle layout: nesting moves charts for nothing)
     if (len(nested), _pages_area(nested)) >= (len(rectangles), _pages_area(rectangles)):

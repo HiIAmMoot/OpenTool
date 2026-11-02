@@ -111,7 +111,8 @@ def chart_blocks(pages: list[OutPage], padding: int) -> list[Block]:
 
 
 def written_shape(blocks: list[Block], page_max: int, auto: bool) -> tuple[int, int]:
-    # Auto is the ladder step that holds the biggest block; a fixed Max resolution is its own square
+    # for a layout that carries no shape: the ladder step that holds the biggest block under Auto, and a fixed Max
+    # resolution's own square
     if not auto:
         return page_max, page_max
     return ladder_shape([(b.width, b.height) for b in blocks], page_max, AUTO_PAGE_MIN)

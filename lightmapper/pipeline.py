@@ -259,7 +259,8 @@ def written_plan(pages, page_max_resolved: int, s: Settings):
     # the repack the write applies, a function of the bake's layout and settings alone, so a write again repeats it
     chart_s = _chart_settings(s)
     blocks = chart_blocks(pages, chart_s.padding)
-    shape = written_shape(blocks, page_max_resolved, s.page_max == 'auto')
+    # (the layout carries the shape charting chose; only a layout made some other way has to work one out)
+    shape = tuple(getattr(pages, 'page_shape', ())) or written_shape(blocks, page_max_resolved, s.page_max == 'auto')
     return plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages), shape
 
 

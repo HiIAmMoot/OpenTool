@@ -20,7 +20,8 @@ def test_cache_roundtrip(tmp_path):
     assert load_charts(path, 'key') is None
     save_charts(path, pages, 'key')
     with np.load(path, allow_pickle=False) as data:
-        assert json.loads(str(data['meta'])) == {'version': 12, 'key': 'key', 'pages': [[8, 16, 1]]}
+        assert json.loads(str(data['meta'])) == {'version': 14, 'key': 'key', 'page_max': 0, 'page_shape': [],
+                                                 'pages': [[8, 16, 1]]}
         assert data['p0_m0_group'].dtype == np.int32
         assert data['p0_m0_tris'].dtype == np.uint16
         assert data['p0_m0_surface_ids'].dtype == np.int32
@@ -183,8 +184,8 @@ def test_cache_version_is_bumped(tmp_path, monkeypatch):
     path = tmp_path / 'charts.npz'
     env, lm = np.zeros(3, ENV), np.zeros(3, LM)
     pages = [OutPage(8, 16, [OutMaterial(7, env, lm, np.array([[2, 0, 1]]), np.array([19]))])]
-    monkeypatch.setattr(charts, 'CACHE_VERSION', 11)
+    monkeypatch.setattr(charts, 'CACHE_VERSION', 13)
     charts.save_charts(path, pages, 'key')
     monkeypatch.undo()
-    assert charts.CACHE_VERSION == 12
+    assert charts.CACHE_VERSION == 14
     assert charts.load_charts(path, 'key') is None
