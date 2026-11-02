@@ -490,3 +490,178 @@ def test_texel_queries_cover_each_flagged_subtexel():
     np.testing.assert_allclose(query['texel_normal'], [[0, 0, 1]] * 36)
     scene.tri_ignore_normals[:] = False
     assert len(texel_queries(scene, 0, 2, 2)['texel_pos']) == 0
+
+
+# ---------- the finish stage's sun-independent work runs once per chunk (the old code stays here as the reference)
+
+def _old_segment_distance(point, corners, tri, table):
+    slots, reverse, counts, starts, before, after = table
+    best = np.full(len(point), np.inf, np.float32)
+    for c in range(3):
+        flipped = reverse[tri, c, None]
+        a = np.where(flipped, corners[:, (c + 1) % 3], corners[:, c])
+        b = np.where(flipped, corners[:, c], corners[:, (c + 1) % 3])
+        along = b - a
+        f = np.einsum('nk,nk->n', point - a, along) / np.maximum(np.einsum('nk,nk->n', along, along), 1e-30)
+        slot = slots[tri, c]
+        n = counts[slot]
+        n32 = n.astype(np.float32)
+        cell = np.minimum((np.clip(f, 0, 1) * n32).astype(np.int64), n - 1)
+        address = starts[slot] + cell
+        for index in (before[address], after[address]):
+            valid = (index >= 0) & (index < n)
+            lo = index.astype(np.float32) / n32
+            hi = (index + 1).astype(np.float32) / n32
+            near = a + np.clip(f, lo, hi)[:, None] * along
+            best = np.minimum(best, np.where(valid, np.linalg.norm(point - near, axis=1), np.inf))
+    return best
+
+
+def _old_lit_distance(point, corners, edge_lit, corner_lit):
+    best = np.full(len(point), np.inf, np.float32)
+    for c in range(3):
+        a, b = corners[:, c], corners[:, (c + 1) % 3]
+        if edge_lit is not None:
+            along = b - a
+            t = np.einsum('nk,nk->n', point - a, along) / np.maximum(np.einsum('nk,nk->n', along, along), 1e-30)
+            near = a + np.clip(t, 0, 1)[:, None] * along
+            best = np.minimum(best, np.where(edge_lit[:, c], np.linalg.norm(point - near, axis=1), np.inf))
+        best = np.minimum(best, np.where(corner_lit[:, c], np.linalg.norm(point - a, axis=1), np.inf))
+    return best
+
+
+def _old_sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
+    from lightmapper.raster import triangle_weights
+    from lightmapper.terminator import CHUNK, prepare_boundaries
+    term = np.zeros((height, width, 3), np.float32)
+    rows = np.flatnonzero(scene.tri_page == page)
+    if not len(rows) or not len(suns):
+        return term
+    tris = scene.tris[rows]
+    if boundaries is None:
+        boundaries = prepare_boundaries(scene, suns, reach, edge_sun_lit)
+    corners = scene.positions[tris].astype(np.float64)
+    smooth = scene.normals[tris].astype(np.float64)
+    direction = np.array([sun['direction'] for sun in suns], np.float64)
+    direction /= np.linalg.norm(direction, axis=1, keepdims=True)
+    away = boundaries.away[rows]
+    if not away.any():
+        return term
+    length = np.linalg.norm(smooth, axis=2, keepdims=True)
+    unit = smooth / np.where(length > 0, length, 1)
+    cosine = np.maximum(np.einsum('tck,sk->tcs', unit, direction), 0)
+    visible = np.asarray(lit, np.float64)[scene.query_inverse[tris]]
+    power = np.array([sun['color'] for sun in suns], np.float64) * np.array([sun['strength'] for sun in suns])[:, None] / np.pi
+    corner = cosine * visible * away[:, None, :]
+    owner, weights = triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
+    covered = owner >= 0
+    count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
+    wanted = covered & away.any(axis=1)[np.maximum(owner, 0)]
+    tri = owner[wanted]
+    weight = weights[wanted]
+    sampled = boundaries.segments
+    edge_lit = boundaries.edge_lit[rows] if boundaries.edge_lit is not None else None
+    corners32 = corners.astype(np.float32)
+    sub = np.zeros((len(tri), 3), np.float32)
+    for start in range(0, len(tri), CHUNK):
+        part = slice(start, start + CHUNK)
+        t, w = tri[part], weight[part]
+        around = corners32[t]
+        point = np.einsum('nc,nck->nk', w, around)
+        for k in range(len(suns)):
+            value = np.einsum('nc,nc->n', w, corner[t, :, k].astype(np.float32))
+            distance = _old_lit_distance(point, around, edge_lit[t, :, k] if edge_lit is not None else None,
+                                         visible[t, :, k] >= 1)
+            if sampled is not None:
+                distance = np.minimum(distance, _old_segment_distance(point, around, rows[t], sampled[k]))
+            sub[part] += (value * np.maximum(0, 1 - distance / np.float32(reach)))[:, None] * power[k].astype(np.float32)
+    sub_image = np.zeros((3 * height, 3 * width, 3), np.float32)
+    sub_image[wanted] = sub
+    total = sub_image.reshape(height, 3, width, 3, 3).sum(axis=(1, 3), dtype=np.float64)
+    return (total / np.maximum(count, 1)[:, :, None]).astype(np.float32)
+
+
+def several_suns(scene, count=4):
+    """Suns that differ in direction, class set, colour and strength, with corner and edge visibility that differs
+    per sun and leaves some corners and edge stretches dark."""
+    from lightmapper.terminator import edge_queries
+    rng = np.random.default_rng(11)
+    suns = [dict(direction=d, color=c, strength=s, classes=[0])
+            for d, c, s in [(LIGHT.tolist(), [1, 1, 1], 3.0), ([-0.8, 0.1, 0.6], [1, 0.5, 0.25], 2.0),
+                            ([0.3, -0.5, 0.8], [0.2, 0.9, 0.4], 5.5), ([0, 0, 1], [1, 1, 1], 1.0)]][:count]
+    if count > 3:
+        # (a class that no triangle has: this sun takes no term at all)
+        suns[3]['classes'] = [3]
+    lit = rng.random((len(scene.query_pos), len(suns))) > 0.3
+    edge = edge_queries(scene, suns, 0.225)
+    flags = rng.random(edge['edge_active'].shape) > 0.25
+    return suns, lit, flags
+
+
+@pytest.mark.parametrize('sampled', [False, True])
+@pytest.mark.parametrize('chunk', [None, 257])
+def test_sun_term_with_hoisted_work_is_bit_identical_to_the_old_per_sun_version(monkeypatch, sampled, chunk):
+    import lightmapper.terminator as terminator
+    scene = terrace()
+    suns, lit, flags = several_suns(scene)
+    if chunk:
+        monkeypatch.setattr(terminator, 'CHUNK', chunk)
+    kw = dict(edge_sun_lit=flags) if sampled else {}
+    want = _old_sun_term(scene, suns, lit, 0, 192, 192, 0.225, **kw)
+    got = sun_term(scene, suns, lit, 0, 192, 192, 0.225, **kw)
+    assert want.max() > 0
+    np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize('sampled', [False, True])
+def test_distance_helpers_are_bit_identical_on_random_points(sampled):
+    import lightmapper.terminator as terminator
+    scene = terrace()
+    suns, lit, flags = several_suns(scene)
+    boundaries = terminator.prepare_boundaries(scene, suns, 0.225, flags if sampled else None)
+    rng = np.random.default_rng(5)
+    count = 3000
+    t = rng.integers(0, len(scene.tris), count)
+    w = rng.dirichlet([1, 1, 1], count).astype(np.float32)
+    # (a weight of exactly 0 or 1 puts the point on a corner, where the nearest-lit-stretch cell changes)
+    w[:200] = np.eye(3, dtype=np.float32)[rng.integers(0, 3, 200)]
+    around = scene.positions[scene.tris[t]].astype(np.float32)
+    point = np.einsum('nc,nck->nk', w, around)
+    corner_lit = rng.random((count, 3)) > 0.4
+    for k in range(len(suns)):
+        edge_lit = boundaries.edge_lit[t, :, k] if boundaries.edge_lit is not None else None
+        want = _old_lit_distance(point, around, edge_lit, corner_lit)
+        got = terminator._lit_distance(terminator._lit_geometry(point, around, edge_lit is not None),
+                                       edge_lit, corner_lit)
+        np.testing.assert_array_equal(got, want)
+        if sampled:
+            table = boundaries.segments[k]
+            want = _old_segment_distance(point, around, t, table)
+            np.testing.assert_array_equal(terminator._segment_distance(point, around, t, table), want)
+            geometry = terminator._segment_geometry(point, around, t, table)
+            np.testing.assert_array_equal(terminator._segment_nearest(geometry, point, *table[4:]), want)
+
+
+def test_the_sun_independent_geometry_is_built_once_per_chunk_whatever_the_sun_count(monkeypatch):
+    import lightmapper.terminator as terminator
+    scene = terrace()
+    monkeypatch.setattr(terminator, 'CHUNK', 3000)
+    calls = []
+    real = {name: getattr(terminator, name) for name in ('_segment_geometry', '_lit_geometry')}
+
+    def run(count):
+        suns, lit, flags = several_suns(scene, count)
+        seen = {'segment': 0, 'lit': 0}
+        for name, key in (('_segment_geometry', 'segment'), ('_lit_geometry', 'lit')):
+            def counted(*args, _real=real[name], _key=key):
+                seen[_key] += 1
+                return _real(*args)
+            monkeypatch.setattr(terminator, name, counted)
+        sun_term(scene, suns, lit, 0, 192, 192, 0.225, edge_sun_lit=flags)
+        calls.append(seen)
+
+    run(1)
+    run(4)
+    assert calls[0]['segment'] > 2
+    assert calls[0] == calls[1]
+    assert calls[1]['segment'] == calls[1]['lit']
