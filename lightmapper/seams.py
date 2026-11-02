@@ -208,6 +208,7 @@ def stitch_seams(pages, images, joined_groups=()):
         values[mine] = images[p].reshape(-1, 3)[pixel[mine] - offsets[p]]
     from concurrent.futures import ThreadPoolExecutor
 
+    # (each channel is its own solve of the same matrices, and `values` is written only once all three have finished)
     def solve(channel):
         return lsqr(weighted, -(matrix @ values[:, channel]), atol=1e-8, btol=1e-8, iter_lim=200)[0]
     with ThreadPoolExecutor(3) as pool:
