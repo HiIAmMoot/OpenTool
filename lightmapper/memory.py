@@ -284,7 +284,7 @@ def out_of_memory_message(inputs: StageInputs, page_max: int, machine: Machine |
         text += (f' Try Max resolution {side}, or close other programs. '
                  'If the level then needs too many pages or still does not fit, lower the texel density a little.')
     if stage == 'glow':
-        text += ' Or set "ignore_normals_mode" to "tool" in the settings file.'
+        text += ' Or set "ignore_normals_mode" to "tool" in the --settings file.'
     return text
 
 

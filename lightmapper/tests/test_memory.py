@@ -254,7 +254,7 @@ def test_glow_peak_names_traditional(monkeypatch):
     glow = StageInputs(SceneCounts(0, 0), [(512, 512)], glow_sub_texels=10**9)
     text = memory.out_of_memory_message(glow, 512, Machine(8 * GB, 8 * GB, 9 * GB))
     assert '(baking light from ignore-normals surfaces)' in text
-    assert text.endswith(' Or set "ignore_normals_mode" to "tool" in the settings file.')
+    assert text.endswith(' Or set "ignore_normals_mode" to "tool" in the --settings file.')
     other = memory.out_of_memory_message(replace(glow, glow_sub_texels=0, counts=SceneCounts(0, 10**9)), 512,
                                          Machine(8 * GB, 8 * GB, 9 * GB))
     assert 'ignore_normals_mode' not in other

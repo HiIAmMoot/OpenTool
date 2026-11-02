@@ -30,7 +30,7 @@ Each column is one view in game in HCEEK: tool's own lightmaps on top, OpenTool'
 - Fast CPU-only bakes when there is no GPU
 - 32-bit lightmaps
 - Static scenery lights
-- Ignore-normals shaders: Traditional (like tool) or Enhanced (more accurate)
+- Ignore-normals shaders lit like tool (an experimental Enhanced mode is available through a `--settings` file)
 - Accurate shadows from alpha-tested shader environments and other transparent shaders
 - Automatic scene set-up from scenario, sky tag and shaders like tool.
 - Memory estimate and warning before a bake
