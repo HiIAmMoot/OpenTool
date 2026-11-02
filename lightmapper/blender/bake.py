@@ -864,9 +864,9 @@ def merge_extra(base, owned, base_spp, tiers, extra):
 
 # Blender's bake raster samples a pixel at this offset from its corner (bake.cc subtracts 0.501, 0.502 before scan conversion)
 RASTER_POINT = (0.501, 0.502)
-# widens a slot's footprint square to hold the jitter footprint the raster offset shifts (b9 spike report)
+# widens a slot's footprint square to hold the jitter footprint the raster offset shifts (measured on test scenes)
 ATLAS_EPS = 0.02
-# slot pixels sit on a grid this far apart, from this corner, so the triangle around each has room (b9 spike report)
+# slot pixels sit on a grid this far apart, from this corner, so the triangle around each has room (measured on test scenes)
 ATLAS_STRIDE = 4
 ATLAS_OFFSET = 2
 # how far, in pixels, a triangle may fall short of a pixel centre and still count as covering it
