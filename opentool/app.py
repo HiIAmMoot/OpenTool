@@ -18,6 +18,7 @@ from .estimate import EstimateInputs
 
 # how long each compared value's frame stays up in an Advanced example
 EXAMPLE_FRAME_MS = 1500
+EXAMPLE_LEAVE_MS = 60
 
 
 class _BakeGate:
@@ -58,6 +59,7 @@ class App:
         self._example_timer = None
         self._example_hover = None
         self._example_focus = None
+        self._leave_timer = None
         self.generation = 0
         self.estimate_state = 'idle'
         self._estimate_inputs: EstimateInputs | None = None
@@ -190,8 +192,8 @@ class App:
         self._advanced_open = False
         self.row_hints = {}
         row_labels = {}
-        self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'lightmap_32bit',
-                          'render_only_shadows')
+        self.row_order = (*presets.ADVANCED, 'render_only_shadows', 'adaptive_sampling',
+                          'lightmap_32bit')
         self.adaptive_var = tk.BooleanVar(value=self.settings.adaptive_sampling)
         self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
         self.render_only_shadows_var = tk.StringVar(
@@ -253,14 +255,15 @@ class App:
             for widget in (row_labels.get(name), controls[name]):
                 if widget is None:
                     continue
-                widget.bind('<Enter>', lambda _event, name=name: self._on_example_hover(name), add='+')
-                widget.bind('<Leave>', lambda _event: self._on_example_hover(None), add='+')
+                widget.bind('<Enter>', lambda _event, name=name: self._on_row_enter(name), add='+')
+                widget.bind('<Leave>', lambda _event: self._on_row_leave(), add='+')
             controls[name].bind('<FocusIn>', lambda _event, name=name: self._on_example_focus(name), add='+')
             controls[name].bind('<FocusOut>', lambda _event: self._on_example_focus(None), add='+')
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
         self.adaptive_var.trace_add('write', lambda *_args: self._update_row_hints())
         self._update_row_hints()
+        self._show_example()
 
         blender_row = ttk.Frame(self.frame)
         blender_row.grid(row=11, column=0, sticky='ew', pady=(12, 0))
@@ -637,6 +640,21 @@ class App:
             self._setting_preset = False
         self._inputs_changed()
 
+    def _on_row_enter(self, name: str):
+        if self._leave_timer is not None:
+            self.window.after_cancel(self._leave_timer)
+            self._leave_timer = None
+        self._on_example_hover(name)
+
+    def _on_row_leave(self):
+        # (the pointer crossing from a row's label to its control leaves one widget just before it enters the next; the wait lets that Enter cancel this)
+        if self._leave_timer is None:
+            self._leave_timer = self.window.after(EXAMPLE_LEAVE_MS, self._row_left)
+
+    def _row_left(self):
+        self._leave_timer = None
+        self._on_example_hover(None)
+
     def _on_example_hover(self, name: str | None):
         self._example_hover = name
         self._show_example()
@@ -656,12 +674,7 @@ class App:
 
     def _show_example(self):
         name = self._example_hover or self._example_focus
-        if name is None:
-            self._stop_example_loop()
-            self._example_name = None
-            self.example_panel.place_forget()
-            return
-        if name not in self._example_images:
+        if name is not None and name not in self._example_images:
             frames = []
             for path in examples.example_frames(name, self._examples_dir):
                 try:
@@ -670,23 +683,27 @@ class App:
                 except (OSError, tk.TclError):
                     pass
             self._example_images[name] = frames
+        if name is not None and not self._example_images[name]:
+            # (a row with no image shows the general explanation, not its own text over an empty space)
+            name = None
         if name != self._example_name:
             # (a resize shows the same row again and must not restart its loop)
             self._stop_example_loop()
             self._example_name = name
             self._example_frame = 0
-            if len(self._example_images[name]) > 1:
+            if name is not None and len(self._example_images[name]) > 1:
                 self._example_timer = self.window.after(EXAMPLE_FRAME_MS, self._next_example_frame)
         x, y, width, height = self.advanced_frame.grid_bbox(2, 0, 2, len(self.row_order) - 1)
         if width < 2:
             # (a frame not mapped yet is laid out at 1px; its requested width split over the two uniform columns is the share it will get)
             width = self.advanced_frame.winfo_reqwidth() // 2
         width = max(width - 8, 1)
-        self.example_text.configure(text=examples.EXAMPLE_TEXT[name], wraplength=width)
+        self.example_text.configure(text=examples.EXAMPLE_TEXT[name] if name else examples.IDLE_TEXT,
+                                    foreground='' if name else 'gray', wraplength=width)
         self.example_panel.place(x=x + 8, y=y, width=width, height=max(height, 1))
         self.example_panel.update_idletasks()
         room = max(height - self.example_text.winfo_reqheight() - 4, 1)
-        frames = self._example_images[name]
+        frames = self._example_images[name] if name else []
         image = frames[self._example_frame % len(frames)] if frames else None
         if image is not None:
             step = max(-(-image.width() // width), -(-image.height() // room), 1)

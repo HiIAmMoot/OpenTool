@@ -5,8 +5,12 @@ from lightmapper import frozen
 # one full frame per compared value of each Settings field, named <name>_0.png, <name>_1.png and so on
 # in opentool/examples/ (a lone <name>.png is one still frame); the app loops through them
 EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max',
-                'adaptive_sampling', 'lightmap_32bit', 'render_only_shadows')
+                'render_only_shadows', 'adaptive_sampling', 'lightmap_32bit')
 EXAMPLE_DIR = frozen.bundle_dir() / 'opentool' / 'examples'
+
+# shown grey when no setting is hovered or focused, and for a setting with no example image
+IDLE_TEXT = ('Advanced settings tune how the lightmaps are baked: how sharp they are, how clean, '
+             'how much light bounces and how much memory they take. Hover or select a setting to see what it does.')
 
 EXAMPLE_TEXT = {
     'texels_per_unit': 'Lightmap texels per world unit. Higher is sharper and slower to bake.',

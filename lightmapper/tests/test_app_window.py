@@ -1695,8 +1695,8 @@ def test_advanced_row_order(app):
     widgets['adaptive_sampling'] = app.adaptive_check
     widgets['lightmap_32bit'] = app.lightmap_32bit_check
     widgets['render_only_shadows'] = app.render_only_shadows_entry
-    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'lightmap_32bit',
-                             'render_only_shadows')
+    assert app.row_order == (*presets.ADVANCED, 'render_only_shadows', 'adaptive_sampling',
+                             'lightmap_32bit')
     rows = [widgets[name].grid_info()['row'] for name in app.row_order]
     assert rows == sorted(set(rows))
     assert app.advanced_error.grid_info()['row'] > rows[-1]
@@ -1749,11 +1749,57 @@ def test_a_saved_boolean_render_only_setting_is_migrated(tmp_path, make_app, sav
     assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() == label
 
 
-def test_the_row_without_an_image_shows_its_text_only(app):
+@pytest.mark.parametrize('name', ['adaptive_sampling', 'lightmap_32bit', 'render_only_shadows'])
+def test_a_row_without_an_image_shows_the_general_explanation(app, name):
     app._toggle_advanced()
-    app._on_example_hover('render_only_shadows')
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['render_only_shadows']
+    app._on_example_hover(name)
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
     assert not app.example_image_label.cget('image')
+
+
+def test_the_general_explanation_shows_on_open(app):
+    app._toggle_advanced()
+    assert app.example_panel.winfo_manager() == 'place'
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
+    assert str(app.example_text.cget('foreground')) == 'gray'
+    assert not app.example_image_label.cget('image')
+
+
+def test_leaving_a_row_with_nothing_focused_returns_to_the_general_explanation(app):
+    app._on_example_hover('samples')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert str(app.example_text.cget('foreground')) != 'gray'
+    app._on_example_hover(None)
+    assert app.example_panel.winfo_manager() == 'place'
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
+    assert not app.example_image_label.cget('image')
+
+
+def test_a_focused_row_keeps_its_text_after_the_mouse_leaves(app):
+    app._on_example_focus('bounces')
+    app._on_example_hover('samples')
+    app._on_example_hover(None)
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
+
+
+def test_the_leave_event_waits_so_label_to_control_does_not_flash(app):
+    app._on_example_hover('samples')
+    app._on_row_leave()
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    app._on_row_enter('samples')
+    app.window.update()
+    time.sleep(0.2)
+    app.window.update()
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    app._on_row_leave()
+    pump(app.window, lambda: app.example_text.cget('text') == examples.IDLE_TEXT)
+
+
+def test_render_only_shadows_sits_directly_above_adaptive_sampling(app):
+    order = app.row_order
+    assert order.index('render_only_shadows') + 1 == order.index('adaptive_sampling')
+    assert (int(app.render_only_shadows_entry.grid_info()['row']) + 1
+            == int(app.adaptive_check.grid_info()['row']))
 
 
 def test_picking_a_preset_keeps_adaptive_off(app):
@@ -1800,13 +1846,13 @@ def test_hover_wins_over_focus_and_leaving_falls_back(app):
     app._on_example_hover(None)
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     app._on_example_focus(None)
-    assert app.example_panel.winfo_manager() == ''
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
 
 
 def test_missing_example_image_shows_text_only(make_app, tmp_path):
     app = make_app(examples_dir=tmp_path)
     app._on_example_hover('samples')
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
     assert not app.example_image_label.cget('image')
 
 
@@ -1842,14 +1888,14 @@ def test_showing_an_example_leaves_the_layout_alone(app):
     assert 0 < app._example_shown.width() <= int(area['width'])
     assert app._example_shown.height() <= int(area['height'])
     app._on_example_hover(None)
-    assert app.example_panel.winfo_manager() == ''
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
 
 
 def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
     (tmp_path / 'samples_0.png').write_bytes(b'not a png')
     app = make_app(examples_dir=tmp_path)
     app._on_example_hover('samples')
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
     assert not app.example_image_label.cget('image')
 
 
@@ -1876,7 +1922,7 @@ def test_the_example_panel_follows_a_resize(app):
 def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
     app.advanced_frame.event_generate('<Configure>')
     app.window.update()
-    assert app.example_panel.winfo_manager() == ''
+    assert app.example_text.cget('text') == examples.IDLE_TEXT
 
 
 def test_traditional_predicts_a_skipped_glow_row(ready_app):
