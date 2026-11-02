@@ -22,7 +22,7 @@ import numpy as np
 
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
-from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
+from .charts import CACHE_VERSION, CapError, ChartSettings, cache_version, chart_and_pack, load_charts, save_charts
 from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, written_shape
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
@@ -261,7 +261,11 @@ def written_plan(pages, page_max_resolved: int, s: Settings):
     blocks = chart_blocks(pages, chart_s.padding)
     # (the layout carries the shape charting chose; only a layout made some other way has to work one out)
     shape = tuple(getattr(pages, 'page_shape', ())) or written_shape(blocks, page_max_resolved, s.page_max == 'auto')
-    return plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages), shape
+    try:
+        return plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages), shape
+    except CapError as error:
+        error.page_max = s.page_max
+        raise
 
 
 def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
@@ -422,7 +426,11 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     stage('gather')
     begin('charts')
     if reuse:
-        pages = load_charts(kept.kept_dir(work) / kept.CHARTS, chart_cache_key(input_file, _chart_settings(s), radiosity, True))
+        kept_charts = kept.kept_dir(work) / kept.CHARTS
+        # (charts from an older layout version are an older bake, not a shader edit)
+        if cache_version(kept_charts) not in (None, CACHE_VERSION):
+            raise KeptBakeError(kept.OLDER_BAKE)
+        pages = load_charts(kept_charts, chart_cache_key(input_file, _chart_settings(s), radiosity, True))
         if pages is None:
             # (the key hashes the shaders' flags, so a shader edit since the bake leaves the kept charts not fitting)
             raise KeptBakeError("The level's shaders changed since this bake was kept, so it can't be written again. "

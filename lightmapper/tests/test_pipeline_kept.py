@@ -501,3 +501,19 @@ def test_write_again_repeats_the_auto_page_shape(tiny, tmp_path, monkeypatch):
     again = json.loads((work / 'write_summary.json').read_text())
     assert baked['page_shape'] and again['page_shape'] == baked['page_shape']
     assert again['sizes'] == baked['sizes']
+
+
+def test_write_again_of_a_kept_bake_with_an_older_chart_cache_says_it_is_older(tiny, tmp_path, monkeypatch):
+    import numpy as _np
+    from lightmapper import charts
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    path = kept.kept_dir(work) / kept.CHARTS
+    with _np.load(path, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    meta = json.loads(str(arrays['meta']))
+    meta['version'] = charts.CACHE_VERSION - 1
+    arrays['meta'] = json.dumps(meta)
+    _np.savez(path, **arrays)
+    forbid_baking(monkeypatch)
+    with pytest.raises(KeptBakeError, match='older OpenTool'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)

@@ -110,3 +110,12 @@ def test_strict_oidn_gpu_failures_say_what_to_pick():
 
 def test_kept_bake_errors_are_shown_as_written():
     assert explain(KeptBakeError('x')) == 'x'
+
+
+@pytest.mark.parametrize('page_max, tail', [
+    (1024, ', or set Max resolution to Auto under Advanced.'), ('auto', '.'), (4096, '.')])
+def test_cap_error_offers_auto_only_when_it_would_help(page_max, tail):
+    error = CapError('127 lightmap pages needed')
+    error.page_max = page_max
+    assert explain(error) == ('This level needs more lightmap space than the stock format allows at these settings. '
+                              f'Lower the texel density{tail}')

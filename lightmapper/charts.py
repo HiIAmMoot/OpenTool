@@ -77,6 +77,15 @@ def save_charts(path: Path, pages: list[OutPage], key: str):
             temporary.unlink(missing_ok=True)
 
 
+def cache_version(path: Path) -> int | None:
+    # the layout version a charts file was saved under, or None for one that cannot be read
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            return int(json.loads(str(data['meta']))['version'])
+    except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
+        return None
+
+
 def load_charts(path: Path, key: str) -> list[OutPage] | None:
     try:
         with np.load(path, allow_pickle=False) as data:
@@ -941,6 +950,16 @@ def _charts_separated(pages: list[OutPage], s: ChartSettings, placed) -> bool:
 
 def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
                    s: ChartSettings, nest: bool = False) -> list[OutPage]:
+    try:
+        return _chart_and_pack(groups, radiosity, s, nest)
+    except CapError as error:
+        # (the message for the user depends on whether Auto would have helped; TriangleTooWide names its own)
+        if not hasattr(error, 'page_max'):
+            error.page_max = s.page_max
+        raise
+
+
+def _chart_and_pack(groups, radiosity, s: ChartSettings, nest: bool) -> list[OutPage]:
     if len(radiosity) != len(groups):
         raise ValueError('one shader radiosity per source group is required')
     top = s.page_cap
@@ -986,9 +1005,13 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
     while True:
         side_s = replace(s, page_max=side)
         parts, split, made = _split_oversized(pieces, side, s.padding)
+        shape = (s.page_max, s.page_max)
         try:
             pages = _pack_rectangles(parts, side_s)
             _check_caps(pages, side_s)
+            # (the write repacks onto pages of the Max resolution, and a bitmap holds max_pages of them: found out
+            # here rather than after hours of baking)
+            _check_written(pages, shape, s)
         except CapError:
             # (the last side's error is the one worth reading: it has the most room)
             if side >= top:
@@ -997,12 +1020,21 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
             continue
         logger.info('bake side %d: %d piece(s) split into %d parts', side, split, made)
         if nest:
-            pages = _nested_or(pages, parts, side_s)
+            nested = _nested_or(pages, parts, side_s)
+            if nested is not pages and written_pages(nested, shape, s) <= s.max_pages:
+                pages = nested
         pages = PackedPages(pages)
         pages.page_max = s.page_max
         pages.page_shape = (s.page_max, s.page_max)
         pages.estimate_shape = pages.page_shape
         return pages
+
+
+def _check_written(pages, shape, s: ChartSettings) -> int:
+    count = written_pages(pages, shape, s)
+    if count > s.max_pages:
+        raise CapError(f'the written lightmap needs more than {s.max_pages} pages of {shape[0]}x{shape[1]}')
+    return count
 
 
 def _rect_layout(pieces, widest: int, shape, s: ChartSettings):
@@ -1022,17 +1054,30 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
     cap = (s.page_cap, s.page_cap)
     shape = auto_page_max(pieces, s)
     estimate_shape = None
-    nests = {}
+    nests, layouts = {}, {}
+
+    def rect_layout(shape):
+        # (shapes with one longer side share a bake side, and so the same pack, or the same cap failure)
+        side = max(max(shape), next_pow2(widest))
+        if side not in layouts:
+            try:
+                layouts[side] = _rect_layout(pieces, widest, shape, s)
+            except CapError as error:
+                layouts[side] = error
+        if isinstance(layouts[side], CapError):
+            raise layouts[side]
+        return layouts[side]
+
     while True:
         try:
-            rectangles, parts, side_s = _rect_layout(pieces, widest, shape, s)
+            rectangles, parts, side_s = rect_layout(shape)
         except CapError:
             if shape == cap:
                 raise
             shape = step_up(shape)
             continue
         count = written_pages(rectangles, shape, s)
-        if estimate_shape is None and (count <= AUTO_TARGET_PAGES or shape == cap):
+        if estimate_shape is None and (count <= min(AUTO_TARGET_PAGES, s.max_pages) or shape == cap):
             estimate_shape = shape
         layout = rectangles
         if nest:
@@ -1040,24 +1085,27 @@ def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages
             if side_s.page_max not in nests:
                 nests[side_s.page_max] = _nested_or(rectangles, parts, side_s)
             nested = nests[side_s.page_max]
-            if nested is not rectangles and not _blocks_fit(nested, shape, s):
+            if nested is not rectangles and shape != cap and not _blocks_fit(nested, shape, s):
                 # (nested charts move as one block at the write, and a half-height page may not hold it: the next
                 # step, a square of the same side, does, so nesting is kept rather than given up for this shape)
                 logger.info('auto: a nested block does not fit %dx%d, trying the next shape', *shape)
                 shape = step_up(shape)
                 continue
-            if nested is not rectangles:
+            if nested is not rectangles and _blocks_fit(nested, shape, s):
                 layout, count = nested, written_pages(nested, shape, s)
-        if count > AUTO_TARGET_PAGES and shape != cap:
+        if count > min(AUTO_TARGET_PAGES, s.max_pages) and shape != cap:
             shape = step_up(shape)
             continue
+        if count > s.max_pages:
+            # (at the cap the target may be missed, but not the page count a bitmap holds)
+            raise CapError(f'the written lightmap needs more than {s.max_pages} pages of {shape[0]}x{shape[1]}')
         break
     probe = shape
     while estimate_shape is None:
         # (the bake settled first; the estimate's shape is where the rectangles alone get within the target)
         probe = step_up(probe)
         try:
-            within = written_pages(_rect_layout(pieces, widest, probe, s)[0], probe, s) <= AUTO_TARGET_PAGES
+            within = written_pages(rect_layout(probe)[0], probe, s) <= min(AUTO_TARGET_PAGES, s.max_pages)
         except CapError:
             within = False
         if within or probe == cap:

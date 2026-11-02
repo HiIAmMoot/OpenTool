@@ -231,3 +231,13 @@ def test_a_new_page_opens_only_for_charts_no_open_page_can_take():
     pages, _ = bake_pages([(1000, 400), (1000, 400), (60, 60)], 1024)
     plan = plan_repack(chart_blocks(pages, PADDING), (1024, 512))
     assert [len(p.moves) for p in plan] == [2, 1]
+
+
+def test_texel_areas_after_the_repack_stay_within_float32_rounding():
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
+    from test_charts import area_change_bound_ratio
+    pages, pieces = bake_pages(big_and_small(), 1024)
+    written = repack_layout(pages, plan_repack(chart_blocks(pages, PADDING), (1024, 512)))
+    assert area_change_bound_ratio(written, pieces) <= 1.0

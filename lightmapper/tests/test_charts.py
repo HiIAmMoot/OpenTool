@@ -1784,3 +1784,36 @@ def test_the_bake_counts_the_nested_layout_and_can_settle_smaller_than_the_estim
     assert bake.page_shape == (256, 128) and estimate.page_shape == (256, 256)
     assert bake.estimate_shape == estimate.page_shape
     assert written_count(bake, bake.page_shape) <= 10
+
+
+def test_a_fixed_max_refuses_before_the_bake_when_the_write_needs_too_many_pages(monkeypatch):
+    # (the bake pages fit, but the write would need more pages than a bitmap holds: that must fail before the bake)
+    from lightmapper import charts
+    shapes = []
+
+    def too_many(pages, shape, s):
+        shapes.append(shape)
+        return s.max_pages + 1
+    monkeypatch.setattr(charts, 'written_pages', too_many)
+    with pytest.raises(CapError) as caught:
+        chart_and_pack([rect_group([(60, 60)] * 3)], simple(), ChartSettings(texels_per_unit=1.0, page_max=256))
+    assert shapes == [(256, 256)] * len(shapes) and len(shapes) >= 1 and caught.value.page_max == 256
+
+
+def test_auto_at_the_cap_refuses_when_the_write_needs_too_many_pages(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MIN', 256)
+    monkeypatch.setattr(charts, 'written_pages', lambda pages, shape, s: s.max_pages + 1)
+    with pytest.raises(CapError) as caught:
+        chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings())
+    assert caught.value.page_max == 'auto'
+
+
+def test_a_nested_block_at_the_cap_does_not_step_past_it(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
+    monkeypatch.setattr(charts, '_blocks_fit', lambda pages, shape, s: False)
+    monkeypatch.setattr(charts, '_nested_or', lambda rects, parts, s: list(rects))
+    pages = chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings(), nest=True)
+    assert pages.page_shape == (256, 256)

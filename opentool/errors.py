@@ -3,10 +3,15 @@ from pathlib import Path
 
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
-from lightmapper.charts import CapError, TriangleTooWide
+from lightmapper.charts import AUTO_PAGE_MAX, CapError, TriangleTooWide
 from lightmapper.errors import KeptBakeError
 from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
+
+
+def _auto_would_help(page_max) -> str:
+    # Auto reaches AUTO_PAGE_MAX, so it only adds room over a fixed Max resolution below that
+    return ', or set Max resolution to Auto under Advanced' if isinstance(page_max, int) and page_max < AUTO_PAGE_MAX         else ''
 
 
 def explain(exc: BaseException, work: Path | None = None) -> str:
@@ -21,12 +26,12 @@ def explain(exc: BaseException, work: Path | None = None) -> str:
         log_location = f'blender.log in {work}' if work is not None else "blender.log in the bake's work folder"
         return f"Blender stopped during the bake. The end of its log is below, and the whole log is {log_location}.\n{exc}"
     if isinstance(exc, TriangleTooWide):
-        raise_it = ', or set Max resolution to Auto under Advanced' if exc.page_max < 4096 else ''
         return (f'One triangle of shader {exc.shader} needs a lightmap page {exc.width} texels wide, more than '
-                f'Max resolution {exc.page_max} allows. Lower the texel density{raise_it}.')
+                f'Max resolution {exc.page_max} allows. Lower the texel density{_auto_would_help(exc.page_max)}.')
     if isinstance(exc, CapError):
+        # (an error raised without the setting, as from a hand-made layout, still names the way out)
         return ('This level needs more lightmap space than the stock format allows at these settings. '
-                'Lower the texel density, or set Max resolution to Auto under Advanced.')
+                f'Lower the texel density{_auto_would_help(getattr(exc, "page_max", 0))}.')
     if isinstance(exc, DeviceError):
         vendor = {'nvidia': 'NVIDIA', 'amd': 'AMD'}.get(str(exc).split(':', 1)[0])
         if vendor:
