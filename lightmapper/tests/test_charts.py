@@ -1149,11 +1149,6 @@ def same_layout(a, b):
             np.testing.assert_array_equal(m.surface_ids, n.surface_ids)
 
 
-def same_pages(a, b):
-    # (chart_and_pack hands the pages back in a PackedPages, so they are the nest's own pages, not its list)
-    return b is not None and len(a) == len(b) and all(x is y for x, y in zip(a, b))
-
-
 class NestSpy:
     def __init__(self, monkeypatch):
         from lightmapper import charts
@@ -1214,9 +1209,10 @@ def test_nested_charts_keep_the_full_gap(monkeypatch):
     from lightmapper.charts import _charts_separated
     s = nest_settings()
     spy = NestSpy(monkeypatch)
-    pages = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
-    assert spy.calls[0][2] is not None and same_pages(pages, spy.calls[0][2])
-    assert _charts_separated(pages, s, spy.calls[0][0])
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    units, _, pages = spy.calls[0]
+    assert pages is not None
+    assert _charts_separated(pages, s, units)
     for page in pages:
         assert rasterise(page).max() <= 1
 
@@ -1263,9 +1259,9 @@ def test_nested_pack_keeps_texel_areas(monkeypatch):
     from lightmapper.charts import _piece_areas, _packing_areas
     spy = NestSpy(monkeypatch)
     group = rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
-    pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
-    parts, _, result = spy.calls[0]
-    assert result is not None and same_pages(pages, result)
+    chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, _, pages = spy.calls[0]
+    assert pages is not None
     np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
 
 
@@ -1282,9 +1278,9 @@ def test_nested_pack_keeps_the_areas_of_parts_with_fractional_extents():
 
 def test_nested_pack_only_translates_or_swaps(monkeypatch):
     spy = NestSpy(monkeypatch)
-    pages = chart_and_pack([rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)], simple(), nest_settings(), nest=True)
-    parts, s, result = spy.calls[0]
-    assert same_pages(pages, result)
+    chart_and_pack([rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)], simple(), nest_settings(), nest=True)
+    parts, s, pages = spy.calls[0]
+    assert pages is not None
     new = corners_by_surface(pages)
     for part in parts:
         old = part[3][part[4]]
@@ -1300,9 +1296,9 @@ def test_a_turned_chart_is_read_back_swapped(monkeypatch):
     # (found by search: thin charts of both orientations, where xatlas turns some to fit them in)
     group = rect_group([(87, 17), (72, 12), (8, 84), (22, 88), (66, 6), (53, 8), (6, 95), (9, 89), (17, 105), (8, 90),
                         (50, 14), (99, 13), (78, 16)])
-    pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
-    parts, s, result = spy.calls[0]
-    assert result is not None and same_pages(pages, result)
+    chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, s, pages = spy.calls[0]
+    assert pages is not None
     new = corners_by_surface(pages)
     turned = 0
     for part in parts:
@@ -1330,8 +1326,9 @@ def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
     group = make_group(pos, tris)
     s = ChartSettings(page_max='auto')
     spy = NestSpy(monkeypatch)
-    nested = chart_and_pack([group], [radiosity()], s, nest=True)
-    assert spy.calls[0][2] is not None and same_pages(nested, spy.calls[0][2])
+    chart_and_pack([group], [radiosity()], s, nest=True)
+    nested = spy.calls[0][2]
+    assert nested is not None
     rects = chart_and_pack([group], [radiosity()], s)
     assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
     np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
@@ -1341,9 +1338,10 @@ def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
 def test_nesting_is_deterministic(monkeypatch):
     s = nest_settings()
     spy = NestSpy(monkeypatch)
-    first = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
-    second = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
-    assert same_pages(first, spy.calls[0][2]) and same_pages(second, spy.calls[1][2]) and first is not None
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    first, second = spy.calls[0][2], spy.calls[-1][2]
+    assert first is not None and len(spy.calls) == 2
     same_layout(first, second)
 
 
@@ -1606,3 +1604,98 @@ def test_the_estimate_and_the_bake_agree_on_auto(monkeypatch):
     baked = chart_and_pack(groups, simple_shader() * 2, s, nest=True)
     assert estimate.page_max == baked.page_max == 512
     assert max(max(p.width, p.height) for p in baked) <= 512
+
+
+def test_a_tie_keeps_the_rectangle_layout(monkeypatch, caplog):
+    from lightmapper import charts
+    s = ChartSettings(page_max=128)
+    parts = [quad_piece(0, 20, 20), quad_piece(1, 20, 20)]
+    rects = charts._pack_rectangles(parts, s)
+    # (a separated layout of the same pages and texels, as a nest of these charts would be)
+    monkeypatch.setattr(charts, '_nest_pack', lambda units, settings, *margin: charts._pack_rectangles(units, settings))
+    with caplog.at_level(logging.INFO, logger='lightmapper.charts'):
+        assert charts._nested_or(rects, parts, s) is rects
+    assert 'ties with the rectangle layout' in caplog.text
+
+
+def test_islands_of_one_part_too_close_fall_back(monkeypatch, caplog):
+    # (xatlas places a part's islands apart, so they need the full gap between them like any two charts)
+    from dataclasses import replace
+    from lightmapper import charts
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (36, 0, 14, 14)])]
+    rects = charts._pack_rectangles(parts, s)
+    frame, left, right = charts._nest_units(parts)
+    placed = [frame, (*left[:3], left[3] - left[3].min(axis=0) + 30, *left[4:]),
+              (*right[:3], right[3] - right[3].min(axis=0) + [47, 30], *right[4:])]
+    squeezed = charts._finish([placed], np.array([[100.0, 100.0]]), replace(s, page_max=128))
+    assert total_area(squeezed) < total_area(rects)
+    monkeypatch.setattr(charts, '_nest_pack', lambda units, settings, *margin: squeezed)
+    with caplog.at_level(logging.INFO, logger='lightmapper.charts'):
+        assert charts._nested_or(rects, parts, s) is rects
+    assert 'charts too close' in caplog.text
+
+
+def area_change_bound_ratio(pages, parts):
+    # the largest |change of a triangle's doubled texel area| over ulp(page side) x its perimeter
+    old = {(p[0], int(sid)): p[3][tri].astype(np.float64) for p in parts for tri, sid in zip(p[4], p[5])}
+    worst = 0.0
+    for page in pages:
+        ulp = float(np.spacing(np.float32(max(page.width, page.height))))
+        for m in page.materials:
+            texels = m.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            for tri, sid in zip(m.tris, m.surface_ids):
+                before = old[(m.group, int(sid))]
+                perimeter = sum(np.hypot(*(before[k] - before[(k + 1) % 3])) for k in range(3))
+                change = abs(_tri_area(texels[tri][None])[0] - _tri_area(before[None])[0])
+                worst = max(worst, change / (ulp * perimeter))
+    return worst
+
+
+def test_texel_areas_stay_within_the_float32_rounding_of_a_large_page():
+    # texcoords are stored as float32 fractions of the page, so a triangle's area can only be kept to the rounding
+    # of a coordinate near the page side; real levels measured up to 0.3 of this bound, for both layouts
+    from lightmapper.charts import _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=4096)
+    rng = np.random.default_rng(3)
+    parts = [frame_piece(0, 4070.37, 3000.61)]
+    parts += [quad_piece(i, *rng.uniform(0.3, 40, 2)) for i in range(1, 40)]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and len(pages) < len(rects)
+    assert max(p.width for p in pages) == 4096
+    for layout in (rects, pages):
+        assert area_change_bound_ratio(layout, parts) <= 1.0
+
+
+def test_islands_split_on_the_values_xatlas_gets():
+    # (far from the part's origin float32 joins two corners 1e-3 apart; in the island's own frame, where xatlas
+    # gets it, they are apart again, so they are two islands)
+    from lightmapper.charts import _components, _nest_input, _nest_units
+    far = 1e6
+    quad = [(0, 0, 4, 4)]
+    near = loose_piece(1, [(far, far, 4, 4), (far + 4.001, far, 4, 4)])
+    origin = loose_piece(1, quad)
+    uv = np.vstack([origin[3], near[3]])
+    tris = np.vstack([origin[4], near[4] + len(origin[3])])
+    part = (1, None, np.arange(len(uv)), uv, tris, np.arange(len(tris)))
+    assert len(_components(_nest_input(part), tris, np.arange(len(tris)))) == 2
+    units = _nest_units([part])
+    assert len(units) == 3
+    for unit in units:
+        assert len(_components(_nest_input(unit), unit[4], np.arange(len(unit[4])))) == 1
+    assert sorted(int(i) for unit in units for i in unit[5]) == list(range(len(tris)))
+
+
+def test_an_island_of_only_zero_area_triangles_does_not_block_nesting():
+    # (xatlas does not place a zero-area island; it rides along at the first chart, and holds no texel there)
+    from lightmapper.charts import _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    pos = [[0, 0, 0], [14, 0, 0], [14, 14, 0], [0, 14, 0], [60, 60, 0], [70, 60, 0], [80, 60, 0]]
+    group = make_group(np.array(pos, np.float32), [[0, 1, 2], [0, 2, 3], [4, 5, 6]])
+    part = (1, group, np.arange(7), np.array(pos, np.float64)[:, :2], group.tris, group.surface_ids)
+    parts = [frame_piece(0, 100, 60), part]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert sorted(int(i) for p in pages for m in p.materials for i in m.surface_ids) == sorted(list(range(16)) + [0, 1, 2])

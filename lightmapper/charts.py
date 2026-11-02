@@ -731,18 +731,22 @@ def _nest_input(part) -> np.ndarray:
 def _nest_units(parts) -> list:
     # xatlas makes one chart of each uv island of a part and places each on its own (a part can be several islands
     # after _bounded_charts or the bisection), so the islands are what moves. They are found on the values xatlas
-    # is given, so a corner shared there is shared here
-    units = []
-    for part in parts:
-        index, group, xref, uv, tris, surface_ids = part
-        found = _components(_nest_input(part), tris, np.arange(len(tris)))
+    # is given: an island goes to xatlas in its own frame, where float32 can keep apart two corners that rounded
+    # together in the part's, so each island is split again on its own values until nothing splits
+    units, pending = [], list(reversed(parts))
+    while pending:
+        unit = pending.pop()
+        index, group, xref, uv, tris, surface_ids = unit
+        found = _components(_nest_input(unit), tris, np.arange(len(tris)))
         if len(found) == 1:
-            units.append(part)
+            units.append(unit)
             continue
+        split = []
         for rows in found:
             used = np.unique(tris[rows])
-            units.append((index, group, xref[used], uv[used].copy(),
+            split.append((index, group, xref[used], uv[used].copy(),
                           np.searchsorted(used, tris[rows]).astype(np.int32), surface_ids[rows]))
+        pending.extend(reversed(split))
     return units
 
 
@@ -863,7 +867,12 @@ def _charts_separated(pages: list[OutPage], s: ChartSettings, placed) -> bool:
                 id_ = owner.get((material.group, int(surface)))
                 if id_ is None:
                     return False
-                xs, ys = _touched_cells(*texels[tri])
+                a, b, c = texels[tri]
+                # (corners on one line hold no texel or sub-texel centre, so the bake gives the triangle nothing;
+                # xatlas does not place such an island and it rides along wherever the first chart starts)
+                if (b[0] - a[0]) * (c[1] - a[1]) == (b[1] - a[1]) * (c[0] - a[0]):
+                    continue
+                xs, ys = _touched_cells(a, b, c)
                 if len(xs) and (xs.min() < 0 or ys.min() < 0 or xs.max() >= page.width or ys.max() >= page.height):
                     return False
                 if np.any((label[ys, xs] != 0) & (label[ys, xs] != id_)):
@@ -968,8 +977,11 @@ def _nested_or(rectangles, parts, s):
     if nested is None:
         logger.info('nesting: %s, keeping the rectangle layout', reason)
         return rectangles
-    if (len(nested), _pages_area(nested)) > (len(rectangles), _pages_area(rectangles)):
-        logger.info('nesting: not smaller than the rectangle layout (%d texels against %d), keeping it',
-                    _pages_area(nested), _pages_area(rectangles))
+    # (a tie keeps the rectangle layout: nesting moves charts for nothing)
+    if (len(nested), _pages_area(nested)) >= (len(rectangles), _pages_area(rectangles)):
+        logger.info('nesting: %s the rectangle layout (%d page(s), %d texels against %d, %d), keeping it',
+                    'ties with' if (len(nested), _pages_area(nested)) == (len(rectangles), _pages_area(rectangles))
+                    else 'not smaller than', len(nested), _pages_area(nested), len(rectangles),
+                    _pages_area(rectangles))
         return rectangles
     return nested
