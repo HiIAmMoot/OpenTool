@@ -49,10 +49,10 @@ def test_cache_key_changes_with_the_detail_level_scale(tmp_path):
 
     bsp = tmp_path / 'room.bsp'
     bsp.write_bytes(b'tag bytes')
-    same = chart_cache_key(bsp, ChartSettings(), [])
-    assert chart_cache_key(bsp, ChartSettings(), []) == same
-    assert chart_cache_key(bsp, ChartSettings(detail_level_scale=(3.0, 1.0, 0.6, 0.03)), []) != same
-    assert chart_cache_key(bsp, ChartSettings(texels_per_unit=3.0), []) != same
+    same = chart_cache_key(bsp, ChartSettings(), [], True)
+    assert chart_cache_key(bsp, ChartSettings(), [], True) == same
+    assert chart_cache_key(bsp, ChartSettings(detail_level_scale=(3.0, 1.0, 0.6, 0.03)), [], True) != same
+    assert chart_cache_key(bsp, ChartSettings(texels_per_unit=3.0), [], True) != same
 
 
 def test_cache_from_before_no_shrink_scaling_is_not_reused(tmp_path):
@@ -124,8 +124,8 @@ def test_cache_key_changes_with_respecting_normal_seams(tmp_path):
 
     bsp = tmp_path / 'room.bsp'
     bsp.write_bytes(b'tag bytes')
-    assert (chart_cache_key(bsp, ChartSettings(respect_normal_seams=False), [])
-            != chart_cache_key(bsp, ChartSettings(), []))
+    assert (chart_cache_key(bsp, ChartSettings(respect_normal_seams=False), [], True)
+            != chart_cache_key(bsp, ChartSettings(), [], True))
 
 
 def test_cache_key_needs_the_shader_radiosity(tmp_path):

@@ -23,6 +23,7 @@ import numpy as np
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
+from .combine import combine_arrays, combine_layout, plan_combine
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, point_clusters, read_geometry
@@ -69,9 +70,11 @@ def find_bsp(tags: Path, scenario: str, name: str):
     return tag, index, path
 
 
-def chart_cache_key(input_file: Path, chart_s: ChartSettings, radiosity) -> str:
+def chart_cache_key(input_file: Path, chart_s: ChartSettings, radiosity, nest: bool) -> str:
     digest = hashlib.sha256(Path(input_file).read_bytes())
     digest.update(json.dumps(asdict(chart_s), sort_keys=True).encode())
+    # (a nested layout and a rectangle one of the same level are different pages)
+    digest.update(b'nest' if nest else b'flat')
     # (the flags word is hashed whole, so a shader edit to any flag bit makes new charts; group order)
     digest.update(json.dumps([[int(r.flags), int(r.detail_level)] for r in radiosity]).encode())
     return digest.hexdigest()
@@ -237,12 +240,17 @@ def _chart_settings(s: Settings) -> ChartSettings:
     return ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
 
 
-def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path) -> list:
+def _estimate_cache(cache: Path) -> Path:
+    # (the estimate never nests: it must not overwrite, or be served from, the bake's nested layout at the same path)
+    return cache.with_name(cache.stem + '.estimate' + cache.suffix)
+
+
+def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path, nest: bool) -> list:
     chart_s = _chart_settings(s)
-    key = chart_cache_key(input_file, chart_s, radiosity)
+    key = chart_cache_key(input_file, chart_s, radiosity, nest)
     pages = load_charts(cache, key)
     if pages is None:
-        pages = chart_and_pack(geometry.groups, radiosity, chart_s)
+        pages = chart_and_pack(geometry.groups, radiosity, chart_s, nest=nest)
         save_charts(cache, pages, key)
     return pages
 
@@ -308,7 +316,7 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     geometry = read_geometry(bsp_tag)
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
     classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
-    pages = _charts(input_file, geometry, radiosity, s, Path(charts))
+    pages = _charts(input_file, geometry, radiosity, s, _estimate_cache(Path(charts)), nest=False)
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
     # (no GPU probe: the setting alone says whether the CPU constants apply)
@@ -405,14 +413,14 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     stage('gather')
     begin('charts')
     if reuse:
-        pages = load_charts(kept.kept_dir(work) / kept.CHARTS, chart_cache_key(input_file, _chart_settings(s), radiosity))
+        pages = load_charts(kept.kept_dir(work) / kept.CHARTS, chart_cache_key(input_file, _chart_settings(s), radiosity, True))
         if pages is None:
             # (the key hashes the shaders' flags, so a shader edit since the bake leaves the kept charts not fitting)
             raise KeptBakeError("The level's shaders changed since this bake was kept, so it can't be written again. "
                                 "Bake it again.")
     else:
         pages = _charts(input_file, geometry, radiosity, s,
-                        Path(charts) if charts is not None else work / 'charts.npz')
+                        Path(charts) if charts is not None else work / 'charts.npz', nest=True)
     stage('charts')
     if keep:
         charts_file = Path(charts) if charts is not None else work / 'charts.npz'
@@ -537,7 +545,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             kept.save_baked(work)
             kept.save_result(work, result)
     begin('glow' if glow_runs else 'finish')
-    raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
+    raw_pages, glow_pages, masks, class_maps = [], [], [], []
     if reuse:
         # (the job's ambient is already weighted by w_amb)
         ambient = {int(k): np.asarray(v) for k, v in job['ambient'].items()}
@@ -583,7 +591,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         raw_pages.append(raw)
         masks.append(mask)
         class_maps.append(cls)
-        utilisation.append(float(mask.mean()))
     # (nothing below reads the baked pages, and the loop's last page and gather would stay in these names)
     result = replace(result, pages=None)
     raw = gathered = texel_scene = None
@@ -647,8 +654,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             denoise_device = denoise_worker.device
             warnings.extend(denoise_worker.warnings)
     pixels = [quantise(finished, s) for finished in float_pages]
-    for finished, mask in zip(float_pages, masks):
-        clipped.append(float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.)
     vectors = finalize(result.vertex_vector, result.vertex_irradiance, scene.query_normal,
                        s.radiosity_mode, s.radiosity_scale)[inverse]
     offset = 0
@@ -656,6 +661,18 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         for material in page.materials:
             material.lm['incident_radiosity'] = vectors[offset:offset + len(material.env)]
             offset += len(material.env)
+    # (the bake ran on small pages; the written bitmap holds them combined, and everything the write and the summary
+    # report about pages describes those)
+    plan = plan_combine([(p.width, p.height) for p in pages], [len(p.materials) for p in pages],
+                        s.resolved_page_max, s.max_materials_per_page, s.max_pages)
+    bake_sizes = [[p.width, p.height] for p in pages]
+    float_pages = combine_arrays(float_pages, plan)
+    pixels = combine_arrays(pixels, plan)
+    masks = combine_arrays(masks, plan)
+    pages = combine_layout(pages, plan)
+    utilisation = [float(mask.mean()) for mask in masks]
+    clipped = [float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.
+               for finished, mask in zip(float_pages, masks)]
     stage('finish')
     seconds['denoise'] = denoise_seconds
     seconds['finish'] -= denoise_seconds
@@ -683,6 +700,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     seconds['total'] = perf_counter() - start
     (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
+        'bake_sizes': bake_sizes,
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'written_paths': written_paths,
