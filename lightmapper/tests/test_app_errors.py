@@ -6,7 +6,7 @@ import pytest
 
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
-from lightmapper.charts import CapError
+from lightmapper.charts import CapError, TriangleTooWide
 from lightmapper.errors import KeptBakeError
 from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
@@ -60,7 +60,15 @@ def test_missing_tag_names_the_file():
 def test_cap_error_is_not_the_generic_value_error():
     assert explain(CapError('a chart exceeds page_max including padding')) == (
         'This level needs more lightmap space than the stock format allows at these settings. '
-        'Lower the texel density, or raise Max resolution under Advanced.')
+        'Lower the texel density, or set Max resolution to Auto under Advanced.')
+
+
+@pytest.mark.parametrize('page_max, tail', [
+    (1024, ', or set Max resolution to Auto under Advanced.'), (4096, '.')])
+def test_triangle_too_wide_names_the_way_out_only_when_there_is_one(page_max, tail):
+    assert explain(TriangleTooWide('wall', 1500, page_max)) == (
+        f'One triangle of shader wall needs a lightmap page 1500 texels wide, more than Max resolution {page_max} '
+        f'allows. Lower the texel density{tail}')
 
 
 @pytest.mark.parametrize('exc', [RuntimeError(), AssertionError(), KeyError()])

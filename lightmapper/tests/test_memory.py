@@ -89,26 +89,26 @@ def machine(ram, limit=None, ceiling=None):
 
 def test_two_levels(small_model):
     peak = memory.peak_bytes(inputs())[1]
-    fits = memory.check_bake_memory(inputs(), 2048, machine(peak, ceiling=peak * 2))
+    fits = memory.check_bake_memory(inputs(), machine(peak, ceiling=peak * 2))
     assert (fits.level, fits.fits, fits.message) == ('fits', True, '')
     assert (fits.stage, fits.estimate) == ('glow', peak)
-    page_file = memory.check_bake_memory(inputs(), 2048, machine(peak - 1, ceiling=peak * 2))
+    page_file = memory.check_bake_memory(inputs(), machine(peak - 1, ceiling=peak * 2))
     assert (page_file.level, page_file.fits) == ('page_file', False)
-    oom = memory.check_bake_memory(inputs(), 2048, machine(peak // 2, ceiling=peak - 1))
+    oom = memory.check_bake_memory(inputs(), machine(peak // 2, ceiling=peak - 1))
     assert (oom.level, oom.fits) == ('out_of_memory', False)
-    edge = memory.check_bake_memory(inputs(), 2048, machine(peak // 2, ceiling=peak))
+    edge = memory.check_bake_memory(inputs(), machine(peak // 2, ceiling=peak))
     assert edge.level == 'page_file'
 
 
 def test_an_unknown_ceiling_falls_back_to_the_commit_limit(small_model):
     peak = memory.peak_bytes(inputs())[1]
-    assert memory.check_bake_memory(inputs(), 2048, machine(peak // 2, limit=peak)).level == 'page_file'
-    assert memory.check_bake_memory(inputs(), 2048, machine(peak // 2, limit=peak - 1)).level == 'out_of_memory'
+    assert memory.check_bake_memory(inputs(), machine(peak // 2, limit=peak)).level == 'page_file'
+    assert memory.check_bake_memory(inputs(), machine(peak // 2, limit=peak - 1)).level == 'out_of_memory'
 
 
 def test_unknown_machine_does_not_warn(caplog):
     with caplog.at_level(logging.WARNING, logger='lightmapper.memory'):
-        result = memory.check_bake_memory(StageInputs(SceneCounts(1, 3), [(8, 8)]), 1024, None)
+        result = memory.check_bake_memory(StageInputs(SceneCounts(1, 3), [(8, 8)]), None)
     assert (result.level, result.message, result.machine) == ('fits', '', None)
     assert [(r.levelname, r.getMessage()) for r in caplog.records] == [
         ('WARNING', "this computer's memory is unknown, so the bake runs without the memory check")]
@@ -184,8 +184,8 @@ def test_system_managed_page_file_grows_to_three_times_ram_or_the_free_disk(monk
     # a peak between the limit and the ceiling is the page-file level, not out of memory
     inputs_ = StageInputs(SceneCounts(0, 0), [(2048, 2048)] * 2)
     monkeypatch.setattr(memory, 'stage_bytes', lambda _inputs: {'blender': 40 * GB, 'vertex': 0, 'glow': 0, 'finish': 0})
-    assert memory.check_bake_memory(inputs_, 2048, room).level == 'page_file'
-    assert memory.check_bake_memory(inputs_, 2048, tight).level == 'out_of_memory'
+    assert memory.check_bake_memory(inputs_, room).level == 'page_file'
+    assert memory.check_bake_memory(inputs_, tight).level == 'out_of_memory'
 
 
 def test_two_page_files_add_their_reach(monkeypatch):
@@ -216,77 +216,48 @@ def test_whole_page_tiles_use_the_blender_stage_against_ram(small_model):
 def test_messages_exact(monkeypatch):
     only(monkeypatch, 'blender', BLENDER_BASE=20 * GB)
     pages = StageInputs(SceneCounts(0, 0), [(1024, 1024)])
-    page_file = memory.check_bake_memory(pages, 1024, Machine(16 * GB, 16 * GB, 32 * GB))
+    page_file = memory.check_bake_memory(pages, Machine(16 * GB, 16 * GB, 32 * GB))
     assert page_file.message == (
         "This bake needs about 20 GB at its peak (baking in Blender), more than this computer's 16 GB of memory. "
         'It will lean on the page file and slow down.')
-    oom = memory.check_bake_memory(pages, 1024, Machine(8 * GB, 8 * GB, 10 * GB))
+    oom = memory.check_bake_memory(pages, Machine(8 * GB, 8 * GB, 10 * GB))
     assert oom.message == (
         "This bake needs about 20 GB at its peak (baking in Blender), more than this computer's memory and page "
         'file can hold (10 GB). It will likely run out of memory. Try a lower texel density, or close other programs.')
-    assert memory.out_of_memory_message(pages, 1024, Machine(8 * GB, 8 * GB, 10 * GB)) == oom.message
+    assert memory.out_of_memory_message(pages, Machine(8 * GB, 8 * GB, 10 * GB)) == oom.message
 
 
-def test_message_suggests_a_fitting_max_resolution(monkeypatch):
+def test_message_ends_with_the_density_sentence(monkeypatch):
     only(monkeypatch, 'blender', BLENDER_PER_SUB_TEXEL=1000)
     pages = StageInputs(SceneCounts(0, 0), [(4096, 4096)])
-    text = memory.out_of_memory_message(pages, 4096, Machine(10 * GB, 10 * GB, 12 * GB))
+    text = memory.out_of_memory_message(pages, Machine(10 * GB, 10 * GB, 12 * GB))
     assert text == (
         "This bake needs about 151 GB at its peak (baking in Blender), more than this computer's memory and page "
-        'file can hold (12 GB). It will likely run out of memory. Try Max resolution 1024, or close other programs. '
-        'If the level then needs too many pages or still does not fit, lower the texel density a little.')
+        'file can hold (12 GB). It will likely run out of memory. Try a lower texel density, or close other programs.')
+    assert 'Max resolution' not in text
 
 
 def test_message_without_a_machine_leaves_out_the_limit(monkeypatch):
     only(monkeypatch, 'blender', BLENDER_PER_SUB_TEXEL=1000)
-    text = memory.out_of_memory_message(StageInputs(SceneCounts(0, 0), [(4096, 2048)]), 4096, None)
-    assert 'page file can hold. It will' in text and 'Try Max resolution 2048' in text
+    text = memory.out_of_memory_message(StageInputs(SceneCounts(0, 0), [(4096, 2048)]), None)
+    assert 'page file can hold. It will' in text and 'Max resolution' not in text
 
 
 def test_the_stage_label_is_lower_cased_mid_sentence(monkeypatch):
     only(monkeypatch, 'vertex', VERTEX_BASE=20 * GB)
-    text = memory.out_of_memory_message(StageInputs(SceneCounts(0, 0), [(256, 256)]), 256, Machine(8 * GB, 8 * GB, 9 * GB))
+    text = memory.out_of_memory_message(StageInputs(SceneCounts(0, 0), [(256, 256)]), Machine(8 * GB, 8 * GB, 9 * GB))
     assert '(lighting the vertices)' in text
 
 
 def test_glow_peak_names_traditional(monkeypatch):
     only(monkeypatch, 'glow', GLOW_PER_GLOW_SUB_TEXEL=100)
     glow = StageInputs(SceneCounts(0, 0), [(512, 512)], glow_sub_texels=10**9)
-    text = memory.out_of_memory_message(glow, 512, Machine(8 * GB, 8 * GB, 9 * GB))
+    text = memory.out_of_memory_message(glow, Machine(8 * GB, 8 * GB, 9 * GB))
     assert '(baking light from ignore-normals surfaces)' in text
     assert text.endswith(' Or set Ignore-normals lighting to Traditional.')
-    other = memory.out_of_memory_message(replace(glow, glow_sub_texels=0, counts=SceneCounts(0, 10**9)), 512,
+    other = memory.out_of_memory_message(replace(glow, glow_sub_texels=0, counts=SceneCounts(0, 10**9)),
                                          Machine(8 * GB, 8 * GB, 9 * GB))
     assert 'Traditional' not in other
-
-
-def test_suggestion_keeps_the_glow_total(monkeypatch):
-    # (the flagged pages repack into more, smaller pages, so their total stays about the same)
-    only(monkeypatch, 'glow', GLOW_PER_GLOW_SUB_TEXEL=1000)
-    glow = StageInputs(SceneCounts(0, 0), [(2048, 2048)], glow_sub_texels=10**6)
-    assert memory.suggest_page_max(glow, 10**9) == 1024
-    assert memory.suggest_page_max(glow, 10**9 - 1) is None
-
-
-def test_suggestion_for_a_level_of_several_full_size_pages():
-    level = StageInputs(SceneCounts(38951, 106283), [(2048, 2048)] * 2, glow_sub_texels=75_497_472)
-    assert memory.peak_bytes(level)[1] > 12 * GB
-    assert memory.suggest_page_max(level, 12 * GB) == 1024
-    smaller = replace(level, pages=[(1024, 1024)] * 2)
-    assert memory.peak_bytes(smaller)[1] < 12 * GB
-
-
-def test_suggestion_keeps_the_total_page_texels(monkeypatch):
-    only(monkeypatch, 'vertex', VERTEX_PER_PAGE_TEXEL=1000)
-    level = StageInputs(SceneCounts(0, 0), [(2048, 2048)] * 4)
-    # (the vertex stage follows the page texels, which a smaller Max resolution does not shrink)
-    assert memory.suggest_page_max(level, 4 * 2048 * 2048 * 1000 - 1) is None
-    assert memory.suggest_page_max(level, 4 * 2048 * 2048 * 1000) == 1024
-
-
-def test_suggestion_without_pages_or_a_fitting_side():
-    assert memory.suggest_page_max(StageInputs(SceneCounts(0, 0), []), None) is None
-    assert memory.suggest_page_max(StageInputs(SceneCounts(0, 0), [(256, 256)]), None) is None
 
 
 def test_format_gb():
@@ -294,7 +265,7 @@ def test_format_gb():
 
 
 def test_summary_ceiling_is_null_when_unknown(small_model):
-    check = memory.check_bake_memory(inputs(), 2048, Machine(2000, 2500, None))
+    check = memory.check_bake_memory(inputs(), Machine(2000, 2500, None))
     assert memory.summary(inputs(), check)['ceiling_gb'] is None
 
 
@@ -313,11 +284,11 @@ def test_free_physical_bytes_reads_this_computer():
 
 
 def test_summary(small_model):
-    check = memory.check_bake_memory(inputs(), 2048, Machine(2000, 2500, 3000))
+    check = memory.check_bake_memory(inputs(), Machine(2000, 2500, 3000))
     assert memory.summary(inputs(), check) == {
         'peak_gb': 0.0, 'stage': 'glow', 'level': 'page_file',
         'stages_gb': {'blender': 0.0, 'vertex': 0.0, 'glow': 0.0, 'finish': 0.0}, 'ram_gb': 0.0, 'ceiling_gb': 0.0}
-    assert memory.summary(inputs(), memory.check_bake_memory(inputs(), 2048, None))['ram_gb'] is None
+    assert memory.summary(inputs(), memory.check_bake_memory(inputs(), None))['ram_gb'] is None
 
 
 def test_flagged_sub_texels_count_the_pages_with_a_flagged_triangle():

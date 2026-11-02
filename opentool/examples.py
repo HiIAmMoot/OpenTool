@@ -14,7 +14,7 @@ EXAMPLE_TEXT = {
     'vertex_rays': 'Rays per vertex, for the light direction bump maps use. More give smoother bump shading.',
     'sky_grid': 'Suns per sky light. More give softer sky shadows.',
     'bounces': 'How often light bounces between surfaces. More light reaches the shade.',
-    'page_max': 'The largest lightmap page. Bigger pages fit more of the level on each.',
+    'page_max': 'The largest lightmap page written. Auto (4096) is best; the bake runs on smaller pages and combines them when it writes.',
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',
     'ignore_normals_mode': "How surfaces that ignore normals, such as foliage, are lit. Traditional copies tool; Enhanced lights them per texel.",
     'lightmap_32bit': '32-bit pages show no banding but take twice the space.',

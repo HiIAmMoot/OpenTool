@@ -459,7 +459,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         machine = memory.read_machine()
         stages_in = stage_inputs(_scene_estimate(scene, pages, 'cpu' if choice.setting == 'cpu' else 'gpu'),
                                  s.ignore_normals_mode, machine, s.bounces)
-        check = memory.check_bake_memory(stages_in, s.resolved_page_max, machine)
+        check = memory.check_bake_memory(stages_in, machine)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)

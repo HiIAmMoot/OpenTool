@@ -112,7 +112,7 @@ def test_first_screen_widgets(app):
     assert app.ignore_normals_var.get() == 'Traditional'
     assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
     assert app.tags_label['text'] == 'HCEK tags folder'
-    assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
+    assert tuple(app.advanced_entries['page_max']['values']) == ('Auto', '256', '512', '1024', '2048', '4096')
     assert app.new_names_hint['text'] == "Replaces your level's tags. Backups go in a backups folder next to them."
     assert app.advanced_frame.winfo_manager() == ''
     app._toggle_advanced()
@@ -150,7 +150,7 @@ def test_ultra_is_a_preset_button(app):
     ultra[0].invoke()
     assert app.preset_var.get() == 'Ultra'
     assert app.advanced_vars['texels_per_unit'].get() == '8'
-    assert app.advanced_vars['page_max'].get() == '2048'
+    assert app.advanced_vars['page_max'].get() == 'Auto'
     assert app.advanced_vars['vertex_rays'].get() == '16384'
     assert app.ignore_normals_var.get() == 'Enhanced'
 
@@ -236,7 +236,7 @@ def test_request_carries_the_form(app, tiny):
 
 def test_draft_fills_all_advanced_fields(app):
     app._select_preset('Draft')
-    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='256', sky_grid='2', bounces='1', page_max='512')
+    assert {key: value.get() for key, value in app.advanced_vars.items()} == dict(texels_per_unit='1', samples='256', vertex_rays='256', sky_grid='2', bounces='1', page_max='Auto')
 
 
 def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
@@ -1213,13 +1213,17 @@ def test_32bit_checkbox_reaches_the_settings_and_is_remembered(tmp_path, tiny, m
     assert make_app(store_path=tmp_path / 's.json').lightmap_32bit_var.get() is True
 
 
-def test_max_resolution_hint_appears_for_large_pages(app):
-    for value, shown in (('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True)):
-        app.advanced_vars['page_max'].set(value)
-        assert (app.page_max_hint['text'] == presets.PAGE_MAX_HINT) is shown
-        assert not any(ch.isdigit() for ch in app.page_max_hint['text'])
-    app._select_preset('High')
-    assert app.page_max_hint['text'] == ''
+def test_preset_shows_auto(app):
+    for name in presets.PRESET_NAMES:
+        app._select_preset(name)
+        assert app.advanced_vars['page_max'].get() == 'Auto'
+        assert app.preset_var.get() == name
+
+
+def test_estimate_gets_auto_from_the_auto_row(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    assert app.estimate_inputs().page_max == 'auto'
+    assert fake.calls[0].page_max == 'auto'
 
 
 def test_density_is_a_dropdown_of_the_choices(app):
@@ -1340,7 +1344,7 @@ def test_two_quick_selections_show_only_the_last_result(ready_app_with_fake, mon
     fake.gates[2].set()
     pump(app.root, lambda: app.estimate_state == 'fits')
     assert app.memory_label['text'] == 'Needs about 14 GB'
-    assert [c.page_max for c in fake.calls] == [512, 1024, 2048]
+    assert [c.page_max for c in fake.calls] == ['auto', 1024, 2048]
     assert fake.maximum_active == 1
 
 
@@ -1392,7 +1396,7 @@ def test_bake_button_stays_enabled_at_risk(ready_app_with_fake, monkeypatch):
     app.advanced_vars['page_max'].set('1024')
     finish_estimate(app, fake)
     inputs, _ = risk_text(app, fake, machine)
-    assert app.memory_label['text'] == (out_of_memory_message(inputs, 1024, machine)
+    assert app.memory_label['text'] == (out_of_memory_message(inputs, machine)
                                         + ' You can still bake, at your own risk.')
     assert app.estimate_state == 'risk'
     assert str(app.bake_button['state']) == 'normal'
@@ -1421,7 +1425,7 @@ def test_memory_risk_asks_before_baking(ready_app, monkeypatch, answer, new_name
     app._drain()
     app.new_names_var.set(new_names)
     stages_in = pipeline.stage_inputs(ESTIMATE_FITS, inputs.ignore_normals_mode, machine)
-    message = out_of_memory_message(stages_in, inputs.page_max, machine)
+    message = out_of_memory_message(stages_in, machine)
     asked, started = [], []
 
     def ask(*args):
@@ -1549,7 +1553,7 @@ def test_preset_switch_estimates_once_on_the_final_inputs(ready_app_with_fake):
     app._select_preset('High')
     pump(app.root, lambda: len(fake.calls) > before)
     app.root.update()
-    assert [(c.texels_per_unit, c.page_max) for c in fake.calls[before:]] == [(4.0, 1024)]
+    assert [(c.texels_per_unit, c.page_max) for c in fake.calls[before:]] == [(4.0, 'auto')]
 
 
 @pytest.mark.parametrize('field, value', [('texels_per_unit', ''), ('texels_per_unit', 'bad'),
@@ -1596,7 +1600,7 @@ def test_only_newest_waiting_selection_runs(ready_app_with_fake):
     app.advanced_vars['page_max'].set('4096')
     fake.gates[1].set()
     pump(app.root, lambda: len(fake.calls) == 3)
-    assert [c.page_max for c in fake.calls] == [512, 1024, 4096]
+    assert [c.page_max for c in fake.calls] == ['auto', 1024, 4096]
     finish_estimate(app, fake, 2)
     assert fake.maximum_active == 1
 
@@ -1702,7 +1706,6 @@ def test_advanced_row_order(app):
     assert app.advanced_error.grid_info()['row'] > rows[-1]
     assert set(app.row_hints) == set(app.row_order)
     assert all(app.row_hints[name].grid_info()['row'] == widgets[name].grid_info()['row'] for name in app.row_order)
-    assert app.page_max_hint is app.row_hints['page_max']
 
 
 def test_enhanced_shows_its_hint(app):

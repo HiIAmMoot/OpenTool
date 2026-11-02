@@ -3,7 +3,7 @@ from pathlib import Path
 
 from lightmapper.blender_find import BlenderNotFound
 from lightmapper.blender_job import BlenderError, BlenderOutOfMemory
-from lightmapper.charts import CapError
+from lightmapper.charts import CapError, TriangleTooWide
 from lightmapper.errors import KeptBakeError
 from lightmapper.gpu import DeviceError
 from lightmapper.pipeline import BakeError
@@ -20,9 +20,13 @@ def explain(exc: BaseException, work: Path | None = None) -> str:
             return 'Blender could not be started. Check the Blender path, or pick blender.exe again.'
         log_location = f'blender.log in {work}' if work is not None else "blender.log in the bake's work folder"
         return f"Blender stopped during the bake. The end of its log is below, and the whole log is {log_location}.\n{exc}"
+    if isinstance(exc, TriangleTooWide):
+        raise_it = ', or set Max resolution to Auto under Advanced' if exc.page_max < 4096 else ''
+        return (f'One triangle of shader {exc.shader} needs a lightmap page {exc.width} texels wide, more than '
+                f'Max resolution {exc.page_max} allows. Lower the texel density{raise_it}.')
     if isinstance(exc, CapError):
         return ('This level needs more lightmap space than the stock format allows at these settings. '
-                'Lower the texel density, or raise Max resolution under Advanced.')
+                'Lower the texel density, or set Max resolution to Auto under Advanced.')
     if isinstance(exc, DeviceError):
         vendor = {'nvidia': 'NVIDIA', 'amd': 'AMD'}.get(str(exc).split(':', 1)[0])
         if vendor:

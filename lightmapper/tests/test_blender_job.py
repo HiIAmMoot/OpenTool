@@ -476,7 +476,7 @@ def test_access_violation_with_calloc_null_is_out_of_memory(tmp_path, fake, monk
     with pytest.raises(BlenderOutOfMemory) as caught:
         run_blender(work, s)
     assert caught.value.message == memory.out_of_memory_message(
-        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), s.page_max, SMALL_MACHINE)
+        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), SMALL_MACHINE)
     assert 'Calloc returns null' in str(caught.value)
 
 
@@ -497,7 +497,7 @@ def test_out_of_memory_message_uses_the_machine_from_before_blender_started(tmp_
     with pytest.raises(BlenderOutOfMemory) as caught:
         run_blender(work, s)
     assert caught.value.message == memory.out_of_memory_message(
-        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), s.page_max, SMALL_MACHINE)
+        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), SMALL_MACHINE)
 
 
 def test_glow_run_out_of_memory_names_the_glow_stage(tmp_path, fake, monkeypatch):

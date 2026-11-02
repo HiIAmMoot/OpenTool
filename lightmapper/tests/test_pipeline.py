@@ -147,7 +147,7 @@ def test_memory_guard_warns_and_starts_blender(tiny, monkeypatch, caplog):
     assert len(calls) == 1 and (work / 'job.json').exists()
     summary = json.loads((work / 'summary.json').read_text())
     message = memory.out_of_memory_message(
-        memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']]), settings.page_max,
+        memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']]),
         TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
@@ -174,19 +174,18 @@ def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
     check = memory.check_bake_memory
     monkeypatch.setattr(memory, 'read_machine', lambda: BIG_MACHINE)
 
-    def spy(inputs, page_max, machine):
-        seen.append((inputs.counts, inputs.pages, page_max))
-        return check(inputs, page_max, machine)
+    def spy(inputs, machine):
+        seen.append((inputs.counts, inputs.pages))
+        return check(inputs, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     assert len(seen) == 1
-    seen_counts, pages, page_max = seen[0]
+    seen_counts, pages = seen[0]
     assert seen_counts.triangles == 2 + 1
     assert seen_counts.vertices == 6 + 3
     job = json.loads((work / 'job.json').read_text())
     assert pages == [tuple(page) for page in job['pages']]
-    assert page_max == settings.page_max
 
 
 def place_scenery(tags):
@@ -213,9 +212,9 @@ def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     seen = []
     check = memory.check_bake_memory
 
-    def spy(inputs, page_max, machine):
+    def spy(inputs, machine):
         seen.append((inputs.counts, inputs.pages))
-        return check(inputs, page_max, machine)
+        return check(inputs, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
@@ -361,7 +360,7 @@ def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
     inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']])
-    message = memory.out_of_memory_message(inputs, settings.page_max, TINY_MACHINE)
+    message = memory.out_of_memory_message(inputs, TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
     assert out.work == work

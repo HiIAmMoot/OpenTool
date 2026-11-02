@@ -227,7 +227,6 @@ class App:
             hint = ttk.Label(self.advanced_frame, foreground='gray', wraplength=180, justify='left')
             hint.grid(row=self.row_order.index(name), column=2, sticky='w', padx=(8, 0))
             self.row_hints[name] = hint
-        self.page_max_hint = self.row_hints['page_max']
         # (placed over column 2, never gridded: a grid child would size the rows and the uniform columns, and the window would jump on hover)
         self.example_panel = ttk.Frame(self.advanced_frame)
         self._example_shown = None
@@ -630,7 +629,7 @@ class App:
             if name in presets.PRESET_NAMES:
                 for field in presets.ADVANCED:
                     value = presets.PRESETS[name][field]
-                    self.advanced_vars[field].set(presets.format_density(value) if field == 'texels_per_unit' else str(value))
+                    self.advanced_vars[field].set(presets.display_value(field, value))
                 self.ignore_normals_var.set(self._ignore_normals_label(presets.PRESETS[name]['ignore_normals_mode']))
         finally:
             self._setting_preset = False
@@ -723,7 +722,7 @@ class App:
                     expected = presets.PRESETS[selected][field]
                 except ValueError:
                     value = text
-                    expected = str(presets.PRESETS[selected][field])
+                    expected = presets.display_value(field, presets.PRESETS[selected][field])
                 if value != expected:
                     matches = False
                     break
@@ -845,7 +844,7 @@ class App:
                     continue
                 try:
                     text, state = estimate_module.describe(
-                        result, inputs.page_max, read_machine(), inputs.ignore_normals_mode, inputs.bounces)
+                        result, read_machine(), inputs.ignore_normals_mode, inputs.bounces)
                 except Exception as exc:
                     result = exc
                     text, state = errors.explain(exc), 'error'

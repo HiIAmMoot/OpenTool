@@ -28,13 +28,13 @@ def result(monkeypatch):
 ])
 def test_describe_fits(result, machine, text):
     from opentool.estimate import describe
-    assert describe(result, 1024, machine) == (text, 'fits')
+    assert describe(result, machine) == (text, 'fits')
 
 
 def test_describe_warns_about_the_page_file(result):
     from opentool.estimate import RISK_SUFFIX, describe
     machine = memory.Machine(8 * GB, 8 * GB, 40 * GB)
-    assert describe(result, 1024, machine) == (
+    assert describe(result, machine) == (
         "This bake needs about 10 GB at its peak (baking in Blender), more than this computer's 8.0 GB of memory. "
         'It will lean on the page file and slow down.' + RISK_SUFFIX, 'warning')
 
@@ -43,9 +43,9 @@ def test_describe_flags_a_risk_of_running_out_of_memory(result):
     from opentool.estimate import RISK_SUFFIX, describe
     machine = memory.Machine(8 * GB, 8 * GB, 9 * GB)
     inputs = pipeline.stage_inputs(result, 'tool', machine)
-    assert describe(result, 1024, machine) == (
-        memory.out_of_memory_message(inputs, 1024, machine) + RISK_SUFFIX, 'risk')
-    assert 'run out of memory' in describe(result, 1024, machine)[0]
+    assert describe(result, machine) == (
+        memory.out_of_memory_message(inputs, machine) + RISK_SUFFIX, 'risk')
+    assert 'run out of memory' in describe(result, machine)[0]
 
 
 def test_describe_counts_the_glow_stage_only_in_enhanced_mode(result, monkeypatch):
@@ -53,8 +53,8 @@ def test_describe_counts_the_glow_stage_only_in_enhanced_mode(result, monkeypatc
     monkeypatch.setattr(memory, 'GLOW_PER_GLOW_SUB_TEXEL', 1000)
     result.flagged_sub_texels = 9 * GB // 1000
     machine = memory.Machine(15 * GB, 15 * GB, 15 * GB)
-    assert describe(result, 1024, machine, 'tool')[1] == 'fits'
-    text, state = describe(result, 1024, machine, 'enhanced')
+    assert describe(result, machine, 'tool')[1] == 'fits'
+    text, state = describe(result, machine, 'enhanced')
     assert state == 'risk' and text.startswith('This bake needs about 19 GB at its peak (baking light from')
     assert 'Traditional' in text
 
@@ -64,27 +64,27 @@ def test_describe_has_no_glow_without_bounces(result, monkeypatch):
     monkeypatch.setattr(memory, 'GLOW_PER_GLOW_SUB_TEXEL', 1000)
     result.flagged_sub_texels = 9 * GB // 1000
     machine = memory.Machine(15 * GB, 15 * GB, 15 * GB)
-    assert describe(result, 1024, machine, 'enhanced', 0)[1] == 'fits'
-    assert describe(result, 1024, machine, 'enhanced', 1)[1] == 'risk'
+    assert describe(result, machine, 'enhanced', 0)[1] == 'fits'
+    assert describe(result, machine, 'enhanced', 1)[1] == 'risk'
 
 
 def test_describe_decides_tiles_from_the_machine(result, monkeypatch):
     from opentool.estimate import describe
     monkeypatch.setattr(memory, 'PER_TILE_SUB_TEXEL', 10**9)
     # (one 8 x 8 page is 576 sub-texels: tiles would add 576 GB)
-    assert describe(result, 1024, memory.Machine(16 * GB, 16 * GB, None))[0] == 'Needs about 10 GB; this computer has 16 GB'
+    assert describe(result, memory.Machine(16 * GB, 16 * GB, None))[0] == 'Needs about 10 GB; this computer has 16 GB'
     monkeypatch.setattr(memory, 'PER_TILE_SUB_TEXEL', 1)
-    assert describe(result, 1024, memory.Machine(16 * GB, 16 * GB, None))[1] == 'fits'
+    assert describe(result, memory.Machine(16 * GB, 16 * GB, None))[1] == 'fits'
 
 
 @pytest.mark.parametrize('exc, text, state', [
     (CapError('too many pages'), 'This level needs more lightmap space than the stock format allows at these settings. '
-     'Lower the texel density, or raise Max resolution under Advanced.', 'refused'),
+     'Lower the texel density, or set Max resolution to Auto under Advanced.', 'refused'),
     (RuntimeError('broken'), 'The bake stopped: broken. The full error is in the log.', 'error'),
 ])
 def test_describe_error(exc, text, state):
     from opentool.estimate import describe
-    assert describe(exc, 1024, None) == (text, state)
+    assert describe(exc, None) == (text, state)
 
 
 def test_run_estimate_uses_chart_settings_and_level_cache(monkeypatch, tmp_path):
@@ -119,6 +119,6 @@ def test_describe_counts_all_127_resident_pages(result, monkeypatch):
     monkeypatch.setattr(memory, 'BLENDER_PER_PAGE_TEXEL', 100)
     result.pages[:] = [(1024, 1024)] + [(256, 256)] * 126
     need = (1024 ** 2 + 126 * 256 ** 2) * 100
-    assert describe(result, 1024, memory.Machine(need, need, None))[1] == 'fits'
-    assert describe(result, 1024, memory.Machine(need - 1, need - 1, None))[1] == 'risk'
-    assert describe(result, 1024, memory.Machine(need - 1, need, need + 1))[1] == 'warning'
+    assert describe(result, memory.Machine(need, need, None))[1] == 'fits'
+    assert describe(result, memory.Machine(need - 1, need - 1, None))[1] == 'risk'
+    assert describe(result, memory.Machine(need - 1, need, need + 1))[1] == 'warning'

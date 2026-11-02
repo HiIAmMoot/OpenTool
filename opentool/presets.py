@@ -1,12 +1,11 @@
-from lightmapper.memory import PAGE_SIDES
 from lightmapper.settings import Settings
 
 
 PRESETS: dict[str, dict] = {
-    'Draft': {'texels_per_unit': 1.0, 'samples': 256, 'vertex_rays': 256, 'sky_grid': 2, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
-    'Normal': {'texels_per_unit': 2.0, 'samples': 1024, 'vertex_rays': 1024, 'sky_grid': 4, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
-    'High': {'texels_per_unit': 4.0, 'samples': 2048, 'vertex_rays': 4096, 'sky_grid': 4, 'bounces': 1, 'page_max': 1024, 'ignore_normals_mode': 'tool'},
-    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 2048, 'ignore_normals_mode': 'enhanced'},
+    'Draft': {'texels_per_unit': 1.0, 'samples': 256, 'vertex_rays': 256, 'sky_grid': 2, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'Normal': {'texels_per_unit': 2.0, 'samples': 1024, 'vertex_rays': 1024, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'High': {'texels_per_unit': 4.0, 'samples': 2048, 'vertex_rays': 4096, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'enhanced'},
 }
 CPU_PRESETS: dict[str, dict] = {
     'Draft': {'samples': 64},
@@ -27,25 +26,17 @@ PRESET_HINTS: dict[str, str] = {
     'Custom': 'Your own values from Advanced, on any device.',
 }
 ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'sky_grid', 'bounces', 'page_max')
-PAGE_MAX_CHOICES = PAGE_SIDES
+PAGE_MAX_CHOICES = ('Auto', '256', '512', '1024', '2048', '4096')
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'sky_grid': 'Suns per sky light', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
 DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
-
-PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
 
 
 ENHANCED_HINT = 'the bake can take up to twice as long, and needs more memory'
 ADAPTIVE_HINT = 'the most rays per texel while adaptive sampling is on'
 
 
-def page_max_hint(value: str) -> str:
-    return PAGE_MAX_HINT if value in ('2048', '4096') else ''
-
-
 def row_hint(name: str, value: str, adaptive: bool) -> str:
-    if name == 'page_max':
-        return page_max_hint(value)
     if name == 'ignore_normals_mode':
         return ENHANCED_HINT if value == 'Enhanced' else ''
     if name == 'samples':
@@ -55,6 +46,12 @@ def row_hint(name: str, value: str, adaptive: bool) -> str:
 
 def format_density(value: float) -> str:
     return f'{value:g}'
+
+
+def display_value(field: str, value) -> str:
+    if field == 'page_max' and value == 'auto':
+        return 'Auto'
+    return format_density(value) if field == 'texels_per_unit' else str(value)
 
 
 def density_values(current: str) -> list[str]:
@@ -75,9 +72,12 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if field == 'texels_per_unit':
                 value = float(text)
                 valid = 0.25 <= value <= 32
+            elif field == 'page_max' and text.lower() == 'auto':
+                value = 'auto'
+                valid = True
             elif field == 'page_max':
                 value = int(text)
-                valid = value in PAGE_MAX_CHOICES
+                valid = str(value) in PAGE_MAX_CHOICES
             else:
                 value = int(text)
                 low, high = ranges[field]
@@ -85,7 +85,9 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if not valid:
                 raise ValueError
         except ValueError:
-            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'sky_grid': '1 to 8', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
+            if field == 'page_max':
+                raise ValueError(f'{LABELS[field]} must be Auto, 256, 512, 1024, 2048, or 4096.') from None
+            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'sky_grid': '1 to 8', 'bounces': '0 to 8'}[field]
             raise ValueError(f'{LABELS[field]} must be a number from {allowed}.') from None
         values[field] = value
     return values
