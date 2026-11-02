@@ -222,26 +222,23 @@ def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     assert estimate.counts == memory.SceneCounts(3, 9)
 
 
-def test_estimate_and_bake_keep_separate_chart_caches(tiny, monkeypatch, tmp_path):
-    from lightmapper import charts
+def test_the_bake_reuses_the_layout_the_estimate_charted(tiny, monkeypatch, tmp_path):
     tags, settings, work = tiny
     cache = tmp_path / 'charts.npz'
-    estimate_file = tmp_path / 'charts.estimate.npz'
+    nested = []
+    real = api().chart_and_pack
 
-    def refuse(*args, **kwargs):
-        raise AssertionError('the estimate nested')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(charts, '_nest_pack', refuse)
-        api().estimate_scene(tags, 'level', 'room', settings, cache)
-    assert estimate_file.exists() and not cache.exists()
-    api().bake(tags, 'level', 'room', settings, work=work, charts=cache)
-    assert cache.exists()
-    stamp = cache.stat().st_mtime_ns
-    with monkeypatch.context() as patch:
-        patch.setattr(charts, '_nest_pack', refuse)
-        api().estimate_scene(tags, 'level', 'room', settings, cache)
-    assert cache.stat().st_mtime_ns == stamp
+    def spy(*args, **kwargs):
+        nested.append(kwargs.get('nest'))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', spy)
+    estimate = api().estimate_scene(tags, 'level', 'room', settings, cache)
+    assert nested == [True] and cache.exists() and not (tmp_path / 'charts.estimate.npz').exists()
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    # (the bake found the estimate's layout under the same key, so it charted nothing)
+    assert nested == [True]
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['bake_sizes'] == [list(size) for size in estimate.pages]
 
 
 def test_chart_cache_key_carries_auto_and_nest(tmp_path):

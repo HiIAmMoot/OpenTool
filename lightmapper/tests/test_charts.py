@@ -1385,11 +1385,11 @@ def test_a_nested_layout_over_the_material_cap_falls_back(monkeypatch):
     same_layout(nested, rects)
 
 
-def test_the_estimate_never_nests(monkeypatch):
+def test_a_rectangle_layout_never_nests(monkeypatch):
     from lightmapper import charts
 
     def refuse(parts, settings):
-        raise AssertionError('the estimate must not nest')
+        raise AssertionError('nest=False must not nest')
     monkeypatch.setattr(charts, '_nest_pack', refuse)
     assert chart_and_pack([scattered_islands()], simple(), nest_settings(), nest=False)
 
@@ -1747,12 +1747,6 @@ def test_auto_at_the_cap_may_stay_above_ten_pages(monkeypatch):
     assert pages.page_shape == (512, 512) and written_count(pages, (512, 512)) == 12
 
 
-def test_the_estimate_and_the_bake_choose_the_same_shape():
-    group = rect_group([(60, 60)] * 75)
-    assert chart_and_pack([group], simple(), nest_settings(), nest=True).page_shape == \
-        chart_and_pack([group], simple(), nest_settings(), nest=False).page_shape
-
-
 def frames_and_quads(count, outer, hole, quad):
     # count hollow frames and as many quads, each quad small enough to nest in a frame
     pos, uvs, tris = [], [], []
@@ -1776,14 +1770,13 @@ def frames_and_quads(count, outer, hole, quad):
     return make_group(np.array(pos, np.float32), tris, uvs=uvs)
 
 
-def test_the_bake_counts_the_nested_layout_and_can_settle_smaller_than_the_estimate():
+def test_auto_counts_the_nested_layout_it_will_write():
     # (found by search: 20 frames with a quad each; as rectangles 256 x 128 pages hold too few, nested they hold 10)
     group = frames_and_quads(20, 100, 70, 40)
-    bake = chart_and_pack([group], simple(), nest_settings(), nest=True)
-    estimate = chart_and_pack([group], simple(), nest_settings(), nest=False)
-    assert bake.page_shape == (256, 128) and estimate.page_shape == (256, 256)
-    assert bake.estimate_shape == estimate.page_shape
-    assert written_count(bake, bake.page_shape) <= 10
+    nested = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    rectangles = chart_and_pack([group], simple(), nest_settings(), nest=False)
+    assert nested.page_shape == (256, 128) and rectangles.page_shape == (256, 256)
+    assert written_count(nested, nested.page_shape) <= 10
 
 
 def test_a_fixed_max_refuses_before_the_bake_when_the_write_needs_too_many_pages(monkeypatch):
@@ -1813,7 +1806,7 @@ def test_auto_at_the_cap_refuses_when_the_write_needs_too_many_pages(monkeypatch
 def test_a_nested_block_at_the_cap_does_not_step_past_it(monkeypatch):
     from lightmapper import charts
     monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
-    monkeypatch.setattr(charts, '_blocks_fit', lambda pages, shape, s: False)
-    monkeypatch.setattr(charts, '_nested_or', lambda rects, parts, s: list(rects))
+    monkeypatch.setattr(charts, '_blocks_fit', lambda pages, shape, s, blocks=None: False)
+    monkeypatch.setattr(charts, '_nested_or', lambda rects, parts, s, *lowest: list(rects))
     pages = chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings(), nest=True)
     assert pages.page_shape == (256, 256)
