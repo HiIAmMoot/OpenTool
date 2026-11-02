@@ -674,6 +674,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     page_max_resolved = getattr(pages, 'page_max', 0) or (
         s.page_max if isinstance(s.page_max, int) else max(max(p.width, p.height) for p in pages))
     plan, page_shape = written_plan(pages, page_max_resolved, s)
+    # (the estimate counts on rectangles and may settle a step larger; the summary says so when it does)
+    pages_estimate_shape = tuple(getattr(pages, 'estimate_shape', ()))
     bake_sizes = [[p.width, p.height] for p in pages]
     float_pages = repack_arrays(float_pages, plan)
     # (quantised after the move: the dither follows the written position, so the bitmap is the written float page's)
@@ -712,6 +714,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'bake_sizes': bake_sizes,
         'page_max_resolved': page_max_resolved, 'page_shape': list(page_shape),
+        **({'estimate_page_shape': list(pages_estimate_shape)}
+           if pages_estimate_shape and tuple(pages_estimate_shape) != tuple(page_shape) else {}),
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'written_paths': written_paths,

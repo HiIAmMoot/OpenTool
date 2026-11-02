@@ -488,3 +488,16 @@ def test_write_again_falls_back_to_the_cpu_denoiser_without_the_required_gpu(tin
     api().bake(tags, 'level', 'room', replace(settings, device='nvidia'), out_bsp='copy', work=work, reuse=True)
     summary = json.loads((work / 'write_summary.json').read_text())
     assert any('CPU denoiser' in warning for warning in summary['warnings'])
+
+
+def test_write_again_repeats_the_auto_page_shape(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    work = kept_work(tmp_path, tags)
+    settings = replace(tool(settings), page_max='auto')
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, keep=True)
+    baked = json.loads((work / 'summary.json').read_text())
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    again = json.loads((work / 'write_summary.json').read_text())
+    assert baked['page_shape'] and again['page_shape'] == baked['page_shape']
+    assert again['sizes'] == baked['sizes']

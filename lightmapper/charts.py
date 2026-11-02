@@ -29,7 +29,7 @@ from .gather import SIMPLE_PARAMETERIZATION, ShaderRadiosity
 
 logger = logging.getLogger(__name__)
 # identical input bytes and settings can have incompatible layouts under a different packing algorithm
-CACHE_VERSION = 14
+CACHE_VERSION = 15
 # the hard cap on a page side, and so on what 'auto' may come to (the most MCC accepts)
 AUTO_PAGE_MAX = 4096
 # the smallest side 'auto' settles on, however small the biggest chart is
@@ -48,11 +48,14 @@ class PackedPages(list):
     page_max: int = 0
     # the shape every written page but the last is, so the write repacks onto what the estimate counted
     page_shape: tuple[int, int] = ()
+    # the shape the estimate arrives at for the same charts, counted on rectangles alone
+    estimate_shape: tuple[int, int] = ()
 
 
 def save_charts(path: Path, pages: list[OutPage], key: str):
     arrays = {'meta': json.dumps({'version': CACHE_VERSION, 'key': key, 'page_max': getattr(pages, 'page_max', 0),
                                   'page_shape': list(getattr(pages, 'page_shape', ())),
+                                  'estimate_shape': list(getattr(pages, 'estimate_shape', ())),
                                   'pages': [[p.width, p.height, len(p.materials)] for p in pages]})}
     for i, page in enumerate(pages):
         for j, material in enumerate(page.materials):
@@ -91,6 +94,7 @@ def load_charts(path: Path, key: str) -> list[OutPage] | None:
             pages = PackedPages(pages)
             pages.page_max = int(meta['page_max'])
             pages.page_shape = tuple(int(side) for side in meta['page_shape'])
+            pages.estimate_shape = tuple(int(side) for side in meta['estimate_shape'])
     except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
         # an interrupted or damaged cache is disposable; gather and charts can rebuild it.
         return None
@@ -997,42 +1001,77 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
         pages = PackedPages(pages)
         pages.page_max = s.page_max
         pages.page_shape = (s.page_max, s.page_max)
+        pages.estimate_shape = pages.page_shape
         return pages
+
+
+def _rect_layout(pieces, widest: int, shape, s: ChartSettings):
+    side = max(max(shape), next_pow2(widest))
+    side_s = replace(s, page_max=side)
+    parts, split, made = _split_oversized(pieces, side, s.padding)
+    pages = _pack_rectangles(parts, side_s)
+    _check_caps(pages, side_s)
+    return pages, parts, side_s
 
 
 def _auto_pack(pieces, widest: int, s: ChartSettings, nest: bool) -> PackedPages:
     # Auto starts from the shape the biggest chart needs, which never shrinks, so no chart is cut. While the write
     # would make more than AUTO_TARGET_PAGES pages of it, or the caps fail, the shape steps up the ladder, to the cap.
-    # The count is taken on the rectangle layout, which the estimate makes too, so both arrive at the same shape
-    top = s.page_cap
+    # The bake counts on the layout it will write, nested where nesting wins; the estimate, which never nests, counts
+    # on rectangles, so its shape can come out larger (owner decision: the safe side for its memory figure)
+    cap = (s.page_cap, s.page_cap)
     shape = auto_page_max(pieces, s)
+    estimate_shape = None
+    nests = {}
     while True:
-        side = max(max(shape), next_pow2(widest))
-        side_s = replace(s, page_max=side)
-        parts, split, made = _split_oversized(pieces, side, s.padding)
         try:
-            pages = _pack_rectangles(parts, side_s)
-            _check_caps(pages, side_s)
-            count = written_pages(pages, shape, s)
+            rectangles, parts, side_s = _rect_layout(pieces, widest, shape, s)
         except CapError:
-            if shape == (top, top):
+            if shape == cap:
                 raise
-            count = None
-        if shape != (top, top) and (count is None or count > AUTO_TARGET_PAGES):
+            shape = step_up(shape)
+            continue
+        count = written_pages(rectangles, shape, s)
+        if estimate_shape is None and (count <= AUTO_TARGET_PAGES or shape == cap):
+            estimate_shape = shape
+        layout = rectangles
+        if nest:
+            # (shapes with one longer side share a bake side, and so the same nest)
+            if side_s.page_max not in nests:
+                nests[side_s.page_max] = _nested_or(rectangles, parts, side_s)
+            nested = nests[side_s.page_max]
+            if nested is not rectangles and not _blocks_fit(nested, shape, s):
+                # (nested charts move as one block at the write, and a half-height page may not hold it: the next
+                # step, a square of the same side, does, so nesting is kept rather than given up for this shape)
+                logger.info('auto: a nested block does not fit %dx%d, trying the next shape', *shape)
+                shape = step_up(shape)
+                continue
+            if nested is not rectangles:
+                layout, count = nested, written_pages(nested, shape, s)
+        if count > AUTO_TARGET_PAGES and shape != cap:
             shape = step_up(shape)
             continue
         break
-    logger.info('auto page shape %dx%d: %d written page(s); bake side %d, %d piece(s) split into %d parts',
-                *shape, count, side, split, made)
-    if nest:
-        pages = _nested_or(pages, parts, side_s, shape)
-    pages = PackedPages(pages)
-    pages.page_max = side
+    probe = shape
+    while estimate_shape is None:
+        # (the bake settled first; the estimate's shape is where the rectangles alone get within the target)
+        probe = step_up(probe)
+        try:
+            within = written_pages(_rect_layout(pieces, widest, probe, s)[0], probe, s) <= AUTO_TARGET_PAGES
+        except CapError:
+            within = False
+        if within or probe == cap:
+            estimate_shape = probe
+    logger.info('auto page shape %dx%d: %d written page(s), bake side %d; the estimate counts %dx%d',
+                *shape, count, side_s.page_max, *estimate_shape)
+    pages = PackedPages(layout)
+    pages.page_max = side_s.page_max
     pages.page_shape = shape
+    pages.estimate_shape = estimate_shape
     return pages
 
 
-def _nested_or(rectangles, parts, s, shape=None):
+def _nested_or(rectangles, parts, s):
     units = _nest_units(parts)
     # xatlas places each chart stretched to whole texels and we keep it unstretched, so a hollow chart's inner edge
     # can sit up to a texel nearer what nests in it than xatlas left. A texel more of xatlas padding on every chart
@@ -1054,10 +1093,6 @@ def _nested_or(rectangles, parts, s, shape=None):
         nested = None
     if nested is None:
         logger.info('nesting: %s, keeping the rectangle layout', reason)
-        return rectangles
-    if shape is not None and not _blocks_fit(nested, shape, s):
-        # (charts nested into each other move as one block at the write, which a half-height shape may not hold)
-        logger.info('nesting: a nested block does not fit the %dx%d page shape, keeping the rectangle layout', *shape)
         return rectangles
     # (a tie keeps the rectangle layout: nesting moves charts for nothing)
     if (len(nested), _pages_area(nested)) >= (len(rectangles), _pages_area(rectangles)):

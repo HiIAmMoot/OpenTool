@@ -1751,3 +1751,36 @@ def test_the_estimate_and_the_bake_choose_the_same_shape():
     group = rect_group([(60, 60)] * 75)
     assert chart_and_pack([group], simple(), nest_settings(), nest=True).page_shape == \
         chart_and_pack([group], simple(), nest_settings(), nest=False).page_shape
+
+
+def frames_and_quads(count, outer, hole, quad):
+    # count hollow frames and as many quads, each quad small enough to nest in a frame
+    pos, uvs, tris = [], [], []
+    for i in range(count):
+        edges = [0, (outer - hole) / 2, (outer + hole) / 2, outer]
+        base = len(pos)
+        for y in edges:
+            for x in edges:
+                pos.append([i * 1000 + x, y, 0])
+                uvs.append([i * 2 + x / 1000, y / 1000])
+        for cy in range(3):
+            for cx in range(3):
+                if (cx, cy) != (1, 1):
+                    a = base + cy * 4 + cx
+                    tris += [[a, a + 1, a + 5], [a, a + 5, a + 4]]
+        base = len(pos)
+        for x, y in ((0, 0), (quad, 0), (quad, quad), (0, quad)):
+            pos.append([i * 1000 + 500 + x, y, 0])
+            uvs.append([i * 2 + 1 + x / 1000, y / 1000])
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs)
+
+
+def test_the_bake_counts_the_nested_layout_and_can_settle_smaller_than_the_estimate():
+    # (found by search: 20 frames with a quad each; as rectangles 256 x 128 pages hold too few, nested they hold 10)
+    group = frames_and_quads(20, 100, 70, 40)
+    bake = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    estimate = chart_and_pack([group], simple(), nest_settings(), nest=False)
+    assert bake.page_shape == (256, 128) and estimate.page_shape == (256, 256)
+    assert bake.estimate_shape == estimate.page_shape
+    assert written_count(bake, bake.page_shape) <= 10
