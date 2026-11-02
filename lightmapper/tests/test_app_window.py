@@ -106,10 +106,6 @@ def test_first_screen_widgets(app):
     assert app.backups_var.get() is True
     assert app.backups_check['text'] == 'Keep backups'
     assert app.lightmap_32bit_check.winfo_parent() == str(app.advanced_frame)
-    assert app.ignore_normals_entry.winfo_parent() == str(app.advanced_frame)
-    assert tuple(app.ignore_normals_entry['values']) == ('Enhanced', 'Traditional')
-    assert str(app.ignore_normals_entry['state']) == 'readonly'
-    assert app.ignore_normals_var.get() == 'Traditional'
     assert app.backups_check.grid_info()['row'] == app.new_names_check.grid_info()['row']
     assert app.tags_label['text'] == 'HCEK tags folder'
     assert tuple(map(int, app.advanced_entries['page_max']['values'])) == (256, 512, 1024, 2048, 4096)
@@ -119,21 +115,35 @@ def test_first_screen_widgets(app):
     assert app.advanced_frame.winfo_manager() == 'grid'
 
 
-def test_presets_set_ignore_normals_and_a_change_keeps_the_preset(app, tiny):
+def test_ignore_normals_is_not_in_the_advanced_panel(app):
+    assert 'ignore_normals_mode' not in app.row_order
+    assert not hasattr(app, 'ignore_normals_entry')
+
+    def texts(widget):
+        yield str(widget.cget('text')) if 'text' in widget.keys() else ''
+        for child in widget.winfo_children():
+            yield from texts(child)
+    assert not any('Ignore-normals' in text for text in texts(app.root))
+
+
+@pytest.mark.parametrize('name', ['Draft', 'Normal', 'High', 'Ultra', 'Custom'])
+def test_every_preset_bakes_traditional(app, tiny, name):
     tags, *_ = tiny
     (tags / 'globals').mkdir()
     app.set_tags(str(tags))
     app.set_scenario_file(tags / 'level.scenario')
     pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
-    app._select_preset('Draft')
-    assert app.ignore_normals_var.get() == 'Traditional'
-    app._select_preset('Ultra')
-    assert app.ignore_normals_var.get() == 'Enhanced'
+    app._select_preset(name)
+    assert app.request().settings.ignore_normals_mode == 'tool'
+
+
+def test_a_change_keeps_the_preset(app, tiny):
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
     app._select_preset('Normal')
-    assert app.ignore_normals_var.get() == 'Traditional'
-    app.ignore_normals_var.set('Enhanced')
-    assert app.preset_var.get() == 'Normal'
-    assert app.request().settings.ignore_normals_mode == 'enhanced'
     app.lightmap_32bit_var.set(True)
     assert app.preset_var.get() == 'Normal'
     assert app.lightmap_32bit_var.get() is True
@@ -152,15 +162,22 @@ def test_ultra_is_a_preset_button(app):
     assert app.advanced_vars['texels_per_unit'].get() == '8'
     assert app.advanced_vars['page_max'].get() == '2048'
     assert app.advanced_vars['vertex_rays'].get() == '16384'
-    assert app.ignore_normals_var.get() == 'Enhanced'
 
 
-def test_a_0_2_2_settings_file_keeps_enhanced_on_a_named_preset(tmp_path, make_app):
-    (tmp_path / 's.json').write_text(json.dumps({
-        'preset': 'Normal', 'ignore_normals_mode': 'enhanced', 'adaptive_sampling': True}))
-    a = make_app(store_path=tmp_path / 's.json')
-    assert a.preset_var.get() == 'Normal'
-    assert a.ignore_normals_var.get() == 'Enhanced'
+def test_a_saved_enhanced_setting_is_read_ignored_and_not_written_back(tmp_path, tiny, make_app):
+    store = tmp_path / 's.json'
+    store.write_text(json.dumps({'preset': 'Ultra', 'ignore_normals_mode': 'enhanced', 'adaptive_sampling': True}))
+    a = make_app(store_path=store)
+    assert a.preset_var.get() == 'Ultra'
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    a.set_tags(str(tags))
+    a.set_scenario_file(tags / 'level.scenario')
+    pump(a.root, lambda: a.bsp_box.get() == 'room' and a.blender is not None)
+    assert a.request().settings.ignore_normals_mode == 'tool'
+    a.remember()
+    usersettings.save(a.settings, store)
+    assert json.loads(store.read_text())['ignore_normals_mode'] == 'tool'
 
 
 def test_a_0_2_1_settings_file_opens_on_its_preset_with_the_new_values(tmp_path, make_app):
@@ -171,10 +188,9 @@ def test_a_0_2_1_settings_file_opens_on_its_preset_with_the_new_values(tmp_path,
     a = make_app(store_path=tmp_path / 's.json')
     assert a.preset_var.get() == 'Normal'
     assert a.advanced_vars['vertex_rays'].get() == '1024'
-    assert a.ignore_normals_var.get() == 'Traditional'
 
 
-def test_a_saved_custom_form_keeps_its_values_and_mode(tmp_path, make_app):
+def test_a_saved_custom_form_keeps_its_values(tmp_path, make_app):
     (tmp_path / 's.json').write_text(json.dumps({
         'preset': 'Custom', 'ignore_normals_mode': 'enhanced',
         'advanced': {'texels_per_unit': '2', 'samples': '1024', 'vertex_rays': '300',
@@ -182,21 +198,16 @@ def test_a_saved_custom_form_keeps_its_values_and_mode(tmp_path, make_app):
     a = make_app(store_path=tmp_path / 's.json')
     assert a.preset_var.get() == 'Custom'
     assert a.advanced_vars['vertex_rays'].get() == '300'
-    assert a.ignore_normals_var.get() == 'Enhanced'
 
 
-@pytest.mark.parametrize('choice, mode', [('Enhanced', 'enhanced'), ('Traditional', 'tool')])
-def test_ignore_normals_and_32bit_values_reach_bake_settings(app, tiny, choice, mode):
+def test_32bit_value_reaches_bake_settings(app, tiny):
     tags, *_ = tiny
     (tags / 'globals').mkdir()
     app.set_tags(str(tags))
     app.set_scenario_file(tags / 'level.scenario')
     pump(app.root, lambda: app.bsp_box.get() == 'room' and app.blender is not None)
-    app.ignore_normals_var.set(choice)
     app.lightmap_32bit_var.set(True)
-    settings = app.request().settings
-    assert settings.ignore_normals_mode == mode
-    assert settings.lightmap_32bit is True
+    assert app.request().settings.lightmap_32bit is True
 
 
 def test_new_names_hint_tracks_checkbox(app):
@@ -244,14 +255,12 @@ def test_advanced_edit_selects_custom_and_restores(tmp_path, make_app):
     app = make_app(store_path=store)
     app._select_preset('Draft')
     app.advanced_vars['texels_per_unit'].set('3')
-    app.ignore_normals_var.set('Traditional')
     app.lightmap_32bit_var.set(True)
     assert app.preset_var.get() == 'Custom'
     app.remember()
     restored = make_app(store_path=store)
     assert restored.preset_var.get() == 'Custom'
     assert restored.advanced_vars['texels_per_unit'].get() == '3'
-    assert restored.ignore_normals_var.get() == 'Traditional'
     assert restored.lightmap_32bit_var.get() is True
 
 
@@ -969,14 +978,11 @@ def test_stage_rows_are_green_for_gpu_and_red_for_cpu(make_app):
     a = make_app(probe_gpu=probe_for([RTX]))
     pump(a.root, lambda: a.stage_rows[0][1]['text'] == 'GPU')
     assert stage_texts(a)[3] == ('Glow pass', 'Skipped', '')
-    a.ignore_normals_var.set('Enhanced')
-    assert stage_texts(a) == [('Page bake', 'GPU', 'green'), ('Vertex pass', 'GPU', 'green'), ('Denoise', 'GPU', 'green'),
-                              ('Glow pass', 'GPU', 'green')]
     a.device_var.set('CPU only')
     a.device_box.event_generate('<<ComboboxSelected>>')
     a.root.update()
     assert stage_texts(a) == [('Page bake', 'CPU', 'red'), ('Vertex pass', 'CPU', 'red'), ('Denoise', 'CPU', 'red'),
-                              ('Glow pass', 'CPU', 'red')]
+                              ('Glow pass', 'Skipped', '')]
 
 
 def test_finished_bake_shows_what_was_used_in_the_stage_rows(ready_app):
@@ -998,13 +1004,6 @@ def test_new_bake_resets_stage_rows_to_prediction(ready_app):
     ready_app._run_bake = lambda req, emit: None
     ready_app.start_bake()
     assert [state['text'] for _, state, _ in ready_app.stage_rows] == ['GPU', 'GPU', 'GPU', 'Skipped']
-
-
-def test_changing_ignore_normals_after_a_bake_shows_the_prediction_again(ready_app):
-    ready_app._bake_done(cpu_outcome())
-    assert ready_app.stage_rows[0][1]['text'] == 'CPU'
-    ready_app.ignore_normals_var.set('Traditional')
-    assert ready_app.stage_rows[0][1]['text'] == 'GPU'
 
 
 def test_failed_bake_without_devices_resets_stage_rows(ready_app):
@@ -1694,10 +1693,9 @@ def test_advanced_columns_split_equally(app):
 def test_advanced_row_order(app):
     widgets = {name: app.advanced_entries[name] for name in presets.ADVANCED}
     widgets['adaptive_sampling'] = app.adaptive_check
-    widgets['ignore_normals_mode'] = app.ignore_normals_entry
     widgets['lightmap_32bit'] = app.lightmap_32bit_check
     widgets['render_only_shadows'] = app.render_only_shadows_entry
-    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
+    assert app.row_order == (*presets.ADVANCED, 'adaptive_sampling', 'lightmap_32bit',
                              'render_only_shadows')
     rows = [widgets[name].grid_info()['row'] for name in app.row_order]
     assert rows == sorted(set(rows))
@@ -1705,13 +1703,6 @@ def test_advanced_row_order(app):
     assert set(app.row_hints) == set(app.row_order)
     assert all(app.row_hints[name].grid_info()['row'] == widgets[name].grid_info()['row'] for name in app.row_order)
     assert app.page_max_hint is app.row_hints['page_max']
-
-
-def test_enhanced_shows_its_hint(app):
-    app._select_preset('Ultra')
-    assert app.row_hints['ignore_normals_mode']['text'] == presets.ENHANCED_HINT
-    app._select_preset('Normal')
-    assert app.row_hints['ignore_normals_mode']['text'] == ''
 
 
 def test_adaptive_greys_rays_per_texel(app):
@@ -1834,12 +1825,12 @@ def test_showing_an_example_leaves_the_layout_alone(app):
     # (a withdrawn window is laid out at 1x1 until it has a size of its own)
     app.window.geometry('900x700')
     app.window.update()
-    widgets = [*app.advanced_entries.values(), app.adaptive_check, app.ignore_normals_entry,
+    widgets = [*app.advanced_entries.values(), app.adaptive_check,
                app.lightmap_32bit_check, *app.row_hints.values()]
     before = (app.advanced_frame.winfo_reqwidth(), app.advanced_frame.winfo_reqheight(),
               app.window.winfo_reqwidth(), app.window.winfo_reqheight(),
               [(widget.winfo_y(), widget.grid_info()) for widget in widgets])
-    app._on_example_hover('ignore_normals_mode')
+    app._on_example_hover('samples')
     app.window.update_idletasks()
     after = (app.advanced_frame.winfo_reqwidth(), app.advanced_frame.winfo_reqheight(),
              app.window.winfo_reqwidth(), app.window.winfo_reqheight(),
@@ -1889,14 +1880,9 @@ def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
 
 
 def test_traditional_predicts_a_skipped_glow_row(ready_app):
-    ready_app.ignore_normals_var.set('Traditional')
     name, state, detail = ready_app.stage_rows[3]
     assert (name['text'], state['text'], str(state['foreground']), detail['text']) == (
         'Glow pass', 'Skipped', '', 'Traditional ignore normals')
-    ready_app.ignore_normals_var.set('Enhanced')
-    assert ready_app.stage_rows[3][1]['text'] == 'GPU'
-    ready_app.advanced_vars['bounces'].set('0')
-    assert (ready_app.stage_rows[3][1]['text'], ready_app.stage_rows[3][2]['text']) == ('Skipped', 'bounces set to 0')
 
 
 def test_glow_plan_moves_the_bar_to_the_glow_spans(ready_app):
@@ -1941,12 +1927,6 @@ def test_a_failed_glow_stage_ends_like_a_failed_blender_stage(ready_app):
                      stage_texts(ready_app)))
     assert ends[0] == ends[1]
     assert ends[1][:3] == (None, 'Blender could not be started.', 'red')
-
-
-def test_an_unknown_ignore_normals_mode_reads_as_traditional():
-    assert App._ignore_normals_label('mystery') == 'Traditional'
-    assert App._ignore_normals_label('enhanced') == 'Enhanced'
-    assert App._ignore_normals_label('tool') == 'Traditional'
 
 
 def test_row_hints_leave_rays_per_texel_locked_during_a_bake(ready_app):
@@ -2123,12 +2103,9 @@ def test_a_saved_sky_grid_is_read_ignored_and_not_written_back(tmp_path, tiny, m
     assert 'sky_grid' not in json.loads(store.read_text())['advanced']
 
 
-def test_changing_the_ignore_normals_mode_estimates_again(ready_app_with_fake):
+def test_the_estimate_is_asked_for_traditional_lighting(ready_app_with_fake):
     app, fake = ready_app_with_fake
-    other = 'Traditional' if app.ignore_normals_var.get() == 'Enhanced' else 'Enhanced'
-    app.ignore_normals_var.set(other)
-    finish_estimate(app, fake)
-    assert fake.calls[1].ignore_normals_mode == dict(presets.IGNORE_NORMALS)[other]
+    assert fake.calls[0].ignore_normals_mode == 'tool'
 
 
 def test_estimate_asks_for_the_users_device_and_bounces(ready_app_with_fake):

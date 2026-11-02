@@ -84,11 +84,10 @@ class App:
         self._build()
         self._restore()
         for value in (*self.advanced_vars.values(), self.preset_var, self.device_var, self.bsp_var,
-                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.adaptive_var, self.ignore_normals_var, self.verbose_var,
+                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.adaptive_var, self.verbose_var,
                       self.render_only_shadows_var):
             value.trace_add('write', lambda *_args: self._reset_used_rows())
-        for value in (self.ignore_normals_var, self.advanced_vars['bounces']):
-            value.trace_add('write', lambda *_args: self._glow_inputs_changed())
+        self.advanced_vars['bounces'].trace_add('write', lambda *_args: self._glow_inputs_changed())
         self._set_blender_status('Looking for Blender…')
         self._discover_blender()
         self._discover_gpu()
@@ -185,14 +184,12 @@ class App:
         self._advanced_open = False
         self.row_hints = {}
         row_labels = {}
-        self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
+        self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'lightmap_32bit',
                           'render_only_shadows')
         self.adaptive_var = tk.BooleanVar(value=self.settings.adaptive_sampling)
         self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
         self.render_only_shadows_var = tk.StringVar(
             value=self._render_only_label(self.settings.render_only_shadows))
-        self.ignore_normals_var = tk.StringVar(
-            value=self._ignore_normals_label(self.settings.ignore_normals_mode))
         for index, name in enumerate(presets.ADVANCED):
             row_labels[name] = ttk.Label(self.advanced_frame, text=presets.LABELS[name])
             row_labels[name].grid(row=index, column=0, sticky='w', padx=(0, 8), pady=2)
@@ -216,13 +213,6 @@ class App:
         self.adaptive_check = ttk.Checkbutton(
             self.advanced_frame, text='Adaptive sampling', variable=self.adaptive_var)
         self.adaptive_check.grid(row=self.row_order.index('adaptive_sampling'), column=1, sticky='w', pady=2)
-        row_labels['ignore_normals_mode'] = ttk.Label(self.advanced_frame, text='Ignore-normals lighting')
-        row_labels['ignore_normals_mode'].grid(
-            row=self.row_order.index('ignore_normals_mode'), column=0, sticky='w', padx=(0, 8), pady=2)
-        self.ignore_normals_entry = ttk.Combobox(
-            self.advanced_frame, values=tuple(label for label, _ in presets.IGNORE_NORMALS), textvariable=self.ignore_normals_var,
-            state='readonly')
-        self.ignore_normals_entry.grid(row=self.row_order.index('ignore_normals_mode'), column=1, sticky='ew', pady=2)
         self.lightmap_32bit_check = ttk.Checkbutton(
             self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
         self.lightmap_32bit_check.grid(row=self.row_order.index('lightmap_32bit'), column=1, sticky='w', pady=2)
@@ -251,7 +241,7 @@ class App:
         self._example_refit = None
         self.advanced_frame.bind('<Configure>', lambda _event: self._refit_example_later(), add='+')
         controls = {**self.advanced_entries, 'adaptive_sampling': self.adaptive_check,
-                    'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check,
+                    'lightmap_32bit': self.lightmap_32bit_check,
                     'render_only_shadows': self.render_only_shadows_entry}
         for name in self.row_order:
             for widget in (row_labels.get(name), controls[name]):
@@ -263,10 +253,7 @@ class App:
             controls[name].bind('<FocusOut>', lambda _event: self._on_example_focus(None), add='+')
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
-        for value in (self.adaptive_var, self.ignore_normals_var):
-            value.trace_add('write', lambda *_args: self._update_row_hints())
-        # (the glow stage's memory depends on the mode, so the estimate is read again)
-        self.ignore_normals_var.trace_add('write', lambda *_args: self._inputs_changed())
+        self.adaptive_var.trace_add('write', lambda *_args: self._update_row_hints())
         self._update_row_hints()
 
         blender_row = ttk.Frame(self.frame)
@@ -335,9 +322,6 @@ class App:
                     except (TypeError, ValueError):
                         pass
                 self.advanced_vars[name].set(value)
-        # after the preset, which sets its own lighting; 0.2.1 saved 'enhanced' for everyone, so there a preset keeps its own
-        if custom or not self.settings.legacy_0_2_1:
-            self.ignore_normals_var.set(self._ignore_normals_label(self.settings.ignore_normals_mode))
         if self.settings.advanced_open:
             self._toggle_advanced()
         if not self.settings.tags:
@@ -432,8 +416,7 @@ class App:
             return None
         return EstimateInputs(self._tags, self._scenario, self.bsp_var.get(),
                               values['texels_per_unit'], values['page_max'],
-                              dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
-                              self._device_value(), self._bounces())
+                              'tool', self._device_value(), self._bounces())
 
     def _bounces(self) -> int:
         try:
@@ -552,7 +535,7 @@ class App:
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
         settings.adaptive_sampling = self.adaptive_var.get()
         settings.render_only_shadows = dict(presets.RENDER_ONLY_SHADOWS)[self.render_only_shadows_var.get()]
-        settings.ignore_normals_mode = dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()]
+        settings.ignore_normals_mode = 'tool'
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get(),
                                   charts=runner.chart_cache_path(self._tags, self._scenario, bsp),
@@ -571,7 +554,6 @@ class App:
             backups=self.backups_var.get(), lightmap_32bit=self.lightmap_32bit_var.get(),
             adaptive_sampling=self.adaptive_var.get(),
             render_only_shadows=dict(presets.RENDER_ONLY_SHADOWS)[self.render_only_shadows_var.get()],
-            ignore_normals_mode=dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(), device=self._device_value(), keep_bakes=self.keep_var.get(),
         )
@@ -597,11 +579,6 @@ class App:
     def _update_hint(self):
         self.preset_hint.configure(text=presets.PRESET_HINTS.get(self.preset_var.get(), ''))
         self._set_optional_label(self.preset_note, presets.GPU_NOTE if self.preset_var.get() in presets.PRESET_NAMES else '')
-
-    @staticmethod
-    def _ignore_normals_label(mode):
-        labels = {value: label for label, value in presets.IGNORE_NORMALS}
-        return labels.get(mode, labels['tool'])
 
     @staticmethod
     def _render_only_label(value):
@@ -634,7 +611,7 @@ class App:
         if prediction:
             self._using_stage_rows = False
         if not self._using_stage_rows:
-            glow = devices.glow_skip(dict(presets.IGNORE_NORMALS).get(self.ignore_normals_var.get(), ''),
+            glow = devices.glow_skip('tool',
                                      self.advanced_vars['bounces'].get())
             self._show_stage_rows(devices.stage_rows(self._device_value(), self._adapters, self._gpu_reason,
                                                      self._denoiser, glow))
@@ -650,7 +627,6 @@ class App:
                 for field in presets.ADVANCED:
                     value = presets.PRESETS[name][field]
                     self.advanced_vars[field].set(presets.format_density(value) if field == 'texels_per_unit' else str(value))
-                self.ignore_normals_var.set(self._ignore_normals_label(presets.PRESETS[name]['ignore_normals_mode']))
         finally:
             self._setting_preset = False
         self._inputs_changed()
@@ -703,7 +679,7 @@ class App:
 
     def _update_row_hints(self):
         adaptive = self.adaptive_var.get()
-        values = {'page_max': self.advanced_vars['page_max'].get(), 'ignore_normals_mode': self.ignore_normals_var.get()}
+        values = {'page_max': self.advanced_vars['page_max'].get()}
         for name, hint in self.row_hints.items():
             hint.configure(text=presets.row_hint(name, values.get(name, ''), adaptive))
         entry = self.advanced_entries['samples']

@@ -3,7 +3,7 @@ from opentool import presets
 
 
 def test_every_example_row_has_text_and_an_image():
-    assert examples.EXAMPLE_ROWS == (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
+    assert examples.EXAMPLE_ROWS == (*presets.ADVANCED, 'adaptive_sampling', 'lightmap_32bit',
                                      'render_only_shadows')
     for name in examples.EXAMPLE_ROWS:
         assert examples.EXAMPLE_TEXT[name]

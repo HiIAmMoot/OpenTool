@@ -6,7 +6,7 @@ PRESETS: dict[str, dict] = {
     'Draft': {'texels_per_unit': 1.0, 'samples': 256, 'vertex_rays': 256, 'sky_grid': 2, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
     'Normal': {'texels_per_unit': 2.0, 'samples': 1024, 'vertex_rays': 1024, 'sky_grid': 4, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
     'High': {'texels_per_unit': 4.0, 'samples': 2048, 'vertex_rays': 4096, 'sky_grid': 4, 'bounces': 1, 'page_max': 1024, 'ignore_normals_mode': 'tool'},
-    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 2048, 'ignore_normals_mode': 'enhanced'},
+    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 2048, 'ignore_normals_mode': 'tool'},
 }
 CPU_PRESETS: dict[str, dict] = {
     'Draft': {'samples': 64},
@@ -38,7 +38,6 @@ DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
 PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
 
 
-ENHANCED_HINT = 'the bake can take up to twice as long, and needs more memory'
 ADAPTIVE_HINT = 'the most rays per texel while adaptive sampling is on'
 
 
@@ -49,8 +48,6 @@ def page_max_hint(value: str) -> str:
 def row_hint(name: str, value: str, adaptive: bool) -> str:
     if name == 'page_max':
         return page_max_hint(value)
-    if name == 'ignore_normals_mode':
-        return ENHANCED_HINT if value == 'Enhanced' else ''
     if name == 'samples':
         return ADAPTIVE_HINT if adaptive else ''
     return ''

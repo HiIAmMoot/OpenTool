@@ -56,7 +56,7 @@ def test_describe_counts_the_glow_stage_only_in_enhanced_mode(result, monkeypatc
     assert describe(result, 1024, machine, 'tool')[1] == 'fits'
     text, state = describe(result, 1024, machine, 'enhanced')
     assert state == 'risk' and text.startswith('This bake needs about 19 GB at its peak (baking light from')
-    assert 'Traditional' in text
+    assert 'ignore_normals_mode' in text
 
 
 def test_describe_has_no_glow_without_bounces(result, monkeypatch):

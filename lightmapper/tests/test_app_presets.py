@@ -17,7 +17,7 @@ def test_gpu_preset_values():
         'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=256, sky_grid=2, bounces=1, page_max=512, ignore_normals_mode='tool'),
         'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=1024, sky_grid=4, bounces=1, page_max=512, ignore_normals_mode='tool'),
         'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=4096, sky_grid=4, bounces=1, page_max=1024, ignore_normals_mode='tool'),
-        'Ultra': dict(texels_per_unit=8.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=2048, ignore_normals_mode='enhanced')}
+        'Ultra': dict(texels_per_unit=8.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=2048, ignore_normals_mode='tool')}
     assert PRESET_NAMES == ('Draft', 'Normal', 'High', 'Ultra')
 
 
@@ -26,7 +26,7 @@ def test_cpu_preset_values():
                            'Ultra': dict(samples=512)}
 
 
-@pytest.mark.parametrize('name, mode', [('Draft', 'tool'), ('Normal', 'tool'), ('High', 'tool'), ('Ultra', 'enhanced')])
+@pytest.mark.parametrize('name, mode', [('Draft', 'tool'), ('Normal', 'tool'), ('High', 'tool'), ('Ultra', 'tool')])
 def test_presets_carry_ignore_normals(name, mode):
     assert build_settings(name, {}, 'b').ignore_normals_mode == mode
 
@@ -150,13 +150,10 @@ def test_density_values_add_a_custom_entry():
 def test_row_hint():
     assert presets.row_hint('page_max', '2048', False) == presets.PAGE_MAX_HINT
     assert presets.row_hint('page_max', '512', True) == ''
-    assert presets.row_hint('ignore_normals_mode', 'Enhanced', False) == presets.ENHANCED_HINT
-    assert presets.row_hint('ignore_normals_mode', 'Traditional', False) == ''
     assert presets.row_hint('samples', '1024', True) == presets.ADAPTIVE_HINT
     assert presets.row_hint('samples', '1024', False) == ''
     for name in ('texels_per_unit', 'vertex_rays', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):
         assert presets.row_hint(name, 'Enhanced', True) == ''
-    assert presets.ENHANCED_HINT == 'the bake can take up to twice as long, and needs more memory'
     assert presets.ADAPTIVE_HINT == 'the most rays per texel while adaptive sampling is on'
 
 
