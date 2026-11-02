@@ -17,7 +17,7 @@ def test_presets_use_auto():
 
 
 def test_build_settings_from_a_preset_resolves_to_4096():
-    assert build_settings('Draft', {}, 'b').resolved_page_max == 4096
+    assert build_settings('Draft', {}, 'b').page_cap == 4096
     assert build_settings('Ultra', {}, 'b').page_max == 'auto'
 
 

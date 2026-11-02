@@ -29,17 +29,25 @@ from .gather import SIMPLE_PARAMETERIZATION, ShaderRadiosity
 
 logger = logging.getLogger(__name__)
 # identical input bytes and settings can have incompatible layouts under a different packing algorithm
-CACHE_VERSION = 12
-# the largest page 'auto' allows
+CACHE_VERSION = 13
+# the hard cap on a page side, and so on what 'auto' may come to (the most MCC accepts)
 AUTO_PAGE_MAX = 4096
+# the smallest side 'auto' settles on, however small the biggest chart is
+AUTO_PAGE_MIN = 256
 # xatlas always charts at this side, whatever the pages end up being, so the layout of a chart never depends on page_max
 CHART_SIDE = 4096
 # the bake side the search for the smallest page side starts from
 FIRST_BAKE_SIDE = 512
 
 
+class PackedPages(list):
+    # the Max resolution the layout was made for: the fixed value, or what 'auto' came to for this level and density.
+    # The written pages are capped at it, so the combine at write needs it and a cached layout has to carry it
+    page_max: int = 0
+
+
 def save_charts(path: Path, pages: list[OutPage], key: str):
-    arrays = {'meta': json.dumps({'version': CACHE_VERSION, 'key': key,
+    arrays = {'meta': json.dumps({'version': CACHE_VERSION, 'key': key, 'page_max': getattr(pages, 'page_max', 0),
                                   'pages': [[p.width, p.height, len(p.materials)] for p in pages]})}
     for i, page in enumerate(pages):
         for j, material in enumerate(page.materials):
@@ -75,6 +83,8 @@ def load_charts(path: Path, key: str) -> list[OutPage] | None:
                     materials.append(OutMaterial(int(data[prefix + 'group']),
                         *(data[prefix + name].copy() for name in ('env', 'lm', 'tris', 'surface_ids'))))
                 pages.append(OutPage(width, height, materials))
+            pages = PackedPages(pages)
+            pages.page_max = int(meta['page_max'])
     except (OSError, ValueError, KeyError, TypeError, EOFError, BadZipFile):
         # an interrupted or damaged cache is disposable; gather and charts can rebuild it.
         return None
@@ -114,7 +124,7 @@ class ChartSettings:
             raise ValueError(f"page_max must be 'auto' or a power of two, not {self.page_max!r}")
         if self.page_min < 1 or self.page_min & (self.page_min - 1):
             raise ValueError(f'page_min must be a power of two, not {self.page_min}')
-        if self.page_min > self.resolved_page_max:
+        if self.page_min > self.page_cap:
             raise ValueError('page_min exceeds page_max')
         # (a settings file brings the list back as a list, which would not equal the default)
         self.detail_level_scale = tuple(float(v) for v in self.detail_level_scale)
@@ -122,7 +132,9 @@ class ChartSettings:
             raise ValueError(f'detail_level_scale needs four positive multipliers, not {self.detail_level_scale}')
 
     @property
-    def resolved_page_max(self) -> int:
+    def page_cap(self) -> int:
+        # (the limit a page side may reach, not the Max resolution: for 'auto' that is found per level, and
+        # chart_and_pack hands it back as PackedPages.page_max)
         return AUTO_PAGE_MAX if self.page_max == 'auto' else self.page_max
 
     def density_scale(self, shader: ShaderRadiosity) -> float:
@@ -409,6 +421,13 @@ def _split_oversized(pieces, side: int, padding: int) -> tuple[list, int, int]:
     return parts, split, made
 
 
+def auto_page_max(parts, s: ChartSettings) -> int:
+    # the smallest power of two (AUTO_PAGE_MIN up, within the hard cap) that holds the biggest chart whole with its
+    # padding. parts are the charts after anything over the cap is cut, so none of them is bigger than the cap
+    biggest = max(int(_padded_size(part[3], s.padding).max()) for part in parts)
+    return min(max(AUTO_PAGE_MIN, s.page_min, next_pow2(biggest)), AUTO_PAGE_MAX)
+
+
 def _widest_triangle(pieces, padding: int) -> tuple[int, str]:
     widest, shader = 0, ''
     for _, group, _, uv, tris, _ in pieces:
@@ -463,8 +482,8 @@ def _finish(pages, extent, s: ChartSettings) -> list[OutPage]:
     result = []
     for pieces, ext in zip(pages, extent):
         used = ext + 2 * s.padding
-        w = min(max(next_pow2(math.ceil(used[0])), s.page_min), s.resolved_page_max)
-        h = min(max(next_pow2(math.ceil(used[1])), s.page_min), s.resolved_page_max)
+        w = min(max(next_pow2(math.ceil(used[0])), s.page_min), s.page_cap)
+        h = min(max(next_pow2(math.ceil(used[1])), s.page_min), s.page_cap)
         assert used[0] <= w and used[1] <= h, 'a chart reaches into its page padding'
         by_group = {}
         for index, group, xref, uv, tris, surface_ids in pieces:
@@ -661,7 +680,7 @@ def _pack_rectangles(pieces, s):
         uv = piece[3]
         low = np.floor(uv.min(axis=0))
         size = _padded_size(uv, s.padding)
-        if np.any(size > s.resolved_page_max):
+        if np.any(size > s.page_cap):
             raise CapError('a chart exceeds page_max including padding')
         rectangles.append((piece, uv - low, tuple(size)))
     # decreasing heights let every earlier shelf accept a later chart's height;
@@ -672,8 +691,8 @@ def _pack_rectangles(pieces, s):
         order = sorted(range(len(rectangles)), key=lambda i: (
             -rectangles[i][2][1 if not transpose else 0],
             -rectangles[i][2][0 if not transpose else 1], i))
-        for width in (1 << k for k in range(s.page_min.bit_length() - 1, s.resolved_page_max.bit_length())):
-            for height in (1 << k for k in range(s.page_min.bit_length() - 1, s.resolved_page_max.bit_length())):
+        for width in (1 << k for k in range(s.page_min.bit_length() - 1, s.page_cap.bit_length())):
+            for height in (1 << k for k in range(s.page_min.bit_length() - 1, s.page_cap.bit_length())):
                 if width * height * s.max_pages < total_area:
                     continue
                 packed = _shelf_pack(rectangles, order, width, height, transpose, s)
@@ -787,7 +806,7 @@ def _nest_at(parts, side: int, s: ChartSettings, margin: int):
 
 def _nest_pack(parts, s: ChartSettings, margin: int | None = None) -> list[OutPage] | None:
     margin = s.padding if margin is None else margin
-    top = s.resolved_page_max
+    top = s.page_cap
     side = max(s.page_min, next_pow2(max(int(_padded_size(part[3], s.padding).max()) for part in parts)))
     best = None
     while side <= top:
@@ -863,7 +882,7 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
                    s: ChartSettings, nest: bool = False) -> list[OutPage]:
     if len(radiosity) != len(groups):
         raise ValueError('one shader radiosity per source group is required')
-    top = s.resolved_page_max
+    top = s.page_cap
     if top - 2 * s.padding <= 0:
         raise ValueError('page_max must exceed twice the padding')
     ordinary, simple, fallback = [], [], []
@@ -897,7 +916,15 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
     widest, shader = _widest_triangle(pieces, s.padding)
     if widest > top:
         raise TriangleTooWide(shader, widest, top)
-    side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
+    if s.page_max == 'auto':
+        # (cut at the cap first, so what is left is what 'auto' must fit whole; the bake side is then the Max
+        # resolution itself, because a smaller side would cut that chart again, and it only rises when the caps
+        # on pages or materials fail)
+        pieces, split, made = _split_oversized(pieces, top, s.padding)
+        logger.info('auto Max resolution: %d piece(s) over %d cut into %d parts', split, top, made)
+        side = max(auto_page_max(pieces, s), next_pow2(widest))
+    else:
+        side = max(min(FIRST_BAKE_SIDE, top), s.page_min, next_pow2(widest))
     while True:
         side_s = replace(s, page_max=side)
         parts, split, made = _split_oversized(pieces, side, s.padding)
@@ -913,6 +940,8 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
         logger.info('bake side %d: %d piece(s) split into %d parts', side, split, made)
         if nest:
             pages = _nested_or(pages, parts, side_s)
+        pages = PackedPages(pages)
+        pages.page_max = side if s.page_max == 'auto' else s.page_max
         return pages
 
 

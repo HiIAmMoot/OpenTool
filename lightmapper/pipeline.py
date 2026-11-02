@@ -663,8 +663,10 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             offset += len(material.env)
     # (the bake ran on small pages; the written bitmap holds them combined, and everything the write and the summary
     # report about pages describes those)
+    page_max_resolved = getattr(pages, 'page_max', 0) or (
+        s.page_max if isinstance(s.page_max, int) else max(max(p.width, p.height) for p in pages))
     plan = plan_combine([(p.width, p.height) for p in pages], [len(p.materials) for p in pages],
-                        s.resolved_page_max, s.max_materials_per_page, s.max_pages)
+                        page_max_resolved, s.max_materials_per_page, s.max_pages)
     bake_sizes = [[p.width, p.height] for p in pages]
     float_pages = combine_arrays(float_pages, plan)
     pixels = combine_arrays(pixels, plan)
@@ -701,6 +703,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
         'bake_sizes': bake_sizes,
+        'page_max_resolved': page_max_resolved,
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'written_paths': written_paths,

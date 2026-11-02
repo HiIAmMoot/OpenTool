@@ -192,7 +192,7 @@ def test_mixed_groups_share_a_page():
 
 def test_large_chart_split_keeps_density_on_one_page():
     pos, tris = grid(100, size=3)
-    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(texels_per_unit=1))
+    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(texels_per_unit=1, page_max=512))
     assert len(pages) == 1
     assert sum(p.width * p.height for p in pages) <= 512 * 512
     assert len(pages[0].materials) == 1
@@ -998,10 +998,10 @@ def test_zero_texture_area_island_is_recharted_alone(caplog):
     assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2, 3]
 
 
-def test_page_max_auto_resolves_to_4096():
+def test_page_max_auto_is_capped_at_4096():
     s = ChartSettings()
-    assert s.page_max == 'auto' and s.resolved_page_max == 4096
-    assert ChartSettings(page_max=512).resolved_page_max == 512
+    assert s.page_max == 'auto' and s.page_cap == 4096
+    assert ChartSettings(page_max=512).page_cap == 512
 
 
 @pytest.mark.parametrize('bad', ['Auto', 'big', '512', 100, 0])
@@ -1023,11 +1023,14 @@ def island_group(sizes, tpu, name='shader'):
 
 def test_bake_side_is_the_smallest_that_fits():
     group = island_group([4] * 6, 50)
-    for page_max in ('auto', 1024):
-        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
-                               ChartSettings(texels_per_unit=50, page_max=page_max))
-        assert len(pages) == 2
-        assert all(max(p.width, p.height) <= 512 for p in pages)
+    pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max=1024))
+    assert len(pages) == 2
+    assert all(max(p.width, p.height) <= 512 for p in pages)
+    # (auto's Max resolution is the biggest island's size, 208 texels with padding, so 256: one island to a page)
+    pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max='auto'))
+    assert pages.page_max == 256 and all(max(p.width, p.height) <= 256 for p in pages)
 
 
 def test_one_triangle_forces_the_side_up():
@@ -1061,7 +1064,8 @@ def big_island():
 def test_oversized_island_is_bisected_not_refused():
     pages = chart_and_pack([big_island()], [radiosity(SIMPLE_PARAMETERIZATION)],
                            ChartSettings(texels_per_unit=50, page_max='auto'))
-    assert all(max(p.width, p.height) <= 512 for p in pages)
+    # (700 texels and padding fit a 1024 page whole, so auto settles there and the island is not cut)
+    assert pages.page_max == 1024 and all(max(p.width, p.height) <= 1024 for p in pages)
     areas = np.array([area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m)])
     assert len(areas) == 392
     np.testing.assert_allclose(areas, 1250.0, rtol=1e-5)
@@ -1145,6 +1149,11 @@ def same_layout(a, b):
             np.testing.assert_array_equal(m.surface_ids, n.surface_ids)
 
 
+def same_pages(a, b):
+    # (chart_and_pack hands the pages back in a PackedPages, so they are the nest's own pages, not its list)
+    return b is not None and len(a) == len(b) and all(x is y for x, y in zip(a, b))
+
+
 class NestSpy:
     def __init__(self, monkeypatch):
         from lightmapper import charts
@@ -1206,7 +1215,7 @@ def test_nested_charts_keep_the_full_gap(monkeypatch):
     s = nest_settings()
     spy = NestSpy(monkeypatch)
     pages = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
-    assert spy.calls[0][2] is not None and pages is spy.calls[0][2]
+    assert spy.calls[0][2] is not None and same_pages(pages, spy.calls[0][2])
     assert _charts_separated(pages, s, spy.calls[0][0])
     for page in pages:
         assert rasterise(page).max() <= 1
@@ -1256,7 +1265,7 @@ def test_nested_pack_keeps_texel_areas(monkeypatch):
     group = rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
     pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
     parts, _, result = spy.calls[0]
-    assert result is not None and pages is result
+    assert result is not None and same_pages(pages, result)
     np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
 
 
@@ -1275,7 +1284,7 @@ def test_nested_pack_only_translates_or_swaps(monkeypatch):
     spy = NestSpy(monkeypatch)
     pages = chart_and_pack([rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)], simple(), nest_settings(), nest=True)
     parts, s, result = spy.calls[0]
-    assert pages is result
+    assert same_pages(pages, result)
     new = corners_by_surface(pages)
     for part in parts:
         old = part[3][part[4]]
@@ -1293,7 +1302,7 @@ def test_a_turned_chart_is_read_back_swapped(monkeypatch):
                         (50, 14), (99, 13), (78, 16)])
     pages = chart_and_pack([group], simple(), nest_settings(), nest=True)
     parts, s, result = spy.calls[0]
-    assert result is not None and pages is result
+    assert result is not None and same_pages(pages, result)
     new = corners_by_surface(pages)
     turned = 0
     for part in parts:
@@ -1322,7 +1331,7 @@ def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
     s = ChartSettings(page_max='auto')
     spy = NestSpy(monkeypatch)
     nested = chart_and_pack([group], [radiosity()], s, nest=True)
-    assert spy.calls[0][2] is not None and nested is spy.calls[0][2]
+    assert spy.calls[0][2] is not None and same_pages(nested, spy.calls[0][2])
     rects = chart_and_pack([group], [radiosity()], s)
     assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
     np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
@@ -1334,7 +1343,7 @@ def test_nesting_is_deterministic(monkeypatch):
     spy = NestSpy(monkeypatch)
     first = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
     second = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
-    assert first is spy.calls[0][2] and second is spy.calls[1][2] and first is not None
+    assert same_pages(first, spy.calls[0][2]) and same_pages(second, spy.calls[1][2]) and first is not None
     same_layout(first, second)
 
 
@@ -1525,3 +1534,75 @@ def test_the_wider_margin_covers_the_stretch():
         parts += [quad_piece(i, *rng.uniform(3, 18, 2)) for i in range(1, 12)]
         pages = _nest_pack(parts, s, s.padding + 1)
         assert pages is not None and _charts_separated(pages, s, parts)
+
+
+# ---------- auto Max resolution
+
+def auto_wall(texels, density=1.0, name='wall'):
+    # one simple-parameterization island of `texels` texels on a side at the density
+    size = texels / density
+    pos, tris = grid(2, size / 2)
+    return make_group(pos, tris, uvs=pos[:, :2] / size, name=name)
+
+
+def simple_shader():
+    return [radiosity(SIMPLE_PARAMETERIZATION)]
+
+
+def test_auto_is_the_smallest_side_the_biggest_chart_needs():
+    # 500 texels and 8 of padding fit 512, and no written page is bigger
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 512
+    assert all(max(p.width, p.height) <= 512 for p in pages)
+
+
+def test_auto_never_goes_below_256():
+    pages = chart_and_pack([auto_wall(20)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 256
+
+
+def test_a_denser_setting_raises_auto():
+    sizes = [chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=d, page_max='auto')).page_max
+             for d in (1, 2)]
+    assert sizes == [512, 1024]
+
+
+def test_auto_cuts_what_is_over_4096_then_fits_the_rest():
+    # 5000 texels of wall cannot be one page; the halves (about 2500, 2508 with padding) need 4096
+    pages = chart_and_pack([auto_wall(5000)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 4096
+    assert all(max(p.width, p.height) <= 4096 for p in pages)
+    # 8000 texels cut into pieces of about 2000 each, which fit 2048
+    pages = chart_and_pack([auto_wall(8000)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max <= 4096
+
+
+def test_auto_rises_when_the_page_count_cap_fails_at_the_chart_size():
+    # four 200-texel walls fit one 512 page, but not one page of the 256 side the chart alone would allow
+    groups = [auto_wall(200, name=f'w{i}') for i in range(4)]
+    pages = chart_and_pack(groups, simple_shader() * 4, ChartSettings(texels_per_unit=1, page_max='auto', max_pages=1))
+    assert pages.page_max == 512 and len(pages) == 1
+
+
+def test_fixed_values_stay_hard_caps():
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max=1024))
+    assert pages.page_max == 1024
+    with pytest.raises(CapError):
+        chart_and_pack([auto_wall(2000, name='a'), auto_wall(2000, name='b')], simple_shader() * 2,
+                       ChartSettings(texels_per_unit=1, page_max=256, max_pages=1))
+
+
+def test_the_charts_cache_keeps_the_resolved_page_max(tmp_path):
+    from lightmapper.charts import load_charts, save_charts
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    save_charts(tmp_path / 'c.npz', pages, 'key')
+    assert load_charts(tmp_path / 'c.npz', 'key').page_max == 512
+
+
+def test_the_estimate_and_the_bake_agree_on_auto(monkeypatch):
+    groups = [auto_wall(500, name='a'), auto_wall(300, name='b')]
+    s = ChartSettings(texels_per_unit=1, page_max='auto')
+    estimate = chart_and_pack(groups, simple_shader() * 2, s, nest=False)
+    baked = chart_and_pack(groups, simple_shader() * 2, s, nest=True)
+    assert estimate.page_max == baked.page_max == 512
+    assert max(max(p.width, p.height) for p in baked) <= 512

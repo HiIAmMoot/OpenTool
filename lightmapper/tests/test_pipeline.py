@@ -259,6 +259,7 @@ def test_bake_combines_equal_pages_at_write(two_pages):
     summary = json.loads((work / 'summary.json').read_text())
     assert summary['pages'] == 1 and summary['sizes'] == [[16, 8]]
     assert summary['bake_sizes'] == [[8, 8], [8, 8]] and len(summary['utilisation']) == 1
+    assert summary['page_max_resolved'] == 64
     assert len(summary['clipped_fraction']) == 1
     with np.load(work / 'float_pages.npz') as data:
         assert data.files == ['page_0'] and data['page_0'].shape == (8, 16, 3)
@@ -272,6 +273,22 @@ def test_bake_combines_equal_pages_at_write(two_pages):
     from lightmapper.pages import quantise
     for image, pixels in zip(out.float_pages, bitmap_pages(out.bitmap_tag)):
         np.testing.assert_array_equal(pixels, decode_r5g6b5(quantise(image, settings)))
+
+
+def test_the_combine_is_capped_at_the_layouts_resolved_max(two_pages, monkeypatch):
+    from lightmapper.charts import PackedPages
+    real = api()._charts
+
+    def resolved(*args, **kwargs):
+        pages = PackedPages(real(*args, **kwargs))
+        pages.page_max = 8
+        return pages
+
+    monkeypatch.setattr(api(), '_charts', resolved)
+    tags, settings, work = two_pages
+    api().bake(tags, 'level', 'room', settings, work=work)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['page_max_resolved'] == 8 and summary['sizes'] == [[8, 8], [8, 8]]
 
 
 def test_written_layout_samples_the_baked_light(two_pages, monkeypatch, tmp_path):

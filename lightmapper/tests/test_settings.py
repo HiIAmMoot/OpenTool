@@ -207,4 +207,4 @@ def test_settings_file_accepts_auto(tmp_path):
     path = tmp_path / 's.json'
     path.write_text('{"page_max": "auto"}')
     s = load_settings(path)
-    assert s.page_max == 'auto' and s.resolved_page_max == 4096
+    assert s.page_max == 'auto' and s.page_cap == 4096
