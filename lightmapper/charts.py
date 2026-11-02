@@ -463,8 +463,8 @@ def _finish(pages, extent, s: ChartSettings) -> list[OutPage]:
     result = []
     for pieces, ext in zip(pages, extent):
         used = ext + 2 * s.padding
-        w = min(max(next_pow2(math.ceil(used[0])), s.page_min), s.page_max)
-        h = min(max(next_pow2(math.ceil(used[1])), s.page_min), s.page_max)
+        w = min(max(next_pow2(math.ceil(used[0])), s.page_min), s.resolved_page_max)
+        h = min(max(next_pow2(math.ceil(used[1])), s.page_min), s.resolved_page_max)
         assert used[0] <= w and used[1] <= h, 'a chart reaches into its page padding'
         by_group = {}
         for index, group, xref, uv, tris, surface_ids in pieces:
@@ -661,7 +661,7 @@ def _pack_rectangles(pieces, s):
         uv = piece[3]
         low = np.floor(uv.min(axis=0))
         size = _padded_size(uv, s.padding)
-        if np.any(size > s.page_max):
+        if np.any(size > s.resolved_page_max):
             raise CapError('a chart exceeds page_max including padding')
         rectangles.append((piece, uv - low, tuple(size)))
     # decreasing heights let every earlier shelf accept a later chart's height;
@@ -672,8 +672,8 @@ def _pack_rectangles(pieces, s):
         order = sorted(range(len(rectangles)), key=lambda i: (
             -rectangles[i][2][1 if not transpose else 0],
             -rectangles[i][2][0 if not transpose else 1], i))
-        for width in (1 << k for k in range(s.page_min.bit_length() - 1, s.page_max.bit_length())):
-            for height in (1 << k for k in range(s.page_min.bit_length() - 1, s.page_max.bit_length())):
+        for width in (1 << k for k in range(s.page_min.bit_length() - 1, s.resolved_page_max.bit_length())):
+            for height in (1 << k for k in range(s.page_min.bit_length() - 1, s.resolved_page_max.bit_length())):
                 if width * height * s.max_pages < total_area:
                     continue
                 packed = _shelf_pack(rectangles, order, width, height, transpose, s)
@@ -763,7 +763,7 @@ def _nest_at(parts, side: int, s: ChartSettings):
 
 
 def _nest_pack(parts, s: ChartSettings) -> list[OutPage] | None:
-    top = s.page_max
+    top = s.resolved_page_max
     side = max(s.page_min, next_pow2(max(int(_padded_size(part[3], s.padding).max()) for part in parts)))
     best = None
     while side <= top:

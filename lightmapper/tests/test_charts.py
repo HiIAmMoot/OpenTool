@@ -1382,3 +1382,21 @@ def test_the_estimate_never_nests(monkeypatch):
         raise AssertionError('the estimate must not nest')
     monkeypatch.setattr(charts, '_nest_pack', refuse)
     assert chart_and_pack([scattered_islands()], simple(), nest_settings(), nest=False)
+
+
+def test_pack_rectangles_accepts_an_auto_page_max():
+    from lightmapper.charts import _pack_rectangles
+    pages = _pack_rectangles(rectangle_pieces([(8, 8)] * 2), ChartSettings(padding=0, page_max='auto'))
+    assert len(pages) == 1
+
+
+def test_a_chart_over_the_auto_page_max_is_refused_not_a_type_error():
+    from lightmapper.charts import AUTO_PAGE_MAX, _pack_rectangles
+    with pytest.raises(CapError, match='exceeds page_max'):
+        _pack_rectangles(rectangle_pieces([(AUTO_PAGE_MAX + 1, 8)]), ChartSettings(padding=0, page_max='auto'))
+
+
+def test_nest_pack_accepts_an_auto_page_max():
+    from lightmapper.charts import _nest_pack
+    pages = _nest_pack([piece_from_grid(2, 18.65), piece_from_grid(3, 7.3)], ChartSettings(page_max='auto'))
+    assert pages is not None
