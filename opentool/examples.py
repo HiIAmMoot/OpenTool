@@ -8,9 +8,17 @@ EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_ma
                 'render_only_shadows', 'adaptive_sampling', 'lightmap_32bit')
 EXAMPLE_DIR = frozen.bundle_dir() / 'opentool' / 'examples'
 
-# shown grey when no setting is hovered or focused, and for a setting with no example image
-IDLE_TEXT = ('Advanced settings tune how the lightmaps are baked: how sharp they are, how clean, '
-             'how much light bounces and how much memory they take. Hover or select a setting to see what it does.')
+# the grey line beside each row while nothing is hovered or focused
+IDLE_HINTS = {
+    'texels_per_unit': 'Lightmap detail per world unit. Higher is sharper and slower.',
+    'samples': 'Rays per lightmap texel. More is less noise.',
+    'vertex_rays': 'Rays per vertex for bump shading. More is smoother.',
+    'bounces': 'How often light bounces between surfaces.',
+    'page_max': 'The largest lightmap page. Bigger fits more of the level.',
+    'render_only_shadows': 'How surfaces with no collision, like a sea plane, shadow what lies beneath.',
+    'adaptive_sampling': 'Stops casting rays at a clean texel. Faster.',
+    'lightmap_32bit': 'No banding, but twice the space.',
+}
 
 EXAMPLE_TEXT = {
     'texels_per_unit': 'Lightmap texels per world unit. Higher is sharper and slower to bake.',

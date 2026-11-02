@@ -1215,10 +1215,10 @@ def test_32bit_checkbox_reaches_the_settings_and_is_remembered(tmp_path, tiny, m
 def test_max_resolution_hint_appears_for_large_pages(app):
     for value, shown in (('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True)):
         app.advanced_vars['page_max'].set(value)
-        assert (app.page_max_hint['text'] == presets.PAGE_MAX_HINT) is shown
+        assert (presets.PAGE_MAX_HINT in app.page_max_hint['text']) is shown
         assert not any(ch.isdigit() for ch in app.page_max_hint['text'])
     app._select_preset('High')
-    assert app.page_max_hint['text'] == ''
+    assert app.page_max_hint['text'] == examples.IDLE_HINTS['page_max']
 
 
 def test_density_is_a_dropdown_of_the_choices(app):
@@ -1710,11 +1710,11 @@ def test_adaptive_greys_rays_per_texel(app):
     assert app.adaptive_var.get() is True
     assert app.adaptive_check['text'] == 'Adaptive sampling'
     assert str(entry['state']) == 'disabled'
-    assert app.row_hints['samples']['text'] == presets.ADAPTIVE_HINT
+    assert presets.ADAPTIVE_HINT in app.row_hints['samples']['text']
     value = app.advanced_vars['samples'].get()
     app.adaptive_var.set(False)
     assert str(entry['state']) == 'normal'
-    assert app.row_hints['samples']['text'] == ''
+    assert app.row_hints['samples']['text'] == examples.IDLE_HINTS['samples']
     assert app.advanced_vars['samples'].get() == value
 
 
@@ -1749,50 +1749,84 @@ def test_a_saved_boolean_render_only_setting_is_migrated(tmp_path, make_app, sav
     assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() == label
 
 
+def _leave(app):
+    # (through the bound <Leave> handler and the debounce, as the pointer does)
+    app.window.update()
+    app.advanced_entries['samples'].event_generate('<Leave>')
+    pump(app.window, lambda: app._leave_timer is None)
+
+
+def test_every_row_shows_a_grey_explanation_when_idle(app):
+    app._toggle_advanced()
+    assert app.example_panel.winfo_manager() == ''
+    for name in app.row_order:
+        hint = app.row_hints[name]
+        assert examples.IDLE_HINTS[name] in hint['text']
+        assert str(hint.cget('foreground')) == 'gray'
+        assert hint.winfo_manager() == 'grid'
+
+
+def test_hovering_a_row_with_an_image_shows_the_panel(app):
+    app._on_example_hover('samples')
+    assert app.example_panel.winfo_manager() == 'place'
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+
+
 @pytest.mark.parametrize('name', ['adaptive_sampling', 'lightmap_32bit', 'render_only_shadows'])
-def test_a_row_without_an_image_shows_the_general_explanation(app, name):
+def test_hovering_a_row_without_an_image_leaves_the_explanations(app, name):
     app._toggle_advanced()
     app._on_example_hover(name)
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
-    assert not app.example_image_label.cget('image')
+    assert app.example_panel.winfo_manager() == ''
+    assert examples.IDLE_HINTS[name] in app.row_hints[name]['text']
 
 
-def test_the_general_explanation_shows_on_open(app):
+def test_leaving_returns_to_idle_through_the_leave_event(app):
     app._toggle_advanced()
+    app.advanced_entries['samples'].event_generate('<Enter>')
+    app.window.update()
     assert app.example_panel.winfo_manager() == 'place'
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
-    assert str(app.example_text.cget('foreground')) == 'gray'
-    assert not app.example_image_label.cget('image')
+    _leave(app)
+    assert app.example_panel.winfo_manager() == ''
 
 
-def test_leaving_a_row_with_nothing_focused_returns_to_the_general_explanation(app):
-    app._on_example_hover('samples')
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
-    assert str(app.example_text.cget('foreground')) != 'gray'
-    app._on_example_hover(None)
-    assert app.example_panel.winfo_manager() == 'place'
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
-    assert not app.example_image_label.cget('image')
-
-
-def test_a_focused_row_keeps_its_text_after_the_mouse_leaves(app):
+def test_a_focused_row_keeps_its_panel_after_the_mouse_leaves(app):
     app._on_example_focus('bounces')
     app._on_example_hover('samples')
-    app._on_example_hover(None)
+    _leave(app)
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
 
 
-def test_the_leave_event_waits_so_label_to_control_does_not_flash(app):
-    app._on_example_hover('samples')
-    app._on_row_leave()
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
-    app._on_row_enter('samples')
+def test_moving_from_a_rows_label_to_its_control_does_not_flash_idle(app):
+    app._toggle_advanced()
+    app.window.update()
+    label, control = app.row_labels['samples'], app.advanced_entries['samples']
+    label.event_generate('<Enter>')
+    assert app.example_panel.winfo_manager() == 'place'
+    label.event_generate('<Leave>')
+    assert app.example_panel.winfo_manager() == 'place'
+    control.event_generate('<Enter>')
     app.window.update()
     time.sleep(0.2)
     app.window.update()
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    assert app.example_panel.winfo_manager() == 'place'
+    control.event_generate('<Leave>')
+    assert app.example_panel.winfo_manager() == 'place'
+    pump(app.window, lambda: app.example_panel.winfo_manager() == '')
+
+
+def test_two_leaves_without_an_enter_leave_one_timer(app):
     app._on_row_leave()
-    pump(app.window, lambda: app.example_text.cget('text') == examples.IDLE_TEXT)
+    first = app._leave_timer
+    app._on_row_leave()
+    assert app._leave_timer == first
+    app._on_row_enter('samples')
+    assert app._leave_timer is None
+
+
+def test_the_render_only_row_is_created_before_the_checkbuttons_for_tab_order(app):
+    children = app.advanced_frame.winfo_children()
+    assert children.index(app.render_only_shadows_entry) < children.index(app.adaptive_check)
+    assert children.index(app.adaptive_check) < children.index(app.lightmap_32bit_check)
 
 
 def test_render_only_shadows_sits_directly_above_adaptive_sampling(app):
@@ -1846,14 +1880,13 @@ def test_hover_wins_over_focus_and_leaving_falls_back(app):
     app._on_example_hover(None)
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     app._on_example_focus(None)
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
+    assert app.example_panel.winfo_manager() == ''
 
 
 def test_missing_example_image_shows_text_only(make_app, tmp_path):
     app = make_app(examples_dir=tmp_path)
     app._on_example_hover('samples')
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
-    assert not app.example_image_label.cget('image')
+    assert app.example_panel.winfo_manager() == ''
 
 
 def test_row_widgets_are_bound_for_examples(app):
@@ -1888,15 +1921,14 @@ def test_showing_an_example_leaves_the_layout_alone(app):
     assert 0 < app._example_shown.width() <= int(area['width'])
     assert app._example_shown.height() <= int(area['height'])
     app._on_example_hover(None)
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
+    assert app.example_panel.winfo_manager() == ''
 
 
 def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
     (tmp_path / 'samples_0.png').write_bytes(b'not a png')
     app = make_app(examples_dir=tmp_path)
     app._on_example_hover('samples')
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
-    assert not app.example_image_label.cget('image')
+    assert app.example_panel.winfo_manager() == ''
 
 
 def test_the_example_panel_follows_a_resize(app):
@@ -1919,10 +1951,10 @@ def test_the_example_panel_follows_a_resize(app):
         assert app._example_shown.height() <= int(info['height'])
 
 
-def test_a_resize_leaves_a_hidden_example_panel_hidden(app):
+def test_a_resize_leaves_the_idle_state_without_a_panel(app):
     app.advanced_frame.event_generate('<Configure>')
     app.window.update()
-    assert app.example_text.cget('text') == examples.IDLE_TEXT
+    assert app.example_panel.winfo_manager() == ''
 
 
 def test_traditional_predicts_a_skipped_glow_row(ready_app):

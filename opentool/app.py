@@ -191,7 +191,7 @@ class App:
         self.advanced_entries = {}
         self._advanced_open = False
         self.row_hints = {}
-        row_labels = {}
+        row_labels = self.row_labels = {}
         self.row_order = (*presets.ADVANCED, 'render_only_shadows', 'adaptive_sampling',
                           'lightmap_32bit')
         self.adaptive_var = tk.BooleanVar(value=self.settings.adaptive_sampling)
@@ -218,12 +218,6 @@ class App:
             value.trace_add('write', lambda *_args, field=name: self._advanced_value_changed(field))
             if name in ('texels_per_unit', 'page_max', 'bounces'):
                 value.trace_add('write', lambda *_args: self._inputs_changed())
-        self.adaptive_check = ttk.Checkbutton(
-            self.advanced_frame, text='Adaptive sampling', variable=self.adaptive_var)
-        self.adaptive_check.grid(row=self.row_order.index('adaptive_sampling'), column=1, sticky='w', pady=2)
-        self.lightmap_32bit_check = ttk.Checkbutton(
-            self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
-        self.lightmap_32bit_check.grid(row=self.row_order.index('lightmap_32bit'), column=1, sticky='w', pady=2)
         row_labels['render_only_shadows'] = ttk.Label(self.advanced_frame, text='Render-only shadows')
         row_labels['render_only_shadows'].grid(
             row=self.row_order.index('render_only_shadows'), column=0, sticky='w', padx=(0, 8), pady=2)
@@ -231,6 +225,13 @@ class App:
             self.advanced_frame, values=tuple(label for label, _ in presets.RENDER_ONLY_SHADOWS),
             textvariable=self.render_only_shadows_var, state='readonly')
         self.render_only_shadows_entry.grid(row=self.row_order.index('render_only_shadows'), column=1, sticky='ew', pady=2)
+        # (created in row order: the Tab order follows the widgets' creation order)
+        self.adaptive_check = ttk.Checkbutton(
+            self.advanced_frame, text='Adaptive sampling', variable=self.adaptive_var)
+        self.adaptive_check.grid(row=self.row_order.index('adaptive_sampling'), column=1, sticky='w', pady=2)
+        self.lightmap_32bit_check = ttk.Checkbutton(
+            self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
+        self.lightmap_32bit_check.grid(row=self.row_order.index('lightmap_32bit'), column=1, sticky='w', pady=2)
         for name in self.row_order:
             # (a long description wraps: an unwrapped one would widen both uniform columns and the window)
             hint = ttk.Label(self.advanced_frame, foreground='gray', wraplength=180, justify='left')
@@ -263,7 +264,6 @@ class App:
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
         self.adaptive_var.trace_add('write', lambda *_args: self._update_row_hints())
         self._update_row_hints()
-        self._show_example()
 
         blender_row = ttk.Frame(self.frame)
         blender_row.grid(row=11, column=0, sticky='ew', pady=(12, 0))
@@ -684,26 +684,30 @@ class App:
                     pass
             self._example_images[name] = frames
         if name is not None and not self._example_images[name]:
-            # (a row with no image shows the general explanation, not its own text over an empty space)
+            # (a row with no image leaves the grey explanations showing: its own would only repeat its explanation)
             name = None
+        if name is None:
+            self._stop_example_loop()
+            self._example_name = None
+            self.example_panel.place_forget()
+            return
         if name != self._example_name:
             # (a resize shows the same row again and must not restart its loop)
             self._stop_example_loop()
             self._example_name = name
             self._example_frame = 0
-            if name is not None and len(self._example_images[name]) > 1:
+            if len(self._example_images[name]) > 1:
                 self._example_timer = self.window.after(EXAMPLE_FRAME_MS, self._next_example_frame)
         x, y, width, height = self.advanced_frame.grid_bbox(2, 0, 2, len(self.row_order) - 1)
         if width < 2:
             # (a frame not mapped yet is laid out at 1px; its requested width split over the two uniform columns is the share it will get)
             width = self.advanced_frame.winfo_reqwidth() // 2
         width = max(width - 8, 1)
-        self.example_text.configure(text=examples.EXAMPLE_TEXT[name] if name else examples.IDLE_TEXT,
-                                    foreground='' if name else 'gray', wraplength=width)
+        self.example_text.configure(text=examples.EXAMPLE_TEXT[name], wraplength=width)
         self.example_panel.place(x=x + 8, y=y, width=width, height=max(height, 1))
         self.example_panel.update_idletasks()
         room = max(height - self.example_text.winfo_reqheight() - 4, 1)
-        frames = self._example_images[name] if name else []
+        frames = self._example_images[name]
         image = frames[self._example_frame % len(frames)] if frames else None
         if image is not None:
             step = max(-(-image.width() // width), -(-image.height() // room), 1)
@@ -730,7 +734,8 @@ class App:
         adaptive = self.adaptive_var.get()
         values = {'page_max': self.advanced_vars['page_max'].get()}
         for name, hint in self.row_hints.items():
-            hint.configure(text=presets.row_hint(name, values.get(name, ''), adaptive))
+            warning = presets.row_hint(name, values.get(name, ''), adaptive)
+            hint.configure(text=f'{examples.IDLE_HINTS[name]} {warning}' if warning else examples.IDLE_HINTS[name])
         entry = self.advanced_entries['samples']
         state = 'disabled' if adaptive else 'normal'
         if entry in self._locked:
@@ -1122,6 +1127,9 @@ class App:
 
     def _close_window(self):
         self._stop_example_loop()
+        for timer in (self._leave_timer, self._example_refit):
+            if timer is not None:
+                self.window.after_cancel(timer)
         try:
             try:
                 self.remember()

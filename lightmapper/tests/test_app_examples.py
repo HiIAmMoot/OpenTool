@@ -7,6 +7,7 @@ def test_every_example_row_has_text_and_an_image():
                                      'adaptive_sampling', 'lightmap_32bit')
     for name in examples.EXAMPLE_ROWS:
         assert examples.EXAMPLE_TEXT[name]
+        assert examples.IDLE_HINTS[name]
         if name not in IMAGE_PENDING:
             assert examples.example_frames(name)
 
