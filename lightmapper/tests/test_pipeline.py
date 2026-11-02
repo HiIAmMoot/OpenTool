@@ -257,17 +257,17 @@ def test_bake_repacks_the_charts_at_write(two_pages):
     tags, settings, work = two_pages
     out = api().bake(tags, 'level', 'room', settings, work=work)
     summary = json.loads((work / 'summary.json').read_text())
-    assert summary['pages'] == 1 and summary['sizes'] == [[8, 16]]
+    assert summary['pages'] == 1 and summary['sizes'] == [[16, 8]]
     assert summary['bake_sizes'] == [[8, 8], [8, 8]] and len(summary['utilisation']) == 1
     assert summary['page_max_resolved'] == 64
     assert len(summary['clipped_fraction']) == 1
     with np.load(work / 'float_pages.npz') as data:
-        assert data.files == ['page_0'] and data['page_0'].shape == (16, 8, 3)
-    assert [p.shape for p in out.float_pages] == [(16, 8, 3)]
+        assert data.files == ['page_0'] and data['page_0'].shape == (8, 16, 3)
+    assert [p.shape for p in out.float_pages] == [(8, 16, 3)]
     bsp = read_tag(resolve_reference_path(tags, 'sbsp', 'room'))
     assert len(bsp.root.block('lightmaps')) == 2
     bitmap = read_tag(resolve_reference_path(tags, 'bitm', 'room'))
-    assert [(b.get('width'), b.get('height')) for b in bitmap.root.block('bitmaps')] == [(8, 16)]
+    assert [(b.get('width'), b.get('height')) for b in bitmap.root.block('bitmaps')] == [(16, 8)]
     from lightmapper.diff import bitmap_pages
     from lightmapper.formats.vertices import decode_r5g6b5
     from lightmapper.pages import quantise
@@ -1630,7 +1630,7 @@ def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatc
     out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False, ignore_normals_mode='tool'), work=work, dry_run=True)
     # flagged samples are dark, unflagged samples have diffuse 1; only the independent sun term is added here
     want = np.array([[0.3, 1 / 3 + 0.3 * 2 / 3], [1 / 3 + 0.3 * 2 / 3, 1]])
-    np.testing.assert_allclose(out.float_pages[0], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
 
 
 def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny, monkeypatch):
@@ -1796,7 +1796,8 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     if mode == 'enhanced' and not bounces:
         want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1.]])
     if not emit:
-        np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
+        # (the 2 x 2 bake page is one block, written at the corner of a page no smaller than page_min)
+        np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], want, rtol=1e-6)
     return summary
 
 
@@ -1834,7 +1835,9 @@ def test_glow_run_starts_with_no_pages_held(tiny, monkeypatch):
 
 def test_bake_after_the_glow_run_is_unchanged(tiny, monkeypatch):
     # data/enhanced_bake.bitmap is copy.bitmap of the bake of 1347400, before the pages were freed, made with the
-    # same call: run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
+    # same call: run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'}).
+    # (remade when the repack began writing the 2 x 2 page into an 8 x 8 one: its 2 x 2 corner is the old page's
+    # pixels exactly, and the rest is black)
     run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
     want = (Path(__file__).parent / 'data' / 'enhanced_bake.bitmap').read_bytes()
     assert (tiny[0] / 'copy.bitmap').read_bytes() == want
@@ -2076,7 +2079,7 @@ def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=(), route='cpu'):
 def test_flat_light_term_lights_flagged_texels_once_in_tool_mode(tiny, monkeypatch):
     out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32))
     flagged = np.array([[1, 2/3], [2/3, 0]])
-    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * flagged, rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], .5 * flagged, rtol=1e-6)
     assert out.float_pages[0][1, 1].max() == 0
 
 
@@ -2103,7 +2106,7 @@ def test_light_flat_reaches_the_finish_on_every_route(tiny, monkeypatch, route):
 
         batch_runs(monkeypatch, nothing)
     out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32), lamps, route)
-    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * np.array([[1, 2/3], [2/3, 0]]), rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], .5 * np.array([[1, 2/3], [2/3, 0]]), rtol=1e-6)
 
 
 def test_dark_lamps_change_nothing(tiny, monkeypatch):

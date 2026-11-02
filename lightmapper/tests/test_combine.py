@@ -101,21 +101,20 @@ def test_smaller_charts_fill_the_free_space_on_auto_pages():
     # (two big charts take 416 of the 512 rows on a page, and leave a 316-texel column beside them)
     on_auto = [i for i in range(3, 123) if places[i][0] in auto]
     assert len(on_auto) >= 50
-    rest = {places[i][0] for i in range(3, 123)} - auto
-    assert rest and all(written[k].width <= 512 and written[k].height <= 512 for k in rest)
+    assert all(p.width <= 1024 and p.height <= 512 for p in written)
     assert _charts_separated(written, ChartSettings(page_max=1024, padding=PADDING), pieces)
 
 
-def test_the_rest_go_on_pages_one_step_down():
+def test_the_rest_go_on_auto_shape_pages_as_few_as_fit():
     pages, pieces = bake_pages([(700, 200)] + [(200, 200)] * 30, 1024)
     blocks = chart_blocks(pages, PADDING)
     plan = plan_repack(blocks, (1024, 512))
     written = repack_layout(pages, plan)
-    places = where(written)
-    auto = places[0][0]
-    assert all(written[k].width <= 512 and written[k].height <= 512 for k in range(len(written)) if k != auto)
-    # (four 208-texel charts fit a 512 page)
-    assert len(written) <= 1 + -(-30 // 4)
+    assert all((p.width, p.height) == (1024, 512) for p in written[:-1])
+    # (the last page holds one 208-texel chart, so it shrinks down the ladder to 256 x 256)
+    assert (written[-1].width, written[-1].height) == (256, 256)
+    # (eight 208-texel charts fit a 1024 x 512 page and five beside the big one: 5 + 3 x 8 holds 29 of 30)
+    assert len(written) == 5
 
 
 def test_a_fixed_max_resolution_is_the_shape():
@@ -151,7 +150,7 @@ def test_a_turned_chart_is_transposed_with_its_texels():
     pages, _ = bake_pages([(40, 900)], 1024)
     blocks = chart_blocks(pages, PADDING)
     plan = plan_repack(blocks, written_shape(blocks, 1024, auto=True))
-    assert plan[0].moves[0].swapped and (plan[0].width, plan[0].height) == (1024, 64)
+    assert plan[0].moves[0].swapped and (plan[0].width, plan[0].height) == (1024, 512)
     rng = np.random.default_rng(8)
     arrays = [rng.random((p.height, p.width, 3), dtype=np.float32) for p in pages]
     (page,), (image,) = repack_layout(pages, plan), repack_arrays(arrays, plan)
@@ -210,3 +209,25 @@ def test_a_whole_page_move_is_identity():
         assert [m.lm.tobytes() for m in new.materials] == [m.lm.tobytes() for m in old.materials]
     for new, old in zip(repack_arrays(arrays, plan), arrays):
         assert np.array_equal(new, old)
+
+
+def test_only_the_last_page_shrinks_and_only_down_the_ladder():
+    pages, _ = bake_pages(big_and_small(), 1024)
+    plan = plan_repack(chart_blocks(pages, PADDING), (1024, 512))
+    assert len(plan) >= 2
+    assert all((p.width, p.height) == (1024, 512) for p in plan[:-1])
+    ladder = [(1024, 512), (512, 512), (512, 256), (256, 256), (256, 128), (128, 128), (128, 64), (64, 64)]
+    last = (plan[-1].width, plan[-1].height)
+    assert last in ladder
+    # (one step smaller does not hold it)
+    smaller = ladder[ladder.index(last) + 1]
+    held = [b for b in chart_blocks(pages, PADDING) if (b.page, b.x, b.y) in
+            {(m.page, m.x, m.y) for m in plan[-1].moves}]
+    assert len(plan_repack(held, smaller)) > 1 or max(max(b.width, b.height) for b in held) > smaller[0]
+
+
+def test_a_new_page_opens_only_for_charts_no_open_page_can_take():
+    # (a small chart that fits the room left on page 1 goes there, though a bigger one already went to page 2)
+    pages, _ = bake_pages([(1000, 400), (1000, 400), (60, 60)], 1024)
+    plan = plan_repack(chart_blocks(pages, PADDING), (1024, 512))
+    assert [len(p.moves) for p in plan] == [2, 1]

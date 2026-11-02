@@ -11,7 +11,7 @@ import numpy as np
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import connected_components
 
-from .charts import AUTO_PAGE_MIN, CapError, ladder_shape, next_pow2, next_step
+from .charts import AUTO_PAGE_MIN, CapError, ladder_shape, next_step
 from .formats.bsp import OutMaterial, OutPage
 
 # (the charts' own tolerance for float32 texcoords sitting on a texel edge)
@@ -127,8 +127,8 @@ class _Page:
         # free rectangles (x, y, w, h), a guillotine split of the page
         self.free = np.array([[0, 0, width, height]], np.int64)
         self.moves = []
+        self.placed = []
         self.materials = set()
-        self.reach = np.zeros(2, np.int64)
 
     def best(self, span):
         # (leftover short side, free rectangle, swapped) of the tightest fit, or None
@@ -159,75 +159,58 @@ class _Page:
         return int(fx), int(fy)
 
 
+def _fill(page: _Page, pending: list[int], blocks: list[Block], max_materials: int) -> list[int]:
+    # places each pending block that still fits, in order, and gives back the ones that did not
+    left = []
+    for k in pending:
+        block = blocks[k]
+        keys = {(block.page, m) for m in block.materials}
+        found = page.best((block.width, block.height)) if len(page.materials | keys) <= max_materials else None
+        if found is None:
+            left.append(k)
+            continue
+        _, slot, swapped = found
+        w, h = (block.height, block.width) if swapped else (block.width, block.height)
+        x, y = page.place(slot, w, h)
+        page.moves.append(Move(block.page, block.x, block.y, block.width, block.height, x, y, swapped))
+        page.placed.append(k)
+        page.materials |= keys
+    return left
+
+
 def plan_repack(blocks: list[Block], shape: tuple[int, int], page_min: int = 8, max_materials: int = 2048,
                 max_pages: int = 127) -> list[WrittenPage]:
+    # each page is the full shape, filled as far as it goes before the next one opens: the blocks too big for a step
+    # down first, kept whole, then the rest biggest first. Only the last page shrinks, to the smallest step down the
+    # ladder that still holds what it took
     step = next_step(shape)
     order = sorted(range(len(blocks)), key=lambda k: (-blocks[k].width * blocks[k].height,
                                                       -max(blocks[k].width, blocks[k].height), k))
-    spans = [(b.width, b.height) for b in blocks]
-    # a block too big for a step down needs the full shape; the rest may go a step down
-    big = [k for k in order if not _fits(spans[k], step)]
-    small = [k for k in order if _fits(spans[k], step)]
-    written = []
-
-    def put(k, candidates, open_new):
-        block = blocks[k]
-        keys = {(block.page, m) for m in block.materials}
-        best = None
-        for number, page in candidates:
-            if len(page.materials | keys) > max_materials:
-                continue
-            found = page.best(spans[k])
-            if found is not None and (best is None or found[0] < best[0][0]):
-                best = (found, number, page)
-        if best is None:
-            if open_new is None:
-                return False
-            if len(keys) > max_materials:
-                raise CapError(f'one chart holds {len(keys)} materials, over max_materials_per_page ({max_materials})')
-            page = open_new()
-            found = page.best(spans[k])
-            if found is None:
-                raise CapError('a chart is bigger than the written page')
-            best = (found, None, page)
-        (_, slot, swapped), _, page = best
-        w, h = (spans[k][1], spans[k][0]) if swapped else spans[k]
-        x, y = page.place(slot, w, h)
-        page.moves.append(Move(block.page, block.x, block.y, block.width, block.height, x, y, swapped))
-        page.reach = np.maximum(page.reach, (x + w, y + h))
-        page.materials |= keys
-        return True
-
-    def opener(size, into):
-        def open_new():
-            if len(written) >= max_pages:
-                raise CapError(f'The bake needs more than {max_pages} lightmap pages and a bitmap holds {max_pages}.')
-            page = _Page(*size)
-            written.append(page)
-            into.append((len(written) - 1, page))
-            return page
-        return open_new
-
-    auto_pages, step_pages = [], []
-    for k in big:
-        put(k, auto_pages, opener(shape, auto_pages))
-    # (the rest fill the space the big charts left, biggest first; with nothing big, which only a fixed Max
-    # resolution allows, no page of the full shape opens)
-    rest = [k for k in small if not (big and put(k, auto_pages, None))]
-    for k in rest:
-        put(k, step_pages, opener(step, step_pages))
-    plan = []
-    for page in written:
-        # (a page only as big as what it holds needs, in powers of two, as the bake pages are)
-        width = min(max(next_pow2(int(page.reach[0])), page_min), page.width)
-        height = min(max(next_pow2(int(page.reach[1])), page_min), page.height)
-        plan.append(WrittenPage(width, height, tuple(page.moves)))
-    return plan
-
-
-def whole_pages(pages: list[OutPage]) -> list[WrittenPage]:
-    return [WrittenPage(p.width, p.height, (Move(i, 0, 0, p.width, p.height, 0, 0, False),))
-            for i, p in enumerate(pages)]
+    pending = [k for k in order if not _fits((blocks[k].width, blocks[k].height), step)] +               [k for k in order if _fits((blocks[k].width, blocks[k].height), step)]
+    for block in blocks:
+        if len(block.materials) > max_materials:
+            raise CapError(f'one chart holds {len(block.materials)} materials, over max_materials_per_page '
+                           f'({max_materials})')
+        if not _fits((block.width, block.height), shape):
+            raise CapError('a chart is bigger than the written page')
+    pages = []
+    while pending:
+        if len(pages) >= max_pages:
+            raise CapError(f'The bake needs more than {max_pages} lightmap pages and a bitmap holds {max_pages}.')
+        page = _Page(*shape)
+        pending = _fill(page, pending, blocks, max_materials)
+        pages.append(page)
+    if pages:
+        held = pages[-1].placed
+        steps = [shape]
+        while min(next_step(steps[-1])) >= page_min:
+            steps.append(next_step(steps[-1]))
+        for size in reversed(steps):
+            trial = _Page(*size)
+            if not _fill(trial, held, blocks, max_materials):
+                pages[-1] = trial
+                break
+    return [WrittenPage(page.width, page.height, tuple(page.moves)) for page in pages]
 
 
 def _owners(page: OutPage, moves):

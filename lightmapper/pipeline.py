@@ -23,7 +23,7 @@ import numpy as np
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
 from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
-from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, whole_pages, written_shape
+from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, written_shape
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
 from .formats.bsp import apply_layout, point_clusters, read_geometry
@@ -260,16 +260,7 @@ def written_plan(pages, page_max_resolved: int, s: Settings):
     chart_s = _chart_settings(s)
     blocks = chart_blocks(pages, chart_s.padding)
     shape = written_shape(blocks, page_max_resolved, s.page_max == 'auto')
-    plan = plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages)
-    # (a repack that saves neither pages nor texels writes the bake pages as they are)
-    kept = whole_pages(pages)
-    if (len(plan), _plan_texels(plan)) >= (len(kept), _plan_texels(kept)):
-        return kept, shape
-    return plan, shape
-
-
-def _plan_texels(plan) -> int:
-    return sum(page.width * page.height for page in plan)
+    return plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages), shape
 
 
 def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
