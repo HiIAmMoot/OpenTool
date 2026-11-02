@@ -776,3 +776,186 @@ def test_gpu_child_returns_the_lamp_throughput(tmp_path, vendor):
     result = vertex_gpu.run_in_child(tmp_path, pages, adapter_for(vendor), 300)
     assert np.array_equal(result.light_flat, expected.light_flat) and result.light_flat[0].any()
     assert np.array_equal(result.irradiance, expected.irradiance)
+
+
+# ---------- the texel sun-ray pass holds a block of rays, not all of them
+
+def many_suns_texel_case(tmp_path, suns=7):
+    case = texel_scene('flagged_bounce')
+    case['suns'] = [sun((0.15 * k, 0.1 * k, 1.0)) for k in range(suns)]
+    run_driver(tmp_path, **case)
+    with np.load(tmp_path / 'pages.npz') as data:
+        return [data[f'page_{i}'] for i in range(len(data.files))], len(case['texel']) * suns
+
+
+def assert_same_bytes(split, whole):
+    for field in dataclasses.fields(whole):
+        a, b = getattr(whole, field.name), getattr(split, field.name)
+        if isinstance(a, np.ndarray):
+            assert a.dtype == b.dtype and a.shape == b.shape and a.tobytes() == b.tobytes(), field.name
+        else:
+            assert a == b, field.name
+
+
+@pytest.mark.blender
+@pytest.mark.parametrize('limit', [5, 7, 18])
+def test_texel_sun_rays_in_blocks_give_the_same_bytes(tmp_path, vendor, monkeypatch, limit):
+    pages, _ = many_suns_texel_case(tmp_path)
+    whole = load_and_run(tmp_path, pages, adapter_for(vendor))
+    assert whole.texel_rgb.any()
+    seen = []
+    real = vertex_gpu._dispatch
+
+    def recording(kernel, count, **kwargs):
+        if 'shadow_count' in kwargs['vars']:
+            seen.append(count)
+        return real(kernel, count, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', recording)
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', limit)
+    split = load_and_run(tmp_path, pages, adapter_for(vendor))
+    # 18 texels x 7 suns: 5 and 7 cut every sun's rows unevenly (a texel's seven rays land in seven blocks), 18 is a block per sun
+    assert max(seen) <= limit and len(seen) >= 7 * -(-18 // limit)
+    assert_same_bytes(split, whole)
+
+
+@pytest.mark.blender
+def test_texel_sun_ray_arrays_are_gone_before_the_bounce_pass(tmp_path, vendor, monkeypatch):
+    pages, total = many_suns_texel_case(tmp_path)
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', 20)
+    held = []
+    real = vertex_gpu._gather_texel_reflection
+
+    def watching(*args, **kwargs):
+        # (numpy arrays are not tracked by gc, so what the calling frames still name is read from their locals)
+        frame, names = sys._getframe(1), []
+        while frame:
+            names += [(frame.f_code.co_name, name) for name, value in frame.f_locals.items()
+                      for array in (value if isinstance(value, tuple) else (value,))
+                      if isinstance(array, np.ndarray) and array.ndim and array.shape[0] >= total]
+            frame = frame.f_back
+        held.append(names)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_gather_texel_reflection', watching)
+    load_and_run(tmp_path, pages, adapter_for(vendor))
+    assert held and not any(held), held
+
+
+def test_shadow_dispatches_are_chunked_and_float32(tmp_path, vendor, device, monkeypatch):
+    monkeypatch.setattr(vertex_gpu, 'SHADOW_RAYS_PER_CHUNK', 7)
+    arrays, job = scene_folder(tmp_path, 10, [sun((0.2, 0.1, 1.0))])
+    seen = []
+    real = vertex_gpu._upload
+
+    def recording(device, array, dtype, writable=False):
+        if writable and array.ndim == 2 and array.shape[1] == 4:
+            seen.append(array.dtype)
+        return real(device, array, dtype, writable)
+    monkeypatch.setattr(vertex_gpu, '_upload', recording)
+    pages = [np.zeros((16, 16, 3), np.float32)]
+    split = run_vertex_pass(arrays, job, [], pages, device)
+    assert len(seen) >= 2 and all(dtype == np.float32 for dtype in seen)
+    monkeypatch.undo()
+    assert_same_bytes(split, run_vertex_pass(arrays, job, [], pages, device))
+
+
+@pytest.mark.parametrize('limit', [1, 4, 7, 10 ** 9])
+def test_sun_ray_blocks_are_sun_rays_cut_into_blocks_of_one_sun(limit):
+    count = 11
+    pos = np.random.default_rng(3).uniform(-1, 1, (count, 3)).astype(np.float32)
+    normal = np.float32([[0, 0, 1]] * count)
+    scene = dict(query_pos=pos, query_normal=normal, query_class=np.int16([0, 1] * 5 + [0]))
+    suns = [dict(direction=[0.1 * k, 0.2, 1.0], classes=[0] if k % 2 else [0, 1], strength=1., color=[1, 1, 1])
+            for k in range(3)]
+    job = dict(suns=suns)
+    usable, n, *_ = query_frames(scene['query_normal'], 0)
+    whole = sun_rays(scene, job, usable, n)
+    blocks = list(vertex_gpu.sun_ray_blocks(scene, job, usable, n, limit))
+    assert all(1 <= len(block[0]) <= limit and len(set(block[1])) == 1 for block in blocks)
+    assert len(blocks) >= (-(-count // limit) if limit < count else 3)
+    for part, whole_part in zip(zip(*blocks), whole):
+        assert np.concatenate(part).tobytes() == whole_part.tobytes()
+
+
+def scene_arrays_inputs(tmp_path):
+    arrays, _ = scene_folder(tmp_path, 3, [sun((0.2, 0.1, 1.0))])
+    rng = np.random.default_rng(11)
+    textures = [rng.integers(0, 256, (3, 4, 4), dtype=np.uint8), rng.integers(0, 256, (2, 5, 4), dtype=np.uint8)]
+    pages = [rng.random((4, 6, 3)).astype(np.float32), rng.random((3, 3, 3)).astype(np.float32)]
+    sources = [rng.random((12, 18, 3)).astype(np.float32), None, rng.random((9, 9, 3)).astype(np.float32)]
+    return arrays, textures, pages, sources
+
+
+def test_scene_arrays_join_their_texels_to_the_bytes_np_concatenate_gives(tmp_path):
+    scene, textures, pages, sources = scene_arrays_inputs(tmp_path)
+    wanted_flagged = np.concatenate([np.zeros((1, 3), np.float32) if p is None else p.reshape(-1, 3)
+                                     for p in sources])
+    wanted_textures = np.concatenate([(t.astype(np.float32) / 255.0).reshape(-1, 4) for t in textures])
+    wanted_pages = np.concatenate([p.reshape(-1, 3) for p in pages])
+    wanted_info = {'texture_info': [[0, 4, 3, 0], [12, 5, 2, 0]], 'page_info': [[0, 6, 4, 0], [24, 3, 3, 0]],
+                   'flagged_info': [[0, 18, 12, 0], [216, 1, 1, 0], [217, 9, 9, 0]]}
+    got = vertex_gpu._scene_arrays(scene, textures, pages, False, list(sources))
+    for name, want in (('flagged_texels', wanted_flagged), ('texture_texels', wanted_textures),
+                       ('page_texels', wanted_pages)):
+        assert got[name].dtype == np.float32 and got[name].shape == want.shape and got[name].tobytes() == want.tobytes()
+    for name, want in wanted_info.items():
+        assert got[name].tolist() == want
+    empty = vertex_gpu._scene_arrays(scene, [], [], False, None)
+    assert empty['texture_texels'].shape == (0, 4) and empty['page_texels'].shape == (0, 3)
+    assert empty['flagged_texels'].shape == (0, 3)
+
+
+def test_scene_arrays_let_go_of_each_flagged_page_as_it_is_copied(tmp_path):
+    import weakref
+    scene, textures, pages, sources = scene_arrays_inputs(tmp_path)
+    refs = [None if p is None else weakref.ref(p) for p in sources]
+    seen = []
+
+    class Watched(list):
+        def __setitem__(self, index, value):
+            super().__setitem__(index, value)
+            seen.append([ref is not None and ref() is None for ref in refs])
+    held = Watched(sources)
+    del sources
+    vertex_gpu._scene_arrays(scene, textures, pages, False, held)
+    # (a page is gone as soon as its copy is made: at step i, pages up to i are released and the later ones still held)
+    assert seen[0][0] and not seen[0][2]
+    assert seen[-1][0] and seen[-1][2]
+
+
+@pytest.mark.parametrize('calls', [1, 2])
+def test_the_bounce_gathers_hold_no_host_copy_of_the_uploaded_arrays(tmp_path, vendor, device, monkeypatch, calls):
+    scene, job = scene_folder(tmp_path, 4, [sun((0.2, 0.1, 1.0))])
+    pages = [np.full((16, 16, 3), .5, np.float32)]
+    arrays = vertex_gpu._scene_arrays(scene, [], pages, False, [np.ones((48, 48, 3), np.float32)])
+    table = np.zeros_like(vertex_gpu.ambient_table(job, scene['query_class'], arrays['class_of']))
+    held = []
+    real = vertex_gpu._dispatch
+
+    def watching(kernel, count, **kwargs):
+        frame = sys._getframe(1)
+        while frame:
+            mine = frame.f_locals.get('arrays')
+            if isinstance(mine, dict):
+                held.append(sorted(k for k in ('flagged_texels', 'texture_texels', 'page_texels')
+                                   if isinstance(mine.get(k), np.ndarray)))
+            frame = frame.f_back
+        return real(kernel, count, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', watching)
+    ids = np.arange(len(scene['query_pos']))
+    local, phi, r = vertex_gpu.sphere(16)
+    outs = []
+    for _ in range(calls):
+        out = np.zeros((len(ids), 3))
+
+        def reduce(rows, value, hemi, solid_angle, out=out):
+            out[rows] = value.sum(axis=1)
+        n, t, b, spin = (np.float64([[0, 0, 1]] * len(ids)), np.float64([[1, 0, 0]] * len(ids)),
+                         np.float64([[0, 1, 0]] * len(ids)), np.zeros(len(ids)))
+        batches = [((phi, r, local[:, 2]), (ids, scene['query_pos'].astype(np.float64), n, t, b, spin,
+                                          np.zeros(len(ids), np.int64)), 4.)]
+        vertex_gpu._trace(device, arrays, table, dict(job, vertex_rays=16), batches,
+                          (np.empty((0, 3)), np.empty((0, 3))), reduce, rgb=True)
+        outs.append(out)
+    assert held and all(not names for names in held), held
+    if calls == 2:
+        assert outs[0].tobytes() == outs[1].tobytes()

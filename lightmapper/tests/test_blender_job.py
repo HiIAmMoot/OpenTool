@@ -14,7 +14,7 @@ from lightmapper import blender_job, memory
 from lightmapper.blender_job import (BakeResult, BlenderError, BlenderOutOfMemory, Scene, lamp_batches, run_blender,
                                      write_job)
 from lightmapper.formats.lights import SceneLight
-from lightmapper.memory import SceneCounts
+from lightmapper.memory import Machine, SceneCounts, StageInputs
 from lightmapper.gather import Sun
 from lightmapper.settings import Settings
 
@@ -112,7 +112,8 @@ def test_write_job_files_load_back(tmp_path):
         'version', 'scene', 'out', 'pages', 'suns', 'ambient', 'samples', 'bounces',
         'albedo_scale', 'albedo_fallback', 'vertex_rays', 'device', 'texel_samples', 'seed',
         'cycles_devices', 'cycles_required', 'hiprt', 'vertex_pass', 'ignore_normals_mode', 'ambiguous_twin_groups',
-        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays', 'lights', 'adaptive_sampling'])
+        'cpu_samples', 'cpu_texel_samples', 'cpu_vertex_rays', 'lights', 'adaptive_sampling', 'whole_page_tiles',
+        'glow_sub_texels'])
     with np.load(tmp_path / 'textures.npz') as data:
         assert list(data.files) == ['tex_0']
         np.testing.assert_array_equal(data['tex_0'], TEXTURE)
@@ -144,6 +145,17 @@ def test_ignore_normals_flags_survive_job_exchange(tmp_path, flagged):
 def test_job_carries_adaptive_sampling(tmp_path, adaptive):
     write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(adaptive_sampling=adaptive))
     assert json.loads((tmp_path / 'job.json').read_text())['adaptive_sampling'] is adaptive
+
+
+@pytest.mark.parametrize('tiles', [True, False])
+def test_job_carries_whole_page_tiles(tmp_path, tiles):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), whole_page_tiles=tiles)
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is tiles
+
+
+def test_job_whole_page_tiles_defaults_off(tmp_path):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings())
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is False
 
 
 def test_job_adaptive_sampling_defaults_on(tmp_path):
@@ -264,6 +276,40 @@ def test_glow_run_has_no_lights(tmp_path, monkeypatch):
     with pytest.raises(BlenderError):
         blender_job.run_blender_glow(tmp_path, Settings(), [np.zeros((2, 2, 3), np.float32)])
     assert json.loads((tmp_path / 'job_glow.json').read_text())['lights'] == []
+
+
+GLOW_TILED = memory.stage_bytes(StageInputs(SceneCounts(2, 6), [(16, 8)], 'gpu', 9 * 16 * 8, True))['glow']
+
+
+@pytest.mark.parametrize('free, tiles', [(GLOW_TILED, True), (GLOW_TILED - 1, False), (10**13, True), (None, False)])
+def test_glow_run_decides_its_own_tiles_from_the_free_memory(tmp_path, monkeypatch, free, tiles):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), whole_page_tiles=not tiles)
+    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: free)
+    # (the installed memory is no guide here: the page stage's arrays may still be held when the glow run starts)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: Machine(1, 1, 1))
+
+    def stop(*args):
+        raise BlenderError('stopped before Blender')
+
+    monkeypatch.setattr(blender_job, '_run_blender', stop)
+    with pytest.raises(BlenderError):
+        blender_job.run_blender_glow(tmp_path, Settings(), [np.ones((8, 16, 3), np.float32)])
+    assert json.loads((tmp_path / 'job_glow.json').read_text())['whole_page_tiles'] is tiles
+    assert json.loads((tmp_path / 'job.json').read_text())['whole_page_tiles'] is (not tiles)
+
+
+def test_job_carries_the_glow_sub_texels(tmp_path):
+    write_job(tmp_path, make_scene(), [(16, 8)], [], {}, Settings(), glow_sub_texels=1152)
+    assert json.loads((tmp_path / 'job.json').read_text())['glow_sub_texels'] == 1152
+
+
+def test_glow_run_counts_only_the_pages_it_bakes(tmp_path):
+    write_job(tmp_path, make_scene(), [(16, 8), (4, 4)], [], {}, Settings(), glow_sub_texels=99)
+    job = json.loads((tmp_path / 'job.json').read_text())
+    assert blender_job._stage_inputs(tmp_path, job) == StageInputs(SceneCounts(2, 6), [(16, 8), (4, 4)], 'gpu', 99, False)
+    np.savez(tmp_path / 'glow_pages.npz', page_1=np.zeros((4, 4, 3), np.float32))
+    job.update(glow=True, glow_pages='glow_pages.npz', whole_page_tiles=True, device='cpu')
+    assert blender_job._stage_inputs(tmp_path, job) == StageInputs(SceneCounts(2, 6), [(16, 8), (4, 4)], 'cpu', 9 * 16, True)
 
 
 @pytest.mark.parametrize('owners, room, want', [
@@ -418,20 +464,23 @@ def test_blender_failure_raises(tmp_path, fake, monkeypatch):
         run_blender(work, s)
 
 
+SMALL_MACHINE = Machine(9_800_000_000, 9_800_000_000, 12_000_000_000)
+
+
 def test_access_violation_with_calloc_null_is_out_of_memory(tmp_path, fake, monkeypatch):
     work = tmp_path / 'work'
     s = Settings(blender=fake)
     write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
     monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
-    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 9_800_000_000)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: SMALL_MACHINE)
     with pytest.raises(BlenderOutOfMemory) as caught:
         run_blender(work, s)
     assert caught.value.message == memory.out_of_memory_message(
-        SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)], s.page_max, 9_800_000_000)
+        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), s.page_max, SMALL_MACHINE)
     assert 'Calloc returns null' in str(caught.value)
 
 
-def test_out_of_memory_message_uses_free_memory_from_before_blender_started(tmp_path, fake, monkeypatch):
+def test_out_of_memory_message_uses_the_machine_from_before_blender_started(tmp_path, fake, monkeypatch):
     work = tmp_path / 'work'
     s = Settings(blender=fake)
     write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
@@ -443,11 +492,25 @@ def test_out_of_memory_message_uses_free_memory_from_before_blender_started(tmp_
         started.append(True)
         return real_run(*args, **kwargs)
     monkeypatch.setattr(blender_job.subprocess, 'run', run)
-    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 99_000_000_000 if started else 9_800_000_000)
+    monkeypatch.setattr(blender_job, 'read_machine',
+                        lambda: Machine(99 * memory.GB, 99 * memory.GB, 200 * memory.GB) if started else SMALL_MACHINE)
     with pytest.raises(BlenderOutOfMemory) as caught:
         run_blender(work, s)
     assert caught.value.message == memory.out_of_memory_message(
-        SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)], s.page_max, 9_800_000_000)
+        StageInputs(SceneCounts.from_npz(work / 'scene.npz'), [(16, 8)]), s.page_max, SMALL_MACHINE)
+
+
+def test_glow_run_out_of_memory_names_the_glow_stage(tmp_path, fake, monkeypatch):
+    work = tmp_path / 'work'
+    s = Settings(blender=fake)
+    write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
+    monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
+    monkeypatch.setattr(memory, 'GLOW_PER_GLOW_SUB_TEXEL', 10**9)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: SMALL_MACHINE)
+    with pytest.raises(BlenderOutOfMemory) as caught:
+        blender_job.run_blender_glow(work, s, [np.ones((8, 16, 3), np.float32)])
+    assert '(baking light from ignore-normals surfaces)' in caught.value.message
+    assert caught.value.message.endswith(' Or set Ignore-normals lighting to Traditional.')
 
 
 def test_access_violation_without_calloc_stays_blender_error(tmp_path, fake, monkeypatch):
@@ -469,7 +532,7 @@ def test_negative_access_violation_code_is_recognised(tmp_path, monkeypatch):
         kwargs['stdout'].write(b'Malloc returns null: len=1 in Combined, total 2\n')
         return subprocess.CompletedProcess(command, -1073741819)
     monkeypatch.setattr(blender_job.subprocess, 'run', run)
-    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: None)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: None)
     with pytest.raises(BlenderOutOfMemory):
         run_blender(work, s)
 
@@ -479,7 +542,7 @@ def test_vertex_only_relaunch_out_of_memory_is_mapped(tmp_path, fake, monkeypatc
     s = Settings(blender=fake)
     write_job(work, make_scene(), [(16, 8)], make_suns(), AMBIENT, s)
     monkeypatch.setenv('FAKE_BLENDER_MODE', 'oom')
-    monkeypatch.setattr(blender_job, 'free_physical_bytes', lambda: 9_800_000_000)
+    monkeypatch.setattr(blender_job, 'read_machine', lambda: SMALL_MACHINE)
     with pytest.raises(BlenderOutOfMemory):
         blender_job.run_blender_vertex_only(work, s, [page(0, 16, 8)])
 

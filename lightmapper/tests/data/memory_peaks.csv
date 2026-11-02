@@ -1,0 +1,24 @@
+case,adaptive,whole_page_tiles,stage,triangles,vertices,pages,glow_sub_texels,tree_bytes,source
+bloodgulch-Normal,any,0,finish,11038,22409,512x512,0,282079232,01bcca80bcdf/bloodgulch-Normal-off-s0
+bloodgulch-Normal,off,0,blender,11038,22409,512x512,0,2524344320,49c8abe76760/bloodgulch-Normal-off-s0-det2
+bloodgulch-Normal,off,1,blender,11038,22409,512x512,0,2550108160,f1114ee51112/bloodgulch-Normal-off-s0
+bloodgulch-Ultra,any,0,finish,11038,23071,1024x2048,0,1006133248,_dirty/bloodgulch-Ultra-on-s2-1793550778244
+bloodgulch-Ultra,any,0,vertex,11038,23071,1024x2048,0,1729765376,_dirty/bloodgulch-Ultra-on-s0-1793565494215
+bloodgulch-Ultra,off,0,blender,11038,23071,1024x2048,0,6978117632,49c8abe76760/bloodgulch-Ultra-off-s0-det2
+bloodgulch-Ultra,off,1,blender,11038,23071,1024x2048,0,8321503232,_dirty/bloodgulch-Ultra-off-s2-1793557273731
+bloodgulch-Ultra,on,0,blender,11038,23071,1024x2048,0,7412019200,49c8abe76760/bloodgulch-Ultra-on-s1
+bloodgulch-Ultra,on,1,blender,11038,23071,1024x2048,0,9234022400,_dirty/bloodgulch-Ultra-on-s0-1793565494215
+monaco-Ultra,any,0,vertex,247366,723339,2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048 2048x2048,264241152,17239318528,b6/monaco/after9b/replay.json
+timberland-Normal,any,0,finish,38951,105000,512x512 512x512 512x128,0,304164864,_dirty/timberland-Normal-off-s2-1793561407832
+timberland-Normal,any,0,vertex,38951,105000,512x512 512x512 512x128,0,1041240064,49c8abe76760/timberland-Normal-off-s0-det2
+timberland-Normal,off,0,blender,38951,105000,512x512 512x512 512x128,0,2664628224,49c8abe76760/timberland-Normal-off-s0-det2
+timberland-Normal,off,1,blender,38951,105000,512x512 512x512 512x128,0,2705313792,_dirty/timberland-Normal-off-s2-1793561407832
+timberland-Ultra,any,0,finish,38951,106283,2048x2048 2048x2048,75497472,1100406784,_dirty/timberland-Ultra-on-s0-1793564274762
+timberland-Ultra,any,0,vertex,38951,106283,2048x2048 2048x2048,75497472,5178621952,b6/timberland/after9b/replay.json
+timberland-Ultra,off,0,blender,38951,106283,2048x2048 2048x2048,75497472,12491456512,49c8abe76760/timberland-Ultra-off-s0-det2
+timberland-Ultra,off,1,blender,38951,106283,2048x2048 2048x2048,75497472,15495155712,_dirty/timberland-Ultra-off-s2-1793557625155
+timberland-Ultra,off,1,glow,38951,106283,2048x2048 2048x2048,75497472,17529069568,_dirty/timberland-Ultra-off-s2-1793557625155
+timberland-Ultra,on,0,blender,38951,106283,2048x2048 2048x2048,75497472,13637509120,_dirty/timberland-Ultra-on-s0-1793564274762
+timberland-Ultra,on,0,glow,38951,106283,2048x2048 2048x2048,75497472,14586605568,_dirty/timberland-Ultra-on-s0-1793564274762
+timberland-Ultra,on,1,blender,38951,106283,2048x2048 2048x2048,75497472,17058443264,_dirty/timberland-Ultra-on-s2-1793560220337
+timberland-Ultra,on,1,glow,38951,106283,2048x2048 2048x2048,75497472,19094814720,_dirty/timberland-Ultra-on-s0-1793561460050

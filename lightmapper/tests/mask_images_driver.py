@@ -20,7 +20,8 @@ def main():
         scene_data = {key: data[key] for key in data.files}
     textures, images, masks = bake.make_images(os.path.join(root, 'textures.npz'), job['pages'], True)
     before = [[int(m.size[0]), int(m.size[1])] for m in masks]
-    receivers, occluders = bake.build_objects(scene_data, job, textures, images, masks)
+    atlas_image, sources = bake.make_atlas_image(), []
+    receivers, occluders = bake.build_objects(scene_data, job, textures, images, masks, sources=sources)
     bake.add_suns(job, receivers, occluders)
     seen = []
     real_read = bake.read_page
@@ -32,14 +33,16 @@ def main():
 
     bake.read_page = spy
     for k, (w, h) in enumerate(job['pages']):
-        bake.bake_page(k, receivers, images[k], h, w, job, masks[k])
+        bake.bake_page(k, receivers, images[k], h, w, job, masks[k],
+                       atlas=bake.atlas_inputs(scene_data, job, k, sources, textures, atlas_image))
     after = []
     for m in masks:
         pixels = np.empty(m.size[0] * m.size[1] * 4, np.float32)
         m.pixels.foreach_get(pixels)
         after.append({'size': [int(m.size[0]), int(m.size[1])], 'min': float(pixels.min())})
     with open(os.path.join(root, 'mask_sizes.json'), 'w') as handle:
-        json.dump({'before': before, 'during': seen, 'after': after}, handle)
+        json.dump({'before': before, 'during': seen, 'after': after,
+                   'atlas': [int(atlas_image.size[0]), int(atlas_image.size[1])]}, handle)
 
 
 main()

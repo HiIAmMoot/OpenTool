@@ -14,7 +14,8 @@ import time
 
 import numpy as np
 
-from .memory import SceneCounts, free_physical_bytes, out_of_memory_message
+from .memory import (SceneCounts, StageInputs, free_physical_bytes, glow_whole_page_tiles, out_of_memory_message,
+                     read_machine)
 from .formats.lights import SceneLight
 from .settings import Settings
 from .gpu import DeviceChoice, HIPRT, choose
@@ -149,7 +150,7 @@ def lamp_batches(owners: list[int], main_has_room: bool) -> list[list[int]]:
 def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
               s: Settings, sources: str = 'all', textures: list | None = None,
               choice: DeviceChoice | None = None, vertex_pass: str = 'cpu',
-              lights: list[SceneLight] = ()) -> Path:
+              lights: list[SceneLight] = (), whole_page_tiles: bool = False, glow_sub_texels: int = 0) -> Path:
     if sources not in SOURCES:
         raise ValueError(f'sources must be one of {SOURCES}, not {sources!r}')
     if vertex_pass not in ('cpu', 'skip'):
@@ -256,6 +257,8 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
         'vertex_pass': vertex_pass,
         'ignore_normals_mode': s.ignore_normals_mode,
         'ambiguous_twin_groups': ambiguous_twins,
+        'whole_page_tiles': whole_page_tiles,
+        'glow_sub_texels': glow_sub_texels,
     }
     path = work / 'job.json'
     path.write_text(json.dumps(job, indent=2))
@@ -266,6 +269,17 @@ def _log_tail(log: Path) -> str:
     if not log.is_file():
         return '(no log)'
     return '\n'.join(log.read_text(errors='replace').splitlines()[-LOG_TAIL_LINES:])
+
+
+def _stage_inputs(work: Path, job: dict) -> StageInputs:
+    pages = [tuple(p) for p in job['pages']]
+    glow = job.get('glow_sub_texels', 0)
+    if job.get('glow'):
+        # (the glow run bakes only the pages with an entry, so those are the sub-texels it holds)
+        with np.load(work / job['glow_pages']) as data:
+            glow = sum(9 * w * h for i, (w, h) in enumerate(pages) if f'page_{i}' in data.files)
+    return StageInputs(SceneCounts.from_npz(work / job['scene']), pages, 'cpu' if job.get('device') == 'cpu' else 'gpu',
+                       glow, bool(job.get('whole_page_tiles')))
 
 
 def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
@@ -279,8 +293,8 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
                '--python', str(BAKE_SCRIPT), '--', str(work / job_name)]
     environment = dict(os.environ)
     environment['LIGHTMAPPER_LAUNCH_TIME'] = str(time.time())
-    # (read before Blender starts: once it has died its memory is free again and the message would contradict itself)
-    free_before = free_physical_bytes()
+    # (read before Blender starts, as the page file may grow while it runs and the message would then contradict itself)
+    machine = read_machine()
     try:
         with open(log, 'wb') as handle:
             done = subprocess.run(command, stdin=subprocess.DEVNULL, stdout=handle,
@@ -294,8 +308,7 @@ def _run_blender(work: Path, s: Settings, job_name: str, log_name: str):
         tail = _log_tail(log)
         # an access violation alone is any crash; only Blender's own failed-allocation line makes it memory
         if done.returncode in ACCESS_VIOLATION and ('Calloc returns null' in tail or 'Malloc returns null' in tail):
-            message = out_of_memory_message(SceneCounts.from_npz(work / job['scene']),
-                                            [tuple(p) for p in job['pages']], s.resolved_page_max, free_before)
+            message = out_of_memory_message(_stage_inputs(work, job), s.resolved_page_max, machine)
             raise BlenderOutOfMemory(message, tail)
         raise BlenderError(f'blender exited with {done.returncode}\n{tail}')
     if not out.is_file():
@@ -387,12 +400,18 @@ def run_blender_glow(work: Path, s: Settings, pages: list[np.ndarray]) -> tuple[
             cropped[f'page_{i}'] = page[y0:y1, x0:x1]
             cropped[f'box_{i}'] = np.array([x0, y0, x1, y1, page.shape[1], page.shape[0]], np.int32)
     np.savez(work / 'glow_pages.npz', **cropped)
+    held = set(cropped)
     # (the caller's list and the crops' views keep the whole pages alive while Blender runs)
     pages.clear()
     cropped.clear()
     page = None
     job = json.loads((work / 'job.json').read_text())
-    job.update(glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
+    sizes = [tuple(p) for p in job['pages']]
+    glow = sum(9 * w * h for i, (w, h) in enumerate(sizes) if f'page_{i}' in held)
+    device = 'cpu' if job.get('device') == 'cpu' else 'gpu'
+    tiles = glow_whole_page_tiles(StageInputs(SceneCounts.from_npz(work / 'scene.npz'), sizes, device, glow),
+                                  free_physical_bytes())
+    job.update(whole_page_tiles=tiles, glow=True, out='glow_out.npz', glow_pages='glow_pages.npz', suns=[], ambient={}, lights=[],
                bounces=0, vertex_pass='skip')
     (work / 'job_glow.json').write_text(json.dumps(job, indent=2))
     _, out = _run_blender(work, s, 'job_glow.json', 'blender_glow.log')

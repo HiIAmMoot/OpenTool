@@ -621,3 +621,53 @@ def test_one_off_denoise_survives_an_undeletable_temp_folder(monkeypatch):
     monkeypatch.setattr(pages.tempfile, 'TemporaryDirectory', Stuck)
     page = np.full((8, 8, 3), 0.5, np.float32)
     assert pages._denoise(page, 60).shape[:2] == (8, 8)
+
+
+# ---------- finishing with a frontier-only dilate and an index-list ambient add keeps every value
+
+def _old_finish_float(raw, mask, cls, ambient, s, written=None):
+    from test_raster import old_dilate
+    raw = np.ascontiguousarray(raw, dtype=np.float32)
+    mask = np.asarray(mask, dtype=np.bool_)
+    cls = np.asarray(cls, dtype=np.int16)
+    written = mask if written is None else np.asarray(written, dtype=np.bool_)
+    seeded = old_dilate(raw, mask, cls, 2 * s.padding + 2)[2]
+    page, dilated, classes = old_dilate(raw, written, np.where(written, seeded, cls), 2 * s.padding)
+    classes[mask] = cls[mask]
+    dilated |= mask
+    page = np.array(page, dtype=np.float32)
+    for klass, colour in ambient.items():
+        page[dilated & (classes == klass)] += np.asarray(colour, dtype=np.float32)
+    page[~dilated] = 0
+    return page
+
+
+@pytest.mark.parametrize('seed', range(6))
+@pytest.mark.parametrize('written_share', [None, 0.7])
+def test_finish_float_is_bit_identical_to_the_full_scan_and_per_class_masks(seed, written_share):
+    rng = np.random.default_rng(seed)
+    height, width = 37, 53
+    raw = (rng.random((height, width, 3)) * 10.0 ** rng.integers(-2, 2, (height, width, 1))).astype(np.float32)
+    # (charts as blobs of random size, touching the page border, with texels of every class)
+    mask = np.zeros((height, width), bool)
+    for _ in range(5):
+        y, x = rng.integers(0, height), rng.integers(0, width)
+        mask[y:y + rng.integers(1, 9), x:x + rng.integers(1, 12)] = True
+    cls = rng.integers(0, 3, (height, width)).astype(np.int16)
+    written = None if written_share is None else mask & (rng.random(mask.shape) < written_share)
+    if written is not None:
+        # (a written texel the coverage test missed)
+        written[rng.integers(0, height), rng.integers(0, width)] = True
+    ambient = {0: (0.25, 0.5, 0.125), 1: (1.5, 0, 0.1), 2: (0, 0, 0.3), 7: (9, 9, 9)}
+    s = Settings(denoise=False, padding=3)
+    want = _old_finish_float(raw, mask, cls, ambient, s, written)
+    got = finish_float(raw, mask, cls, ambient, s, written=written)
+    assert mask.any() and (want[~mask].any())
+    assert got.dtype == np.float32
+    np.testing.assert_array_equal(got, want)
+
+
+def test_finish_float_with_an_empty_page_and_no_ambient_is_all_zero():
+    mask = np.zeros((6, 7), bool)
+    got = finish_float(np.ones((6, 7, 3), np.float32), mask, np.zeros((6, 7), np.int16), {}, Settings(denoise=False))
+    np.testing.assert_array_equal(got, 0)

@@ -299,9 +299,14 @@ def finish_float(raw, mask, cls, ambient, s, written=None, worker=None) -> np.nd
             np.ascontiguousarray(page, dtype=np.float32), (mask | written) & dilated, classes, 2 * s.padding)
     classes[mask] = cls[mask]
     dilated |= mask
-    page = np.array(page, dtype=np.float32)
+    page = np.array(page, dtype=np.float32, order='C')
+    # (the ambient is added where the page is filled; a class map compared in full for each class costs a pass over
+    # the page per class)
+    filled = np.flatnonzero(dilated)
+    filled_classes = classes.ravel()[filled]
+    flat = page.reshape(-1, page.shape[-1])
     for klass, colour in ambient.items():
-        page[dilated & (classes == klass)] += np.asarray(colour, dtype=np.float32)
+        flat[filled[filled_classes == klass]] += np.asarray(colour, dtype=np.float32)
     page[~dilated] = 0
     clipped = float(np.mean(page[mask].max(axis=-1) > 1)) if mask.any() else 0.0
     log.info('page %dx%d: %.2f%% of covered texels clipped at 1',

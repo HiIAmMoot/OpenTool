@@ -28,10 +28,12 @@ def texel_queries(scene, page, width, height):
                 texel_xy=np.column_stack([x, y]).astype(np.int32))
 
 
-def texel_contribution(scene, page, width, height, rgb=None):
-    """The gathered contribution and flagged share, using all owned samples rather than nine at chart edges."""
-    rows = np.flatnonzero(scene['tri_page'] == page)
-    owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+def texel_contribution(scene, page, width, height, rgb=None, owner=None):
+    """The gathered contribution and flagged share, using all owned samples rather than nine at chart edges.
+    `owner` is the page's `triangle_weights` owner map when the caller already has it."""
+    if owner is None:
+        rows = np.flatnonzero(scene['tri_page'] == page)
+        owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
     owned = (owner >= 0).reshape(height, 3, width, 3).sum(axis=(1, 3))
     chosen = scene['texel_page'] == page
     xy = scene['texel_xy'][chosen] // 3
@@ -45,20 +47,25 @@ def texel_contribution(scene, page, width, height, rgb=None):
     return total, share
 
 
-def flagged_source(scene, page, width, height, rgb):
-    """Keep each flagged sample's received light separate from neighbouring materials, including in the padding."""
+def flagged_source(scene, page, width, height, rgb, owner=None):
+    """Keep each flagged sample's received light separate from neighbouring materials, including in the padding.
+    `owner` is the page's `triangle_weights` owner map when the caller already has it."""
     from scipy.ndimage import distance_transform_edt
 
-    rows = np.flatnonzero(scene['tri_page'] == page)
-    owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    if owner is None:
+        rows = np.flatnonzero(scene['tri_page'] == page)
+        owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
     source = np.zeros((3 * height, 3 * width, 3), np.float32)
     chosen = scene['texel_page'] == page
     xy = scene['texel_xy'][chosen]
     source[xy[:, 1], xy[:, 0]] = rgb[chosen]
     if (owner >= 0).any():
         # nearest owned samples extend each chart without averaging across chart or material boundaries
-        nearest = distance_transform_edt(owner < 0, return_distances=False, return_indices=True)
-        source[owner < 0] = source[nearest[0][owner < 0], nearest[1][owner < 0]]
+        # (one index list for the gather: a boolean mask over the 3x grid costs a pass over it per use)
+        unowned = owner < 0
+        nearest = distance_transform_edt(unowned, return_distances=False, return_indices=True)
+        ys, xs = np.nonzero(unowned)
+        source[ys, xs] = source[nearest[0][ys, xs], nearest[1][ys, xs]]
     return source
 
 
@@ -93,8 +100,9 @@ def flagged_transport(scene, page, width, height, rgb):
     return flagged_subtexels((3 * height, 3 * width), scene['texel_xy'][chosen], rgb[chosen])
 
 
-def ordinary_transport(scene, page, base):
-    """The baked page over its ordinary sub-texels alone (the flagged ones bake black)."""
+def ordinary_transport(scene, page, base, dtype=None):
+    """The baked page over its ordinary sub-texels alone (the flagged ones bake black); dtype rounds the float64
+    product once (the GPU pass uploads float32, so it need not hold the float64 page)."""
     height, width = base.shape[:2]
     rows = np.flatnonzero(scene['tri_page'] == page)
     owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
@@ -104,7 +112,8 @@ def ordinary_transport(scene, page, base):
     np.add.at(flagged, (xy[:, 1], xy[:, 0]), 1)
     ordinary = owned - flagged
     scale = np.where(flagged > 0, owned / np.maximum(ordinary, 1) * (ordinary > 0), 1.0)
-    return base * scale[:, :, None]
+    product = base * scale[:, :, None]
+    return product if dtype is None else product.astype(dtype)
 
 
 def texel_ray_counts(scene, pages, base, target):
@@ -201,33 +210,67 @@ def _triangle_weights(texels, tris, width, height):
 def dilate(img, mask, cls, iterations):
     img, mask, cls = img.copy(), mask.copy(), cls.copy()
     height, width, channels = img.shape
+    # only a texel next to a filled one can change, and a ring's newly filled texels are the only ones that can
+    # give the next ring a neighbour, so each ring visits its frontier rather than the page (it still reads only
+    # the previous ring's state: every value is computed before any is written)
+    room = height * width - mask.sum()
+    frontier = np.empty(room, np.int64)
+    following = np.empty(room, np.int64)
+    queued = np.zeros((height, width), np.bool_)
+    count = 0
+    for y in range(height):
+        for x in range(width):
+            if mask[y, x]:
+                continue
+            near = False
+            for ny in range(max(0, y - 1), min(height - 1, y + 1) + 1):
+                for nx in range(max(0, x - 1), min(width - 1, x + 1) + 1):
+                    if mask[ny, nx]:
+                        near = True
+            if near:
+                frontier[count] = y * width + x
+                count += 1
+    values = np.empty((room, channels), img.dtype)
+    classes = np.empty(room, cls.dtype)
     for _ in range(iterations):
-        # each ring reads only the previous iteration, not earlier writes in this one
-        result, filled, classes = img.copy(), mask.copy(), cls.copy()
-        for y in range(height):
-            for x in range(width):
-                if mask[y, x]:
-                    continue
-                y0, y1 = max(0, y - 1), min(height - 1, y + 1)
-                x0, x1 = max(0, x - 1), min(width - 1, x + 1)
-                count = 0
+        if count == 0:
+            break
+        for item in range(count):
+            y, x = frontier[item] // width, frontier[item] % width
+            y0, y1 = max(0, y - 1), min(height - 1, y + 1)
+            x0, x1 = max(0, x - 1), min(width - 1, x + 1)
+            found = 0
+            for ny in range(y0, y1 + 1):
+                for nx in range(x0, x1 + 1):
+                    if mask[ny, nx]:
+                        if found == 0:
+                            classes[item] = cls[ny, nx]
+                        found += 1
+            for channel in range(channels):
+                total = 0.0
                 for ny in range(y0, y1 + 1):
                     for nx in range(x0, x1 + 1):
                         if mask[ny, nx]:
-                            if count == 0:
-                                classes[y, x] = cls[ny, nx]
-                            count += 1
-                if count == 0:
-                    continue
-                filled[y, x] = True
-                for channel in range(channels):
-                    total = 0.0
-                    for ny in range(y0, y1 + 1):
-                        for nx in range(x0, x1 + 1):
-                            if mask[ny, nx]:
-                                total += img[ny, nx, channel]
-                    result[y, x, channel] = total / count
-        img, mask, cls = result, filled, classes
+                            total += img[ny, nx, channel]
+                values[item, channel] = total / found
+        for item in range(count):
+            y, x = frontier[item] // width, frontier[item] % width
+            img[y, x] = values[item]
+            cls[y, x] = classes[item]
+            mask[y, x] = True
+        reached = 0
+        for item in range(count):
+            y, x = frontier[item] // width, frontier[item] % width
+            for ny in range(max(0, y - 1), min(height - 1, y + 1) + 1):
+                for nx in range(max(0, x - 1), min(width - 1, x + 1) + 1):
+                    if not mask[ny, nx] and not queued[ny, nx]:
+                        queued[ny, nx] = True
+                        following[reached] = ny * width + nx
+                        reached += 1
+        for item in range(reached):
+            queued[following[item] // width, following[item] % width] = False
+        frontier, following = following, frontier
+        count = reached
     return img, mask, cls
 
 
