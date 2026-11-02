@@ -1735,14 +1735,14 @@ def test_render_only_shadows_reaches_settings_and_is_remembered(tmp_path, tiny, 
     _ready(a, tiny)
     assert a.render_only_shadows_var.get() == 'By bump alpha'
     assert a.request().settings.render_only_shadows == 'bump_alpha'
-    for label, value in (('Solid', 'cast'), ('None', 'none')):
+    for label, value in (('Solid', 'cast'), ("None (tool's behaviour)", 'none')):
         a.render_only_shadows_var.set(label)
         assert a.request().settings.render_only_shadows == value
         a.remember()
         assert make_app(store_path=tmp_path / 's.json').render_only_shadows_var.get() == label
 
 
-@pytest.mark.parametrize('saved, label', [(True, 'Solid'), (False, 'None'), ('bump_alpha', 'By bump alpha'),
+@pytest.mark.parametrize('saved, label', [(True, 'Solid'), (False, "None (tool's behaviour)"), ('bump_alpha', 'By bump alpha'),
                                           ('nonsense', 'By bump alpha')])
 def test_a_saved_boolean_render_only_setting_is_migrated(tmp_path, make_app, saved, label):
     (tmp_path / 's.json').write_text(json.dumps({'render_only_shadows': saved}))
