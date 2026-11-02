@@ -705,11 +705,34 @@ def _stretch_plausible(source: np.ndarray, scale: float) -> bool:
     return extent < 1e-9 or 0.999 <= scale <= 1 + 1 / extent + 1e-3
 
 
-def _nest_at(parts, side: int, s: ChartSettings):
+def _nest_input(part) -> np.ndarray:
+    return (part[3] - part[3].min(axis=0)).astype(np.float32)
+
+
+def _nest_units(parts) -> list:
+    # xatlas makes one chart of each uv island of a part and places each on its own (a part can be several islands
+    # after _bounded_charts or the bisection), so the islands are what moves. They are found on the values xatlas
+    # is given, so a corner shared there is shared here
+    units = []
+    for part in parts:
+        index, group, xref, uv, tris, surface_ids = part
+        found = _components(_nest_input(part), tris, np.arange(len(tris)))
+        if len(found) == 1:
+            units.append(part)
+            continue
+        for rows in found:
+            used = np.unique(tris[rows])
+            units.append((index, group, xref[used], uv[used].copy(),
+                          np.searchsorted(used, tris[rows]).astype(np.int32), surface_ids[rows]))
+    return units
+
+
+def _nest_at(parts, side: int, s: ChartSettings, margin: int):
     atlas = xatlas_c.Atlas()
     for part in parts:
-        atlas.add_uv_mesh((part[3] - part[3].min(axis=0)).astype(np.float32), part[4])
-    atlas.generate(xatlas_c.PackSettings(resolution=side - 2 * s.padding, texels_per_unit=1.0, padding=s.padding,
+        atlas.add_uv_mesh(_nest_input(part), part[4])
+    # (margin is xatlas's padding; _finish still adds s.padding, and the extent check below holds either way)
+    atlas.generate(xatlas_c.PackSettings(resolution=side - 2 * margin, texels_per_unit=1.0, padding=margin,
                                          bilinear=True, rotate_charts=True, rotate_charts_to_axis=False,
                                          brute_force=False))
     pages = [[] for _ in range(max(atlas.page_count, 1))]
@@ -762,12 +785,13 @@ def _nest_at(parts, side: int, s: ChartSettings):
     return _finish([pages[i] for i in keep], extent[keep], replace(s, page_max=side))
 
 
-def _nest_pack(parts, s: ChartSettings) -> list[OutPage] | None:
+def _nest_pack(parts, s: ChartSettings, margin: int | None = None) -> list[OutPage] | None:
+    margin = s.padding if margin is None else margin
     top = s.resolved_page_max
     side = max(s.page_min, next_pow2(max(int(_padded_size(part[3], s.padding).max()) for part in parts)))
     best = None
     while side <= top:
-        candidate = _nest_at(parts, side, s)
+        candidate = _nest_at(parts, side, s, margin)
         if candidate is not None:
             key = (len(candidate), _pages_area(candidate))
             if best is None or key < best[0]:
@@ -801,26 +825,28 @@ def _touched_cells(a, b, c, eps=1e-3):
     return xs[keep], ys[keep]
 
 
-def _charts_separated(pages: list[OutPage], s: ChartSettings) -> bool:
+def _charts_separated(pages: list[OutPage], s: ChartSettings, placed) -> bool:
+    # placed: the pieces that were placed, each one chart. A chart is named by its triangles (group, surface id),
+    # not found from the pages: its triangles can share no vertex (a source seam, or a split at a vertex cap) and
+    # still touch, and two charts can share a uv value only where they wrongly touch
     reach = 2 * s.padding
     big = np.iinfo(np.int32).max
+    owner = {}
+    for number, piece in enumerate(placed, 1):
+        for surface in piece[5]:
+            if owner.setdefault((piece[0], int(surface)), number) != number:
+                return False
     for page in pages:
         label = np.zeros((page.height, page.width), np.int32)
-        count = 0
         for material in page.materials:
             texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
-            n = len(material.env)
-            edges = np.concatenate([material.tris[:, [0, 1]], material.tris[:, [1, 2]]])
-            graph = coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n))
-            # (a connected component stands for a chart; a part that is several components only gives false
-            # negatives, which fall back to the rectangle layout safely)
-            chart = connected_components(graph, directed=False)[1] + count + 1
-            count = int(chart.max())
-            for tri in material.tris:
+            for tri, surface in zip(material.tris, material.surface_ids):
+                id_ = owner.get((material.group, int(surface)))
+                if id_ is None:
+                    return False
                 xs, ys = _touched_cells(*texels[tri])
                 if len(xs) and (xs.min() < 0 or ys.min() < 0 or xs.max() >= page.width or ys.max() >= page.height):
                     return False
-                id_ = chart[tri[0]]
                 if np.any((label[ys, xs] != 0) & (label[ys, xs] != id_)):
                     return False
                 label[ys, xs] = id_
@@ -891,17 +917,27 @@ def chart_and_pack(groups: list[SourceGroup], radiosity: list[ShaderRadiosity],
 
 
 def _nested_or(rectangles, parts, s):
-    nested = _nest_pack(parts, s)
+    units = _nest_units(parts)
+    # xatlas places each chart stretched to whole texels and we keep it unstretched, so a hollow chart's inner edge
+    # can sit up to a texel nearer what nests in it than xatlas left. A texel more of xatlas padding on every chart
+    # covers that; it costs packing, so it is only the second try, when the plain padding fell short
+    for margin in (s.padding, s.padding + 1):
+        nested = _nest_pack(units, s, margin)
+        if nested is None:
+            reason = 'a chart could not be placed whole'
+            break
+        try:
+            _check_caps(nested, s)
+        except CapError as error:
+            reason, nested = str(error), None
+            break
+        if _charts_separated(nested, s, units):
+            break
+        reason = 'charts too close'
+        logger.info('nesting: charts too close at xatlas padding %d', margin)
+        nested = None
     if nested is None:
-        logger.info('nesting: a chart could not be placed whole, keeping the rectangle layout')
-        return rectangles
-    try:
-        _check_caps(nested, s)
-    except CapError as error:
-        logger.info('nesting: %s, keeping the rectangle layout', error)
-        return rectangles
-    if not _charts_separated(nested, s):
-        logger.info('nesting: charts too close, keeping the rectangle layout')
+        logger.info('nesting: %s, keeping the rectangle layout', reason)
         return rectangles
     if (len(nested), _pages_area(nested)) > (len(rectangles), _pages_area(rectangles)):
         logger.info('nesting: not smaller than the rectangle layout (%d texels against %d), keeping it',

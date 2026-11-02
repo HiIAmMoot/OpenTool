@@ -1151,8 +1151,8 @@ class NestSpy:
         self.calls = []
         real = charts._nest_pack
 
-        def spy(parts, s):
-            result = real(parts, s)
+        def spy(parts, s, *margin):
+            result = real(parts, s, *margin)
             self.calls.append((parts, s, result))
             return result
         monkeypatch.setattr(charts, '_nest_pack', spy)
@@ -1207,7 +1207,7 @@ def test_nested_charts_keep_the_full_gap(monkeypatch):
     spy = NestSpy(monkeypatch)
     pages = chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
     assert spy.calls[0][2] is not None and pages is spy.calls[0][2]
-    assert _charts_separated(pages, s)
+    assert _charts_separated(pages, s, spy.calls[0][0])
     for page in pages:
         assert rasterise(page).max() <= 1
 
@@ -1217,17 +1217,20 @@ def test_rectangle_layout_passes_the_gap_check():
     s = ChartSettings(page_max=256)
     # (integer extents put every edge on a texel boundary)
     pieces = [piece_from_grid(2, 10), piece_from_grid(1, 7), piece_from_grid(3, 9), piece_from_grid(4, 5)]
-    assert _charts_separated(_pack_rectangles(pieces, s), s)
+    pieces = [(i, *piece[1:]) for i, piece in enumerate(pieces)]
+    assert _charts_separated(_pack_rectangles(pieces, s), s, pieces)
 
 
 def test_charts_closer_than_the_gap_are_not_separated():
     from lightmapper.charts import _charts_separated
     s = nest_settings()
     pages = chart_and_pack([rect_group([(20, 20), (20, 20)])], simple(), s)
-    assert _charts_separated(pages, s)
     page = pages[0]
     material = page.materials[0]
     labels = connected_components_of(material)
+    quads = [(material.group, None, None, None, None, material.surface_ids[labels[material.tris[:, 0]] == k])
+             for k in (0, 1)]
+    assert _charts_separated(pages, s, quads)
     texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
     centres = [texels[labels == k].mean(axis=0) for k in (0, 1)]
     axis = int(np.argmax(np.abs(centres[1] - centres[0])))
@@ -1236,7 +1239,7 @@ def test_charts_closer_than_the_gap_are_not_separated():
     moved['texcoord'][labels == 1, axis] += step
     squeezed = [type(page)(page.width, page.height, [type(material)(material.group, material.env, moved,
                                                                     material.tris, material.surface_ids)])]
-    assert not _charts_separated(squeezed, s)
+    assert not _charts_separated(squeezed, s, quads)
 
 
 def connected_components_of(material):
@@ -1323,7 +1326,7 @@ def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
     rects = chart_and_pack([group], [radiosity()], s)
     assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
     np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
-    assert _charts_separated(nested, s)
+    assert _charts_separated(nested, s, spy.calls[0][0])
 
 
 def test_nesting_is_deterministic(monkeypatch):
@@ -1348,7 +1351,7 @@ def test_a_nested_layout_without_the_gap_falls_back_to_rectangles(monkeypatch):
     group = rect_group([(20, 20), (20, 20)])
     rects = chart_and_pack([group], simple(), s)
 
-    def squeezed(parts, settings):
+    def squeezed(parts, settings, *margin):
         page = rects[0]
         material = page.materials[0]
         labels = connected_components_of(material)
@@ -1400,3 +1403,125 @@ def test_nest_pack_accepts_an_auto_page_max():
     from lightmapper.charts import _nest_pack
     pages = _nest_pack([piece_from_grid(2, 18.65), piece_from_grid(3, 7.3)], ChartSettings(page_max='auto'))
     assert pages is not None
+
+
+def loose_piece(index, quads):
+    # one piece of quads with uvs (x, y, w, h); every triangle has its own vertices, as a part of a chart whose
+    # source vertices differ across an edge (a normal seam), so its triangles only touch by uv value
+    pos, uvs, tris = [], [], []
+    for x, y, w, h in quads:
+        for corners in (((x, y), (x + w, y), (x + w, y + h)), ((x, y), (x + w, y + h), (x, y + h))):
+            tris.append([len(pos), len(pos) + 1, len(pos) + 2])
+            for u, v in corners:
+                pos.append([u, v, 0])
+                uvs.append([u, v])
+    group = make_group(np.array(pos, np.float32), tris)
+    return (index, group, np.arange(len(pos)), np.array(uvs, np.float64), group.tris, group.surface_ids)
+
+
+def frame_piece(index, outer, hole):
+    edges = [0, (outer - hole) / 2, (outer + hole) / 2, outer]
+    pos = [[x, y, 0] for y in edges for x in edges]
+    tris = []
+    for cy in range(3):
+        for cx in range(3):
+            if (cx, cy) != (1, 1):
+                a = cy * 4 + cx
+                tris += [[a, a + 1, a + 5], [a, a + 5, a + 4]]
+    group = make_group(np.array(pos, np.float32), tris)
+    return (index, group, np.arange(16), group.env['position'][:, :2].astype(np.float64), group.tris, group.surface_ids)
+
+
+def quad_piece(index, w, h):
+    group = make_group(np.array([[0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0]], np.float32), [[0, 1, 2], [0, 2, 3]])
+    return (index, group, np.arange(4), group.env['position'][:, :2].astype(np.float64), group.tris, group.surface_ids)
+
+
+def test_triangles_of_one_chart_that_share_no_vertex_still_nest():
+    # (a chart whose triangles meet only by uv value is still one chart: its own texels may touch)
+    from lightmapper.charts import _charts_separated, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (14, 0, 14, 14)])]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, parts)
+
+
+def test_a_part_of_separate_uv_islands_nests_island_by_island():
+    # (a bounded or bisected part can be several uv islands; xatlas places each island as its own chart)
+    from lightmapper.charts import _charts_separated, _nest_units, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (36, 0, 14, 14)])]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, _nest_units(parts))
+    np.testing.assert_allclose(_packing_areas_of(pages), _piece_areas_of(parts), rtol=1e-5)
+
+
+def _packing_areas_of(pages):
+    from lightmapper.charts import _packing_areas
+    return _packing_areas(pages)
+
+
+def _piece_areas_of(parts):
+    from lightmapper.charts import _piece_areas
+    return _piece_areas(parts)
+
+
+def test_separation_tells_charts_apart_by_their_triangles_not_their_vertices():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [loose_piece(0, [(0, 0, 10, 10), (10, 0, 10, 10)]), loose_piece(1, [(0, 0, 10, 10)])]
+    pages = _pack_rectangles(parts, s)
+    assert _charts_separated(pages, s, parts)
+    # the same triangles, claimed as one chart each: the two halves of the first piece now touch
+    split = [(0, None, None, None, None, parts[0][5][:2]), (0, None, None, None, None, parts[0][5][2:]), parts[1]]
+    assert not _charts_separated(pages, s, split)
+
+
+def test_separation_refuses_triangles_it_cannot_assign():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [quad_piece(0, 10, 10), quad_piece(1, 10, 10)]
+    pages = _pack_rectangles(parts, s)
+    assert not _charts_separated(pages, s, parts[:1])
+    # (two charts claiming one triangle cannot be told apart either)
+    assert not _charts_separated(pages, s, parts + [parts[0]])
+
+
+def stretched_nest_parts():
+    # (found by search: frames and quads of fractional extents, which xatlas stretches to whole texels before it
+    # places a chart; at xatlas's own padding our unstretched copies end 7 texels apart)
+    spec = [('f', 81.76, 46.78), ('f', 43.01, 31.97), ('f', 81.75, 57.03), ('f', 103.72, 69.71), ('q', 5.85, 17.72),
+            ('q', 7.27, 12.44), ('q', 11.72, 12.0), ('q', 11.03, 17.94), ('q', 10.53, 14.57), ('q', 10.41, 17.97),
+            ('q', 17.68, 8.9), ('q', 7.83, 15.93), ('q', 14.99, 13.37), ('q', 9.13, 8.85), ('q', 4.97, 12.38),
+            ('q', 4.24, 7.12), ('q', 12.84, 3.22), ('q', 15.52, 4.09), ('q', 10.86, 11.2), ('q', 6.41, 17.34),
+            ('q', 8.11, 10.57)]
+    return [frame_piece(i, a, b) if kind == 'f' else quad_piece(i, a, b) for i, (kind, a, b) in enumerate(spec)]
+
+
+def test_nesting_widens_the_xatlas_margin_when_the_stretch_closes_the_gap():
+    from lightmapper.charts import _charts_separated, _nest_pack, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = stretched_nest_parts()
+    assert not _charts_separated(_nest_pack(parts, s), s, parts)
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, parts)
+    np.testing.assert_allclose(_packing_areas_of(pages), _piece_areas_of(parts), rtol=1e-5)
+
+
+def test_the_wider_margin_covers_the_stretch():
+    # xatlas places a chart stretched by under a texel; one more texel of its padding on each chart keeps our
+    # unstretched copies 2 x padding apart
+    from lightmapper.charts import _charts_separated, _nest_pack
+    s = ChartSettings(page_max=256)
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        parts = [frame_piece(0, rng.uniform(40, 60), rng.uniform(20, 30))]
+        parts += [quad_piece(i, *rng.uniform(3, 18, 2)) for i in range(1, 12)]
+        pages = _nest_pack(parts, s, s.padding + 1)
+        assert pages is not None and _charts_separated(pages, s, parts)
