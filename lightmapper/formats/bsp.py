@@ -5,6 +5,7 @@ page packing so visibility lists can be remapped without changing their meaning.
 """
 
 from dataclasses import dataclass, field
+import logging
 import struct
 
 import numpy as np
@@ -13,6 +14,7 @@ from .vertices import ENV, compress, pack_uncompressed, unpack_uncompressed
 from ..tagio.tagfile import Element, Tag, new_element
 
 
+logger = logging.getLogger(__name__)
 NO_CLUSTER = -32768
 LIGHTMAPPED_LIGHTING = {
     'ambient_color': tuple(np.float32(x) for x in (0.2, 0.2, 0.2)),
@@ -45,6 +47,8 @@ class BspGeometry:
     cluster_sky: np.ndarray
     # every surface's vertex indices, which the unlit group's materials index into
     surface_vertices: np.ndarray = field(default_factory=lambda: np.empty((0, 3), np.int32))
+    # surfaces no collision plane sits under: none of their leaf references has a bsp3d node
+    render_only: np.ndarray = field(default_factory=lambda: np.empty(0, np.bool_))
 
 
 @dataclass
@@ -111,6 +115,15 @@ def read_geometry(bsp: Tag) -> BspGeometry:
                     surface_cluster[s] = c
     fallback = np.full(len(surfaces), NO_CLUSTER, dtype=np.int16)
     leaf_surfaces = root.block('leaf_surfaces')
+    render_only = np.ones(len(surfaces), np.bool_)
+    if not len(leaf_surfaces):
+        # (without the link every surface would read as render-only, and a level would lose all its shadows)
+        logger.warning('the BSP has no leaf_surfaces: no surface is treated as render-only')
+        render_only[:] = False
+    for ref in leaf_surfaces:
+        # (the engine maps a collision hit to a render surface only through a reference with a node)
+        if ref.get('node') not in (-1, 0xFFFFFFFF):
+            render_only[ref.get('surface')] = False
     for leaf in root.block('leaves'):
         c = leaf.get('cluster')
         if c < 0:
@@ -123,7 +136,8 @@ def read_geometry(bsp: Tag) -> BspGeometry:
     missing = surface_cluster == NO_CLUSTER
     surface_cluster[missing] = fallback[missing]
     return BspGeometry(groups, pages[-1].copy(), surface_cluster,
-                       np.array([c.get('sky') for c in clusters], dtype=np.int16), triangles)
+                       np.array([c.get('sky') for c in clusters], dtype=np.int16), triangles,
+                       render_only)
 
 
 def apply_layout(bsp: Tag, geometry: BspGeometry, pages: list[OutPage],

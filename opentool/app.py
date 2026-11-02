@@ -84,7 +84,8 @@ class App:
         self._build()
         self._restore()
         for value in (*self.advanced_vars.values(), self.preset_var, self.device_var, self.bsp_var,
-                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.adaptive_var, self.ignore_normals_var, self.verbose_var):
+                      self.new_names_var, self.backups_var, self.lightmap_32bit_var, self.adaptive_var, self.ignore_normals_var, self.verbose_var,
+                      self.render_only_shadows_var):
             value.trace_add('write', lambda *_args: self._reset_used_rows())
         for value in (self.ignore_normals_var, self.advanced_vars['bounces']):
             value.trace_add('write', lambda *_args: self._glow_inputs_changed())
@@ -184,9 +185,12 @@ class App:
         self._advanced_open = False
         self.row_hints = {}
         row_labels = {}
-        self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit')
+        self.row_order = (*presets.ADVANCED, 'adaptive_sampling', 'ignore_normals_mode', 'lightmap_32bit',
+                          'render_only_shadows')
         self.adaptive_var = tk.BooleanVar(value=self.settings.adaptive_sampling)
         self.lightmap_32bit_var = tk.BooleanVar(value=self.settings.lightmap_32bit)
+        self.render_only_shadows_var = tk.StringVar(
+            value=self._render_only_label(self.settings.render_only_shadows))
         self.ignore_normals_var = tk.StringVar(
             value=self._ignore_normals_label(self.settings.ignore_normals_mode))
         for index, name in enumerate(presets.ADVANCED):
@@ -222,6 +226,13 @@ class App:
         self.lightmap_32bit_check = ttk.Checkbutton(
             self.advanced_frame, text='32-bit lightmaps', variable=self.lightmap_32bit_var)
         self.lightmap_32bit_check.grid(row=self.row_order.index('lightmap_32bit'), column=1, sticky='w', pady=2)
+        row_labels['render_only_shadows'] = ttk.Label(self.advanced_frame, text='Render-only shadows')
+        row_labels['render_only_shadows'].grid(
+            row=self.row_order.index('render_only_shadows'), column=0, sticky='w', padx=(0, 8), pady=2)
+        self.render_only_shadows_entry = ttk.Combobox(
+            self.advanced_frame, values=tuple(label for label, _ in presets.RENDER_ONLY_SHADOWS),
+            textvariable=self.render_only_shadows_var, state='readonly')
+        self.render_only_shadows_entry.grid(row=self.row_order.index('render_only_shadows'), column=1, sticky='ew', pady=2)
         for name in self.row_order:
             # (a long description wraps: an unwrapped one would widen both uniform columns and the window)
             hint = ttk.Label(self.advanced_frame, foreground='gray', wraplength=180, justify='left')
@@ -240,7 +251,8 @@ class App:
         self._example_refit = None
         self.advanced_frame.bind('<Configure>', lambda _event: self._refit_example_later(), add='+')
         controls = {**self.advanced_entries, 'adaptive_sampling': self.adaptive_check,
-                    'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check}
+                    'ignore_normals_mode': self.ignore_normals_entry, 'lightmap_32bit': self.lightmap_32bit_check,
+                    'render_only_shadows': self.render_only_shadows_entry}
         for name in self.row_order:
             for widget in (row_labels.get(name), controls[name]):
                 if widget is None:
@@ -539,6 +551,7 @@ class App:
                                          self._device_value())
         settings.lightmap_32bit = self.lightmap_32bit_var.get()
         settings.adaptive_sampling = self.adaptive_var.get()
+        settings.render_only_shadows = dict(presets.RENDER_ONLY_SHADOWS)[self.render_only_shadows_var.get()]
         settings.ignore_normals_mode = dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()]
         return runner.BakeRequest(self._tags, self._scenario, bsp, settings, self.new_names_var.get(),
                                   verbose=self.verbose_var.get(), backups=self.backups_var.get(),
@@ -557,6 +570,7 @@ class App:
             preset=self.preset_var.get(), new_names=self.new_names_var.get(), advanced=advanced,
             backups=self.backups_var.get(), lightmap_32bit=self.lightmap_32bit_var.get(),
             adaptive_sampling=self.adaptive_var.get(),
+            render_only_shadows=dict(presets.RENDER_ONLY_SHADOWS)[self.render_only_shadows_var.get()],
             ignore_normals_mode=dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()],
             advanced_open=self._advanced_open,
             verbose=self.verbose_var.get(), device=self._device_value(), keep_bakes=self.keep_var.get(),
@@ -588,6 +602,11 @@ class App:
     def _ignore_normals_label(mode):
         labels = {value: label for label, value in presets.IGNORE_NORMALS}
         return labels.get(mode, labels['tool'])
+
+    @staticmethod
+    def _render_only_label(value):
+        labels = {value: label for label, value in presets.RENDER_ONLY_SHADOWS}
+        return labels.get(value, labels['bump_alpha'])
 
     @staticmethod
     def _device_label(value):

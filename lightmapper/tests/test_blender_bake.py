@@ -39,7 +39,7 @@ def wall_x(x, y0, y1, z0, z1):
 
 def build(receivers, occluders=()):
     """Receivers and occluders are dicts of a quad plus page, cls, casts, emission, texture, cutout."""
-    cols = {k: [] for k in ('p', 'lm', 'tex', 'nrm', 'tris', 'page', 'cls', 'casts', 'emit', 'texture', 'cut', 'tint', 'ignore')}
+    cols = {k: [] for k in ('p', 'lm', 'tex', 'nrm', 'tris', 'page', 'cls', 'casts', 'emit', 'texture', 'cut', 'tint', 'ignore', 'through')}
     base = 0
     for r in receivers:
         p, lm, tex, nrm = r['quad']
@@ -57,6 +57,7 @@ def build(receivers, occluders=()):
             cols['texture'].append(r.get('texture', -1))
             cols['cut'].append(r.get('cutout', False))
             cols['ignore'].append(r.get('ignore_normals', False))
+            cols['through'].append(r.get('pass_through', False))
         base += len(p)
     o = {k: [] for k in ('p', 'uv', 'tris', 'texture', 'cut', 'casts', 'emit', 'tint')}
     base = 0
@@ -88,6 +89,7 @@ def build(receivers, occluders=()):
         query_pos=np.float32([[0, 0, 0]]), query_normal=np.float32([[0, 0, 1]]),
         query_class=np.int16([0]),
         tri_ignore_normals=np.bool_(cols['ignore']) if any(cols['ignore']) else None,
+        tri_pass_through=np.bool_(cols['through']) if any(cols['through']) else None,
     )
 
 
@@ -357,6 +359,41 @@ def image_probe(tmp_path, blender_exe, samples=32):
         env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
     assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
     return np.load(tmp_path / 'probe.npz')
+
+
+def run_visibility_driver(tmp_path, blender_exe, receivers):
+    s = Settings(samples=8, vertex_rays=1)
+    write_job(tmp_path, build(receivers), [(16, 16), (16, 16)], [sun()], {}, s)
+    done = subprocess.run(
+        [str(blender_exe), '-b', '--factory-startup', '--python-exit-code', '1', '--python',
+         str(Path(__file__).with_name('visibility_driver.py')), '--', str(tmp_path)],
+        capture_output=True, text=True, stdin=subprocess.DEVNULL,
+        env=dict(os.environ, LIGHTMAPPER_BAKE_DIR=str(BAKE_SCRIPT.parent)))
+    assert done.returncode == 0, done.stdout[-3000:] + done.stderr[-1000:]
+    return json.loads((tmp_path / 'visibility.json').read_text())
+
+
+@pytest.mark.blender
+def test_pass_through_receiver_gets_its_own_object_that_no_ray_sees(tmp_path, blender_exe):
+    glass = dict(casts=False, tint=(.5, .5, .5))
+    out = run_visibility_driver(tmp_path, blender_exe, [
+        dict(quad=floor(0, 4, 0, 4), **glass),
+        dict(quad=floor(10, 14, 0, 4), pass_through=True, **glass),
+        dict(quad=floor(20, 24, 0, 4))])
+    by_x = {round(o['min_x']): o for o in out['objects']}
+    assert len(out['objects']) == 2
+    through, plain = by_x[10], by_x[0]
+    for name in ('visible_diffuse', 'visible_glossy', 'visible_transmission', 'visible_shadow'):
+        assert through[name] is False
+    assert through['visible_camera'] is True
+    assert plain['visible_diffuse'] and plain['visible_shadow']
+
+
+@pytest.mark.blender
+def test_pass_through_receiver_still_bakes_its_own_texels(tmp_path):
+    result = bake(tmp_path, [dict(quad=floor(0, 4, 0, 4), pass_through=True, casts=False),
+                             dict(quad=floor(10, 14, 0, 4), page=1)], [sun()], pages=((16, 16), (16, 16)))
+    assert result.pages[0][2:-2, 2:-2].mean() > 0.5
 
 
 @pytest.mark.blender
@@ -1796,3 +1833,11 @@ def test_an_atlas_plan_without_slots_is_a_page_bake(bake_module, monkeypatch, ca
     inputs = types.SimpleNamespace(scene={}, two_sided=None)
     assert bake_module.atlas_tier(0, None, inputs, None, None, 4, 4) is None
     assert 'atlas tier 0: page bake (no slots)' in capsys.readouterr().out
+
+
+@pytest.mark.blender
+def test_emit_only_source_lights_a_floor_and_leaves_the_sun_unshadowed(tmp_path):
+    glow = dict(quad=floor(-100, 100, -100, 100, z=1, up=False), casts=False, emission=(4, 4, 4))
+    bare = bake(tmp_path / 'bare', [full_quad()], [sun()]).pages[0]
+    lit = bake(tmp_path / 'lit', [full_quad()], [sun()], occluders=[glow]).pages[0]
+    assert lit[2:-2, 2:-2].mean() > bare[2:-2, 2:-2].mean() * 1.2

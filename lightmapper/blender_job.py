@@ -66,6 +66,8 @@ class Scene:
     query_class: np.ndarray
     query_inverse: np.ndarray | None = None
     tri_ignore_normals: np.ndarray | None = None
+    # a lit receiver no ray of any kind may meet (render-only with the setting off, and water): it only takes light
+    tri_pass_through: np.ndarray | None = None
     query_ignore_normals: np.ndarray | None = None
     texel_pos: np.ndarray | None = None
     texel_normal: np.ndarray | None = None
@@ -85,7 +87,7 @@ _DTYPES = {
     'occ_tri_emission': np.float32, 'occ_tri_tint': np.float32,
     'query_pos': np.float32, 'query_normal': np.float32, 'query_class': np.int16,
     'query_inverse': np.int32,
-    'tri_ignore_normals': np.bool_, 'query_ignore_normals': np.bool_,
+    'tri_ignore_normals': np.bool_, 'tri_pass_through': np.bool_, 'query_ignore_normals': np.bool_,
     'texel_pos': np.float32, 'texel_normal': np.float32, 'texel_class': np.int16,
     'texel_page': np.int16, 'texel_xy': np.int32, 'occ_tri_owner': np.int32,
 }
@@ -162,7 +164,8 @@ def write_job(work: Path, scene: Scene, pages: list, suns: list, ambient: dict,
 
     arrays = {f.name: np.ascontiguousarray(getattr(scene, f.name), _DTYPES[f.name])
               for f in fields(Scene) if getattr(scene, f.name) is not None}
-    for name, count in (('tri_ignore_normals', len(scene.tris)), ('query_ignore_normals', len(scene.query_pos))):
+    for name, count in (('tri_ignore_normals', len(scene.tris)), ('tri_pass_through', len(scene.tris)),
+                        ('query_ignore_normals', len(scene.query_pos))):
         if name not in arrays:
             arrays[name] = np.zeros(count, np.bool_)
     from .raster import texel_queries

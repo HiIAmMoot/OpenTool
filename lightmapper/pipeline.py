@@ -140,13 +140,21 @@ def scene_lights(scenario: Tag, tags: Path, bsp_index: int, bsp_tag: Tag) -> tup
     return lights, counts
 
 
-def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scenery_emission=True):
+def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scenery_emission=True,
+           render_only_shadows='bump_alpha'):
     textures = TextureSet(tags)
     shaders = [shader_texture(tags, *group.key[:2]) for group in geometry.groups]
     texture_ids = [textures.texture_of(shader) for shader in shaders]
     envs, lm_uvs, tex_uvs, triangles = [], [], [], []
     tri_pages, tri_classes, shadows, emissions, tex_ids, cutouts, tints = [], [], [], [], [], [], []
     ignore_normals = []
+    surface_count = 1 + max((int(m.surface_ids.max()) for page in pages for m in page.materials if len(m.surface_ids)),
+                            default=-1)
+    # (a geometry built without the leaf link, as some tests do, has no render-only surfaces)
+    render_only = geometry.render_only if len(geometry.render_only) else np.zeros(surface_count, np.bool_)
+    tri_through = []
+    water_warned = set()
+    bump_variants = {}
     base = 0
     for p, page in enumerate(pages):
         for material in page.materials:
@@ -163,13 +171,37 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
             tri_pages.append(np.full(count, p, np.int16))
             tri_classes.append(classes[material.surface_ids])
             ignore_normals.append(np.full(count, bool(radiosity[group].flags & IGNORE_NORMALS), np.bool_))
-            shadows.append(np.full(count, shader.casts_shadow, np.bool_))
-            emissions.append(np.tile(emission(radiosity[group]), (count, 1)))
-            tex_ids.append(np.full(count, texture_ids[group], np.int32))
-            cutouts.append(np.full(count, shader.cutout, np.bool_))
+            # (a render-only triangle stays a lit receiver on its page; with the setting off no ray meets it, as the
+            # vertex passes already let non-casting triangles through, so it does not bounce light either, which tool
+            # may: a known small difference)
+            only = render_only[material.surface_ids]
+            blocks = (render_only_shadows != 'none') | ~only
+            water = group_key[0] == 'swat'
+            if water and group_key[1] not in water_warned:
+                water_warned.add(group_key[1])
+                logger.warning('%s: a water shader on a lit page is kept as an invisible receiver only for layout',
+                               group_key[1])
+            shadows.append(shader.casts_shadow & blocks)
+            lit_emission = emission(radiosity[group])
+            emissions.append(np.tile(lit_emission, (count, 1)))
+            # (an emitter stays visible so that it still lights others; water never blocks, which its shader's
+            # missing shadow and tint already give)
+            tri_through.append(np.zeros(count, np.bool_) if lit_emission.any() else
+                               np.ones(count, np.bool_) if water else np.broadcast_to(~blocks, count))
+            tested = only & (render_only_shadows == 'bump_alpha') & (group_key[0] == 'senv')
+            if tested.any():
+                if group not in bump_variants:
+                    variant = shader_texture(tags, *group_key[:2], bump_alpha=True)
+                    bump_variants[group] = (textures.texture_of(variant), variant.cutout)
+                variant_texture, variant_cutout = bump_variants[group]
+            else:
+                variant_texture, variant_cutout = texture_ids[group], shader.cutout
+            tex_ids.append(np.where(tested, variant_texture, texture_ids[group]).astype(np.int32))
+            cutouts.append(np.where(tested, variant_cutout, shader.cutout))
             # (a solid surface blocks outright, so only a see-through one keeps its shader's tint)
+            # (a render-only triangle that does not block lets all light through, tinted or not)
             see_through = group_key[0] in TRANSPARENT_GROUPS and not shader.casts_shadow
-            tints.append(np.tile(radiosity[group].tint if see_through else np.ones(3), (count, 1)))
+            tints.append(np.where((see_through & blocks)[:, None], radiosity[group].tint, 1.0))
 
     def join(items, shape, dtype):
         return np.concatenate(items).astype(dtype, copy=False) if items else np.empty(shape, dtype)
@@ -229,7 +261,8 @@ def _scene(tags, scenario, bsp_index, geometry, pages, radiosity, classes, scene
         occ_tri_tint=join([np.ones((scenery_count, 3)), *emit_tints], (0, 3), np.float32),
         occ_tri_owner=join([occluders.tri_owner, np.full(emit_count, -1, np.int32)], (0,), np.int32),
         query_pos=pos, query_normal=normal, query_class=query_class, query_inverse=inverse,
-        tri_ignore_normals=tri_ignore_normals, query_ignore_normals=query_ignore_normals)
+        tri_ignore_normals=tri_ignore_normals, query_ignore_normals=query_ignore_normals,
+        tri_pass_through=join(tri_through, (0,), np.bool_))
     return scene, inverse, textures
 
 
@@ -310,7 +343,7 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
     pages = _charts(input_file, geometry, radiosity, s, Path(charts))
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
-                         s.scenery_emission)
+                         s.scenery_emission, s.render_only_shadows)
     # (no GPU probe: the setting alone says whether the CPU constants apply)
     return _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
 
@@ -446,7 +479,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         check, lights, light_counts = None, [], {}
     else:
         scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
-                                          s.scenery_emission)
+                                          s.scenery_emission, s.render_only_shadows)
         sizes = [(p.width, p.height) for p in pages]
         machine = memory.read_machine()
         stages_in = stage_inputs(_scene_estimate(scene, pages, 'cpu' if choice.setting == 'cpu' else 'gpu'),

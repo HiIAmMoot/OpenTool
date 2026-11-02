@@ -78,6 +78,11 @@ def tiny(tmp_path, monkeypatch):
     surfaces[0].body[:] = struct.pack('>3H', 0, 1, 2)
     surfaces[1].body[:] = struct.pack('>3H', 3, 4, 5)
     bsp.root.set_block('surfaces', surfaces)
+    refs = [child(bsp.root, 'leaf_surfaces') for _ in range(2)]
+    for index, ref in enumerate(refs):
+        ref.set('surface', index)
+        ref.set('node', 0)
+    bsp.root.set_block('leaf_surfaces', refs)
     put(tags, 'scnr', 'level', scenario)
     put(tags, 'sbsp', 'room', bsp)
     put(tags, 'senv', 'wall', shader)
