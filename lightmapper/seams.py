@@ -206,8 +206,13 @@ def stitch_seams(pages, images, joined_groups=()):
     for p in np.unique(owners):
         mine = owners == p
         values[mine] = images[p].reshape(-1, 3)[pixel[mine] - offsets[p]]
-    for channel in range(3):
-        correction = lsqr(weighted, -(matrix @ values[:, channel]), atol=1e-8, btol=1e-8, iter_lim=200)[0]
+    from concurrent.futures import ThreadPoolExecutor
+
+    def solve(channel):
+        return lsqr(weighted, -(matrix @ values[:, channel]), atol=1e-8, btol=1e-8, iter_lim=200)[0]
+    with ThreadPoolExecutor(3) as pool:
+        corrections = list(pool.map(solve, range(3)))
+    for channel, correction in enumerate(corrections):
         values[:, channel] += correction * scale
     for p in np.unique(owners):
         mine = owners == p
