@@ -1756,6 +1756,11 @@ def _leave(app):
     pump(app.window, lambda: app._leave_timer is None)
 
 
+def test_the_32_bit_text_names_file_size_and_texture_memory():
+    assert 'file size' in examples.IDLE_HINTS['lightmap_32bit']
+    assert 'texture memory' in examples.IDLE_HINTS['lightmap_32bit']
+
+
 def test_every_row_shows_a_grey_explanation_when_idle(app):
     app._toggle_advanced()
     # (adaptive sampling's hint replaces the samples row's explanation while it is on)
@@ -1875,13 +1880,58 @@ def test_hovering_a_row_shows_its_example(app):
     assert app.example_image_label.cget('image')
 
 
-def test_hover_wins_over_focus_and_leaving_falls_back(app):
+def test_a_focused_row_wins_over_hover_until_focus_leaves(app):
     app._on_example_focus('samples')
     app._on_example_hover('bounces')
-    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     app._on_example_hover(None)
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
     app._on_example_focus(None)
+    assert app.example_panel.winfo_manager() == ''
+
+
+def test_focus_leaving_while_the_mouse_is_on_another_row_shows_that_row(app):
+    app._on_example_focus('samples')
+    app._on_example_hover('bounces')
+    app._on_example_focus(None)
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
+
+
+def _popdown(app, name):
+    return str(app.window.tk.call('ttk::combobox::PopdownWindow', str(app.advanced_entries[name])))
+
+
+def test_an_open_dropdown_keeps_its_preview(app):
+    app._toggle_advanced()
+    app.window.update()
+    popdown = _popdown(app, 'texels_per_unit')
+    app.advanced_entries['texels_per_unit'].event_generate('<Enter>')
+    app.window.tk.call('event', 'generate', popdown, '<Map>')
+    # (the popdown is a toplevel: the combobox sees a leave and loses focus when it opens)
+    app._on_example_focus(None)
+    app._on_example_hover(None)
+    app._on_example_hover('bounces')
+    app._on_row_leave()
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['texels_per_unit']
+    app.advanced_entries['bounces'].event_generate('<Enter>')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['texels_per_unit']
+    app.window.tk.call('event', 'generate', popdown, '<Unmap>')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['bounces']
+    app._on_example_hover(None)
+    assert app.example_panel.winfo_manager() == ''
+
+
+def test_a_field_with_focus_keeps_its_preview_against_real_hover_events(app):
+    app._toggle_advanced()
+    app.window.update()
+    entry = app.advanced_entries['samples']
+    entry.event_generate('<FocusIn>')
+    app.advanced_entries['bounces'].event_generate('<Enter>')
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    app.advanced_entries['bounces'].event_generate('<Leave>')
+    pump(app.window, lambda: app._leave_timer is None)
+    assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
+    entry.event_generate('<FocusOut>')
     assert app.example_panel.winfo_manager() == ''
 
 

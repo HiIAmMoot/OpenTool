@@ -17,7 +17,7 @@ IDLE_HINTS = {
     'page_max': 'The largest lightmap page. Bigger fits more of the level.',
     'render_only_shadows': 'Shadows of no-collision surfaces, like a sea plane.',
     'adaptive_sampling': 'Stops casting rays at a clean texel. Faster.',
-    'lightmap_32bit': 'No banding, but twice the space.',
+    'lightmap_32bit': 'No banding, but twice the file size and texture memory.',
 }
 
 EXAMPLE_TEXT = {
@@ -27,7 +27,7 @@ EXAMPLE_TEXT = {
     'bounces': 'How often light bounces between surfaces. More light reaches the shade.',
     'page_max': 'The largest lightmap page. Bigger pages fit more of the level on each.',
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',
-    'lightmap_32bit': '32-bit pages show no banding but take twice the space.',
+    'lightmap_32bit': '32-bit pages show no banding but take twice the file size and texture memory.',
     'render_only_shadows': "How surfaces with no collision under them, such as a sea plane, shadow what lies beneath. By bump alpha tests them by their shader's bump map, Solid blocks all light, None lets it all through as tool does.",
 }
 

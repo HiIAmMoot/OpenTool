@@ -64,6 +64,7 @@ class App:
         self._example_hover = None
         self._example_focus = None
         self._leave_timer = None
+        self._dropdown_open = None
         self.generation = 0
         self.estimate_state = 'idle'
         self._estimate_inputs: EstimateInputs | None = None
@@ -264,6 +265,9 @@ class App:
                 widget.bind('<Leave>', lambda _event: self._on_row_leave(), add='+')
             controls[name].bind('<FocusIn>', lambda _event, name=name: self._on_example_focus(name), add='+')
             controls[name].bind('<FocusOut>', lambda _event: self._on_example_focus(None), add='+')
+        for name, widget in controls.items():
+            if isinstance(widget, ttk.Combobox):
+                self._watch_popdown(name, widget)
         self.advanced_error = ttk.Label(self.advanced_frame, foreground='red')
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
         self.adaptive_var.trace_add('write', lambda *_args: self._update_row_hints())
@@ -644,6 +648,13 @@ class App:
             self._setting_preset = False
         self._inputs_changed()
 
+    def _watch_popdown(self, name, combobox):
+        # (the popdown is a toplevel Tk creates itself, so it has no Python widget to bind: the combobox loses focus and the pointer leaves it when it opens)
+        popdown = str(self.window.tk.call('ttk::combobox::PopdownWindow', str(combobox)))
+        for event, shown in (('<Map>', True), ('<Unmap>', False)):
+            command = self.window.register(lambda name=name, shown=shown: self._on_dropdown(name, shown))
+            self.window.tk.call('bind', popdown, event, '+' + command)
+
     def _on_row_enter(self, name: str):
         if self._leave_timer is not None:
             self.window.after_cancel(self._leave_timer)
@@ -676,9 +687,8 @@ class App:
         if self.example_panel.winfo_manager() == 'place':
             self._show_example()
 
-    def _show_example(self):
-        name = self._example_hover or self._example_focus
-        if name is not None and name not in self._example_images:
+    def _example_frames(self, name):
+        if name not in self._example_images:
             frames = []
             for path in examples.example_frames(name, self._examples_dir):
                 try:
@@ -690,9 +700,16 @@ class App:
                 except (OSError, ValueError):
                     pass
             self._example_images[name] = frames
-        if name is not None and not self._example_images[name]:
-            # (a row with no image leaves the grey explanations showing: its own would only repeat its explanation)
-            name = None
+        return self._example_images[name]
+
+    def _on_dropdown(self, name: str, shown: bool):
+        self._dropdown_open = name if shown else None
+        self._show_example()
+
+    def _show_example(self):
+        # (an open dropdown or a focused field holds the preview: the mouse passing over other rows must not switch it)
+        name = next((candidate for candidate in (self._dropdown_open, self._example_focus, self._example_hover)
+                     if candidate is not None and self._example_frames(candidate)), None)
         if name is None:
             self._stop_example_loop()
             self._example_name = None
