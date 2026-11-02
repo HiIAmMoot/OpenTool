@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 
-from test_subtexels import bake_module
 from test_blender_bake import bake, floor, quad, sun
 
 
