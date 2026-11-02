@@ -874,3 +874,88 @@ def test_sun_ray_blocks_are_sun_rays_cut_into_blocks_of_one_sun(limit):
     assert len(blocks) >= (-(-count // limit) if limit < count else 3)
     for part, whole_part in zip(zip(*blocks), whole):
         assert np.concatenate(part).tobytes() == whole_part.tobytes()
+
+
+def scene_arrays_inputs(tmp_path):
+    arrays, _ = scene_folder(tmp_path, 3, [sun((0.2, 0.1, 1.0))])
+    rng = np.random.default_rng(11)
+    textures = [rng.integers(0, 256, (3, 4, 4), dtype=np.uint8), rng.integers(0, 256, (2, 5, 4), dtype=np.uint8)]
+    pages = [rng.random((4, 6, 3)).astype(np.float32), rng.random((3, 3, 3)).astype(np.float32)]
+    sources = [rng.random((12, 18, 3)).astype(np.float32), None, rng.random((9, 9, 3)).astype(np.float32)]
+    return arrays, textures, pages, sources
+
+
+def test_scene_arrays_join_their_texels_to_the_bytes_np_concatenate_gives(tmp_path):
+    scene, textures, pages, sources = scene_arrays_inputs(tmp_path)
+    wanted_flagged = np.concatenate([np.zeros((1, 3), np.float32) if p is None else p.reshape(-1, 3)
+                                     for p in sources])
+    wanted_textures = np.concatenate([(t.astype(np.float32) / 255.0).reshape(-1, 4) for t in textures])
+    wanted_pages = np.concatenate([p.reshape(-1, 3) for p in pages])
+    wanted_info = {'texture_info': [[0, 4, 3, 0], [12, 5, 2, 0]], 'page_info': [[0, 6, 4, 0], [24, 3, 3, 0]],
+                   'flagged_info': [[0, 18, 12, 0], [216, 1, 1, 0], [217, 9, 9, 0]]}
+    got = vertex_gpu._scene_arrays(scene, textures, pages, False, list(sources))
+    for name, want in (('flagged_texels', wanted_flagged), ('texture_texels', wanted_textures),
+                       ('page_texels', wanted_pages)):
+        assert got[name].dtype == np.float32 and got[name].shape == want.shape and got[name].tobytes() == want.tobytes()
+    for name, want in wanted_info.items():
+        assert got[name].tolist() == want
+    empty = vertex_gpu._scene_arrays(scene, [], [], False, None)
+    assert empty['texture_texels'].shape == (0, 4) and empty['page_texels'].shape == (0, 3)
+    assert empty['flagged_texels'].shape == (0, 3)
+
+
+def test_scene_arrays_let_go_of_each_flagged_page_as_it_is_copied(tmp_path):
+    import weakref
+    scene, textures, pages, sources = scene_arrays_inputs(tmp_path)
+    refs = [None if p is None else weakref.ref(p) for p in sources]
+    seen = []
+
+    class Watched(list):
+        def __setitem__(self, index, value):
+            super().__setitem__(index, value)
+            seen.append([ref is not None and ref() is None for ref in refs])
+    held = Watched(sources)
+    del sources
+    vertex_gpu._scene_arrays(scene, textures, pages, False, held)
+    # (a page is gone as soon as its copy is made: at step i, pages up to i are released and the later ones still held)
+    assert seen[0][0] and not seen[0][2]
+    assert seen[-1][0] and seen[-1][2]
+
+
+@pytest.mark.parametrize('calls', [1, 2])
+def test_the_bounce_gathers_hold_no_host_copy_of_the_uploaded_arrays(tmp_path, vendor, device, monkeypatch, calls):
+    scene, job = scene_folder(tmp_path, 4, [sun((0.2, 0.1, 1.0))])
+    pages = [np.full((16, 16, 3), .5, np.float32)]
+    arrays = vertex_gpu._scene_arrays(scene, [], pages, False, [np.ones((48, 48, 3), np.float32)])
+    table = np.zeros_like(vertex_gpu.ambient_table(job, scene['query_class'], arrays['class_of']))
+    held = []
+    real = vertex_gpu._dispatch
+
+    def watching(kernel, count, **kwargs):
+        frame = sys._getframe(1)
+        while frame:
+            mine = frame.f_locals.get('arrays')
+            if isinstance(mine, dict):
+                held.append(sorted(k for k in ('flagged_texels', 'texture_texels', 'page_texels')
+                                   if isinstance(mine.get(k), np.ndarray)))
+            frame = frame.f_back
+        return real(kernel, count, **kwargs)
+    monkeypatch.setattr(vertex_gpu, '_dispatch', watching)
+    ids = np.arange(len(scene['query_pos']))
+    local, phi, r = vertex_gpu.sphere(16)
+    outs = []
+    for _ in range(calls):
+        out = np.zeros((len(ids), 3))
+
+        def reduce(rows, value, hemi, solid_angle, out=out):
+            out[rows] = value.sum(axis=1)
+        n, t, b, spin = (np.float64([[0, 0, 1]] * len(ids)), np.float64([[1, 0, 0]] * len(ids)),
+                         np.float64([[0, 1, 0]] * len(ids)), np.zeros(len(ids)))
+        batches = [((phi, r, local[:, 2]), (ids, scene['query_pos'].astype(np.float64), n, t, b, spin,
+                                          np.zeros(len(ids), np.int64)), 4.)]
+        vertex_gpu._trace(device, arrays, table, dict(job, vertex_rays=16), batches,
+                          (np.empty((0, 3)), np.empty((0, 3))), reduce, rgb=True)
+        outs.append(out)
+    assert held and all(not names for names in held), held
+    if calls == 2:
+        assert outs[0].tobytes() == outs[1].tobytes()

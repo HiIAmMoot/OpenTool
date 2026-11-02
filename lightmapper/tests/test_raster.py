@@ -309,3 +309,27 @@ def test_the_owner_map_a_caller_holds_is_not_computed_again(monkeypatch):
     raster.flagged_source(scene, 0, 8, 6, rgb, owner=owner)
     for have, expected in zip(got, want):
         np.testing.assert_array_equal(have, expected)
+
+
+def _old_ordinary_transport(scene, page, base):
+    height, width = base.shape[:2]
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    owner, _ = api().triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    owned = (owner >= 0).reshape(height, 3, width, 3).sum(axis=(1, 3))
+    xy = scene['texel_xy'][scene['texel_page'] == page] // 3
+    flagged = np.zeros((height, width), np.int64)
+    np.add.at(flagged, (xy[:, 1], xy[:, 0]), 1)
+    ordinary = owned - flagged
+    scale = np.where(flagged > 0, owned / np.maximum(ordinary, 1) * (ordinary > 0), 1.0)
+    return base * scale[:, :, None]
+
+
+@pytest.mark.parametrize('page', [0, 1, 2])
+def test_ordinary_transport_in_float32_is_the_float64_product_rounded_once(page):
+    scene = flagged_scene()
+    base = np.random.default_rng(5).random((6, 8, 3)).astype(np.float32)
+    old = _old_ordinary_transport(scene, page, base)
+    assert old.dtype == np.float64
+    np.testing.assert_array_equal(api().ordinary_transport(scene, page, base), old)
+    narrow = api().ordinary_transport(scene, page, base, np.float32)
+    assert narrow.dtype == np.float32 and narrow.tobytes() == old.astype(np.float32).tobytes()

@@ -100,8 +100,9 @@ def flagged_transport(scene, page, width, height, rgb):
     return flagged_subtexels((3 * height, 3 * width), scene['texel_xy'][chosen], rgb[chosen])
 
 
-def ordinary_transport(scene, page, base):
-    """The baked page over its ordinary sub-texels alone (the flagged ones bake black)."""
+def ordinary_transport(scene, page, base, dtype=None):
+    """The baked page over its ordinary sub-texels alone (the flagged ones bake black); dtype rounds the float64
+    product once (the GPU pass uploads float32, so it need not hold the float64 page)."""
     height, width = base.shape[:2]
     rows = np.flatnonzero(scene['tri_page'] == page)
     owner, _ = triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
@@ -111,7 +112,8 @@ def ordinary_transport(scene, page, base):
     np.add.at(flagged, (xy[:, 1], xy[:, 0]), 1)
     ordinary = owned - flagged
     scale = np.where(flagged > 0, owned / np.maximum(ordinary, 1) * (ordinary > 0), 1.0)
-    return base * scale[:, :, None]
+    product = base * scale[:, :, None]
+    return product if dtype is None else product.astype(dtype)
 
 
 def texel_ray_counts(scene, pages, base, target):

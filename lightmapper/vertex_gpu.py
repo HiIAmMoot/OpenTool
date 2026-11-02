@@ -259,6 +259,22 @@ def _read(device, buffer, dtype):
     return buffer.to_numpy().view(dtype)
 
 
+def _joined(shapes, columns, image, release=None):
+    """image(i)'s rows for every shape, one after another in one float32 buffer filled an image at a time
+    (np.concatenate holds every part beside the result); release(i) follows each copy."""
+    if not shapes:
+        return np.empty((0, columns))
+    offsets = np.cumsum([0] + [shape[0] * shape[1] for shape in shapes])
+    joined = np.empty((offsets[-1], columns), np.float32)
+    for i in range(len(shapes)):
+        part = image(i)
+        joined[offsets[i]:offsets[i + 1]] = part.reshape(-1, columns)
+        del part
+        if release:
+            release(i)
+    return joined
+
+
 def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
     """The triangles of the receivers then the occluders as the arrays the shader reads (one triangle id space);
     flagged_pages, when given, are what flagged hits read in place of pages (a None entry reads black)."""
@@ -279,15 +295,22 @@ def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
     owner = np.concatenate([np.full(n_recv, -1), scene.get('occ_tri_owner', np.full(n_occ, -1))]).astype(np.int32)
     info = np.stack([np.concatenate([scene['tri_texture'], scene['occ_tri_texture']]), flags,
                      np.concatenate([scene['tri_page'], np.full(n_occ, -1)]), class_of], axis=1)
-    texels = [(np.asarray(t, np.float32) / 255.0).reshape(-1, 4) for t in textures]
-    page_texels = [np.asarray(p, np.float32).reshape(-1, 3) for p in pages]
-    flagged = [np.zeros((1, 1, 3), np.float32) if p is None else np.asarray(p, np.float32)
-               for p in (flagged_pages or [])]
-    flagged_texels = [p.reshape(-1, 3) for p in flagged]
+    flagged_shapes = [(1, 1, 3) if p is None else np.shape(p) for p in (flagged_pages or [])]
+    texture_texels = _joined([np.shape(t) for t in textures], 4, lambda i: (np.asarray(textures[i], np.float32) / 255.0))
+    page_texels = _joined([np.shape(p) for p in pages], 3, lambda i: np.asarray(pages[i], np.float32))
 
-    def table(images, flat):
-        offsets = np.cumsum([0] + [len(a) for a in flat])[:len(flat)]
-        return np.array([[o, im.shape[1], im.shape[0], 0] for o, im in zip(offsets, images)], np.int32).reshape(-1, 4)
+    def flagged_page(i):
+        return np.zeros((1, 1, 3), np.float32) if flagged_pages[i] is None else np.asarray(flagged_pages[i], np.float32)
+
+    def release_flagged_page(i):
+        # (the caller's list gives up each page once copied: it is rebuilt for every bounce and not read after the pass)
+        flagged_pages[i] = None
+    flagged_texels = (_joined(flagged_shapes, 3, flagged_page, release_flagged_page) if flagged_pages
+                      else np.empty((0, 3)))
+
+    def table(shapes):
+        offsets = np.cumsum([0] + [shape[0] * shape[1] for shape in shapes])[:len(shapes)]
+        return np.array([[o, shape[1], shape[0], 0] for o, shape in zip(offsets, shapes)], np.int32).reshape(-1, 4)
     return dict(
         positions=positions, tris=tris, info=info, class_of=class_of, owner=owner,
         twin=scene['tri_twin'], twin_perm=scene['tri_twin_perm'],
@@ -295,11 +318,9 @@ def _scene_arrays(scene, textures, pages, enhanced=False, flagged_pages=None):
         normal=np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
         tex_uv=np.concatenate([scene['tex_uv'], scene['occ_uv']]),
         lm_uv=np.concatenate([scene['lm_uv'], np.zeros((len(scene['occ_positions']), 2))]),
-        texture_info=table(textures, texels), texture_texels=np.concatenate(texels) if texels else np.empty((0, 4)),
-        page_info=table(pages, page_texels),
-        page_texels=np.concatenate(page_texels) if page_texels else np.empty((0, 3)),
-        flagged_info=table(flagged, flagged_texels),
-        flagged_texels=np.concatenate(flagged_texels) if flagged_texels else np.empty((0, 3)),
+        texture_info=table([np.shape(t) for t in textures]), texture_texels=texture_texels,
+        page_info=table([np.shape(p) for p in pages]), page_texels=page_texels,
+        flagged_info=table(flagged_shapes), flagged_texels=flagged_texels,
         with_flagged_source=flagged_pages is not None)
 
 
@@ -379,6 +400,11 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, 
         raise GpuPassError(f'gather: vertex_rays {rays} exceeds the dispatch cap {cap}')
     with _stage('upload'):
         vertices = _upload(device, arrays['positions'], np.float32)
+        # (the host copies go as they are uploaded; the buffers stay in arrays for the next call on the same arrays)
+        held = arrays.setdefault('uploaded', {})
+        for name in ('texture_texels', 'page_texels', 'flagged_texels'):
+            if name not in held:
+                held[name] = _upload(device, arrays.pop(name), np.float32)
         indices = _upload(device, arrays['tris'].reshape(-1), np.uint32)
         shared = dict(
             tri_info=_upload(device, arrays['info'], np.int32), tri_tint=_upload(device, arrays['tint'], np.float32),
@@ -390,11 +416,11 @@ def _trace(device, arrays, table, job, batches, shadow_rays, reduce, rgb=False, 
             vertex_tex_uv=_upload(device, arrays['tex_uv'], np.float32),
             vertex_lm_uv=_upload(device, arrays['lm_uv'], np.float32),
             texture_info=_upload(device, arrays['texture_info'], np.int32),
-            texture_texels=_upload(device, arrays['texture_texels'], np.float32),
+            texture_texels=held['texture_texels'],
             page_info=_upload(device, arrays['page_info'], np.int32),
-            page_texels=_upload(device, arrays['page_texels'], np.float32),
+            page_texels=held['page_texels'],
             flagged_info=_upload(device, arrays['flagged_info'], np.int32),
-            flagged_texels=_upload(device, arrays['flagged_texels'], np.float32),
+            flagged_texels=held['flagged_texels'],
             with_flagged_source=arrays['with_flagged_source'],
             ambient=_upload(device, table, np.float32), ambient_rows=len(table), with_ambient=not rgb,
             with_pages=job.get('gather_pages', True), with_emission=job.get('gather_emission', True),
@@ -591,7 +617,7 @@ def _gather_texels(scene, job, textures, pages, device):
     casts += sun_ray_count + lamp_rays
     # (a mixed texel's average is output only: a flagged hit reads the flagged samples' light, an ordinary hit
     # the ordinary samples')
-    stable, sources = [ordinary_transport(scene, i, p) for i, p in enumerate(pages)], flagged(rgb)
+    stable, sources = [ordinary_transport(scene, i, p, np.float32) for i, p in enumerate(pages)], flagged(rgb)
     # cycles keeps its ordinary bounce depth; this bounds only flagged reflected stages, followed by one
     # terminal glow hop, so flagged paths may exceed bounces by one (not a global per-depth budget)
     for _ in range(max(0, int(job['bounces']))):
