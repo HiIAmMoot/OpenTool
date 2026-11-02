@@ -222,9 +222,12 @@ def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     assert estimate.counts == memory.SceneCounts(3, 9)
 
 
-def test_the_bake_reuses_the_layout_the_estimate_charted(tiny, monkeypatch, tmp_path):
+def test_the_estimate_charts_rectangles_and_keeps_its_own_cache(tiny, monkeypatch, tmp_path):
+    # (the estimate skips the nest for speed; a cache of its own keeps an estimate after a bake, and a bake after
+    # an estimate, from charting again each time)
     tags, settings, work = tiny
     cache = tmp_path / 'charts.npz'
+    estimate_file = tmp_path / 'charts.estimate.npz'
     nested = []
     real = api().chart_and_pack
 
@@ -232,14 +235,13 @@ def test_the_bake_reuses_the_layout_the_estimate_charted(tiny, monkeypatch, tmp_
         nested.append(kwargs.get('nest'))
         return real(*args, **kwargs)
     monkeypatch.setattr(api(), 'chart_and_pack', spy)
-    estimate = api().estimate_scene(tags, 'level', 'room', settings, cache)
-    assert nested == [True] and cache.exists() and not (tmp_path / 'charts.estimate.npz').exists()
+    api().estimate_scene(tags, 'level', 'room', settings, cache)
+    assert nested == [False] and estimate_file.exists() and not cache.exists()
     api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
-    # (the bake found the estimate's layout under the same key, so it charted nothing)
-    assert nested == [True]
-    summary = json.loads((work / 'summary.json').read_text())
-    assert summary['bake_sizes'] == [list(size) for size in estimate.pages]
-
+    assert nested == [False, True] and cache.exists()
+    api().estimate_scene(tags, 'level', 'room', settings, cache)
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    assert nested == [False, True]
 
 def test_chart_cache_key_carries_auto_and_nest(tmp_path):
     from lightmapper.charts import ChartSettings

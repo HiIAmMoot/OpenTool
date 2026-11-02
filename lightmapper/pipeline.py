@@ -240,6 +240,11 @@ def _chart_settings(s: Settings) -> ChartSettings:
     return ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
 
 
+def _estimate_cache(cache: Path) -> Path:
+    # (a file of its own: in the bake's, the two layouts' keys would push each other out at every estimate and bake)
+    return cache.with_name(cache.stem + '.estimate' + cache.suffix)
+
+
 def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path, nest: bool) -> list:
     chart_s = _chart_settings(s)
     key = chart_cache_key(input_file, chart_s, radiosity, nest)
@@ -324,8 +329,10 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     geometry = read_geometry(bsp_tag)
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
     classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
-    # (the estimate charts the bake's own layout, nesting included, and leaves it in the cache the bake reads)
-    pages = _charts(input_file, geometry, radiosity, s, Path(charts), nest=True)
+    # (the estimate skips the nest, which is most of the charting time on a big level, so its Auto shape can differ
+    # from the bake's: larger where the nest gets within the page target, smaller where a nested block needs a
+    # square shape the rectangles do not; owner decision)
+    pages = _charts(input_file, geometry, radiosity, s, _estimate_cache(Path(charts)), nest=False)
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
     # (no GPU probe: the setting alone says whether the CPU constants apply)
