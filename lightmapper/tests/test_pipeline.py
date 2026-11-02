@@ -106,11 +106,15 @@ def tiny(tmp_path, monkeypatch):
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
 
 
+TINY_MACHINE = memory.Machine(1, 1, 1)
+BIG_MACHINE = memory.Machine(64 * memory.GB, 64 * memory.GB, 128 * memory.GB)
+
+
 def test_memory_guard_warns_and_starts_blender(tiny, monkeypatch, caplog):
     tags, settings, work = tiny
     calls = []
     blender = api().run_blender
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 1)
+    monkeypatch.setattr(memory, 'read_machine', lambda: TINY_MACHINE)
 
     def record(*args):
         calls.append(args)
@@ -120,10 +124,13 @@ def test_memory_guard_warns_and_starts_blender(tiny, monkeypatch, caplog):
     api().bake(tags, 'level', 'room', settings, work=work)
     assert len(calls) == 1 and (work / 'job.json').exists()
     summary = json.loads((work / 'summary.json').read_text())
-    message = memory.out_of_memory_message(memory.SceneCounts(2, 6), summary['sizes'], settings.page_max, 1)
+    message = memory.out_of_memory_message(
+        memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']]), settings.page_max,
+        TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
-    assert 'needs about 0.0 GB' in message and 'has 0.0 GB free' in message
+    assert 'will likely run out of memory' in message
+    assert summary['memory']['level'] == 'out_of_memory'
 
 
 def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
@@ -143,11 +150,11 @@ def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
     put(tags, 'scnr', 'level', scenario)
     seen = []
     check = memory.check_bake_memory
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 64 * memory.GB)
+    monkeypatch.setattr(memory, 'read_machine', lambda: BIG_MACHINE)
 
-    def spy(counts, pages, page_max):
-        seen.append((counts, pages, page_max))
-        return check(counts, pages, page_max)
+    def spy(inputs, page_max, machine):
+        seen.append((inputs.counts, inputs.pages, page_max))
+        return check(inputs, page_max, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
@@ -179,14 +186,14 @@ def place_scenery(tags):
 def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     tags, settings, work = tiny
     place_scenery(tags)
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 64 * memory.GB)
+    monkeypatch.setattr(memory, 'read_machine', lambda: BIG_MACHINE)
     estimate = api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
     seen = []
     check = memory.check_bake_memory
 
-    def spy(counts, pages, page_max):
-        seen.append((counts, pages))
-        return check(counts, pages, page_max)
+    def spy(inputs, page_max, machine):
+        seen.append((inputs.counts, inputs.pages))
+        return check(inputs, page_max, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
@@ -213,7 +220,6 @@ def test_estimate_starts_no_blender(tiny, monkeypatch, tmp_path):
 
     for name in ('run_blender', 'write_job'):
         monkeypatch.setattr(api(), name, refuse)
-    monkeypatch.setattr(gpu, 'probe_choice', refuse)
     estimate = api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
     assert estimate.pages
 
@@ -238,41 +244,72 @@ def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     tags, settings, work = tiny
     settings = replace(settings, texels_per_unit=2)
     before = {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()}
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: 1)
+    monkeypatch.setattr(memory, 'read_machine', lambda: TINY_MACHINE)
     out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
-    counts = memory.SceneCounts(2, 6)
-    pages = summary['sizes']
-    message = memory.out_of_memory_message(counts, pages, settings.page_max, 1)
+    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']])
+    message = memory.out_of_memory_message(inputs, settings.page_max, TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
-    assert summary['memory'] == {'estimate_gb': round(memory.bake_bytes(counts, pages) / memory.GB, 2),
-                                 'free_gb': round(1 / memory.GB, 2)}
     assert out.work == work
     assert {p: p.read_bytes() for p in tags.rglob('*') if p.is_file()} == before
 
 
-@pytest.mark.parametrize('free, tiles', [(64 * memory.GB, True), (1, False)])
-def test_pipeline_decides_tiles_from_free_memory(tiny, monkeypatch, free, tiles):
+@pytest.mark.parametrize('machine, tiles', [(BIG_MACHINE, True), (TINY_MACHINE, False)])
+def test_pipeline_decides_tiles_from_the_machine(tiny, monkeypatch, machine, tiles):
     tags, settings, work = tiny
     reads = []
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: reads.append(1) or free)
+    monkeypatch.setattr(memory, 'read_machine', lambda: reads.append(1) or machine)
     api().bake(tags, 'level', 'room', settings, work=work)
     assert len(reads) == 1
     assert json.loads((work / 'job.json').read_text())['whole_page_tiles'] is tiles
     assert json.loads((work / 'summary.json').read_text())['whole_page_tiles'] is tiles
 
 
-@pytest.mark.parametrize('free', [64 * memory.GB, None])
-def test_summary_records_the_memory_check(tiny, monkeypatch, free):
+@pytest.mark.parametrize('machine', [BIG_MACHINE, None])
+def test_summary_records_the_memory_check(tiny, monkeypatch, machine):
     tags, settings, work = tiny
     settings = replace(settings, texels_per_unit=2)
-    monkeypatch.setattr(memory, 'free_physical_bytes', lambda: free)
+    monkeypatch.setattr(memory, 'read_machine', lambda: machine)
     api().bake(tags, 'level', 'room', settings, work=work)
     summary = json.loads((work / 'summary.json').read_text())
-    estimate = memory.bake_bytes(memory.SceneCounts(2, 6), summary['sizes'])
-    assert summary['memory'] == {'estimate_gb': round(estimate / memory.GB, 2),
-                                 'free_gb': 64.0 if free is not None else None}
+    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']],
+                                whole_page_tiles=summary['whole_page_tiles'])
+    peak, size = memory.peak_bytes(inputs)
+    assert summary['memory'] == {
+        'peak_gb': round(size / memory.GB, 2), 'stage': peak, 'level': 'fits',
+        'stages_gb': {stage: round(n / memory.GB, 2) for stage, n in memory.stage_bytes(inputs).items()},
+        'ram_gb': 64.0 if machine else None, 'ceiling_gb': 128.0 if machine else None}
+    assert set(summary['memory']['stages_gb']) == {'blender', 'vertex', 'glow', 'finish'}
+
+
+def test_estimate_scene_counts_flagged_sub_texels_and_device():
+    from types import SimpleNamespace
+
+    scene = SimpleNamespace(tris=np.zeros((3, 3)), occ_tris=np.zeros((1, 3)), positions=np.zeros((4, 3)),
+                            occ_positions=np.zeros((2, 3)), tri_page=np.int16([0, 0, 1]),
+                            tri_ignore_normals=np.bool_([False, True, False]))
+    pages = [SimpleNamespace(width=4, height=2), SimpleNamespace(width=8, height=8)]
+    found = api()._scene_estimate(scene, pages, SimpleNamespace(setting='cpu'))
+    assert found == api().SceneEstimate(memory.SceneCounts(4, 6), [(4, 2), (8, 8)], 9 * 4 * 2, 'cpu')
+    scene.tri_ignore_normals = None
+    assert api()._scene_estimate(scene, pages, SimpleNamespace(setting='auto')).flagged_sub_texels == 0
+    assert api()._scene_estimate(scene, pages, SimpleNamespace(setting='auto')).device == 'gpu'
+    assert api()._scene_estimate(scene, pages, None).device == 'gpu'
+
+
+def test_estimate_scene_reads_the_device_from_the_probe(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    monkeypatch.setattr(gpu, 'probe_choice', lambda setting: gpu.choose('cpu', []))
+    assert api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz').device == 'cpu'
+
+
+@pytest.mark.parametrize('mode, glow', [('enhanced', 9 * 64 * 64), ('tool', 0)])
+def test_stage_inputs_count_the_glow_sub_texels_only_in_enhanced_mode(mode, glow):
+    estimate = api().SceneEstimate(memory.SceneCounts(1, 3), [(64, 64)], 9 * 64 * 64, 'gpu')
+    inputs = api().stage_inputs(estimate, mode, BIG_MACHINE)
+    assert (inputs.glow_sub_texels, inputs.whole_page_tiles, inputs.device) == (glow, True, 'gpu')
+    assert api().stage_inputs(estimate, mode, None).whole_page_tiles is False
 
 
 def cpu_info():

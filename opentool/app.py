@@ -11,7 +11,7 @@ from tkinter.scrolledtext import ScrolledText
 
 from lightmapper import blender_find, gpu, kept
 from lightmapper.errors import KeptBakeError
-from lightmapper.memory import free_physical_bytes
+from lightmapper.memory import read_machine
 from lightmapper.progress import STAGE_LABELS, fraction
 from . import devices, errors, estimate as estimate_module, examples, form, jobobject, presets, runner, usersettings
 from .estimate import EstimateInputs
@@ -253,6 +253,8 @@ class App:
         self.advanced_error.grid(row=len(self.row_order), column=0, columnspan=3, sticky='w')
         for value in (self.adaptive_var, self.ignore_normals_var):
             value.trace_add('write', lambda *_args: self._update_row_hints())
+        # (the glow stage's memory depends on the mode, so the estimate is read again)
+        self.ignore_normals_var.trace_add('write', lambda *_args: self._inputs_changed())
         self._update_row_hints()
 
         blender_row = ttk.Frame(self.frame)
@@ -415,7 +417,8 @@ class App:
         if len(values) != 2:
             return None
         return EstimateInputs(self._tags, self._scenario, self.bsp_var.get(),
-                              values['texels_per_unit'], values['page_max'])
+                              values['texels_per_unit'], values['page_max'],
+                              dict(presets.IGNORE_NORMALS)[self.ignore_normals_var.get()])
 
     def _inputs_changed(self):
         # (a preset writes its fields one at a time; _select_preset estimates once when all are in)
@@ -554,7 +557,7 @@ class App:
     def _update_bake_state(self):
         valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
         valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
-                 and not self.busy and self.estimate_state in ('idle', 'fits', 'warning', 'error'))
+                 and not self.busy and self.estimate_state in ('idle', 'fits', 'warning', 'risk', 'error'))
         self.bake_button.configure(state='normal' if valid else 'disabled')
         again = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and not self.busy
                  and self._kept_folder is not None)
@@ -832,7 +835,8 @@ class App:
                     self._start_estimate()
                     continue
                 try:
-                    text, state = estimate_module.describe(result, inputs.page_max, free_physical_bytes())
+                    text, state = estimate_module.describe(
+                        result, inputs.page_max, read_machine(), inputs.ignore_normals_mode)
                 except Exception as exc:
                     result = exc
                     text, state = errors.explain(exc), 'error'
@@ -968,7 +972,7 @@ class App:
             self.stage_label.configure(text=str(exc), foreground='red')
             return
         # (a write again bakes nothing, so the memory the bake would need does not matter)
-        if self.estimate_state == 'warning' and not write_again:
+        if self.estimate_state == 'risk' and not write_again:
             message = self.memory_label['text'].removesuffix(estimate_module.RISK_SUFFIX)
             if not messagebox.askyesno(
                     'Not enough memory',

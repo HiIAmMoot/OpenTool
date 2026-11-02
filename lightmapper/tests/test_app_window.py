@@ -13,7 +13,8 @@ from lightmapper import kept
 from lightmapper.blender_find import Blender, BlenderNotFound
 from lightmapper.gpu import Adapter, DeviceError
 from lightmapper.charts import CapError
-from lightmapper.memory import SceneCounts, out_of_memory_message
+from lightmapper import pipeline
+from lightmapper.memory import Machine, SceneCounts, out_of_memory_message, page_file_message
 from lightmapper.pipeline import SceneEstimate
 from opentool.app import App
 from opentool.devices import result_line
@@ -1326,7 +1327,7 @@ def test_selection_starts_an_estimate_and_greys_out_bake(ready_app_with_fake):
 
 def test_two_quick_selections_show_only_the_last_result(ready_app_with_fake, monkeypatch):
     app, fake = ready_app_with_fake
-    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: None)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: None)
     fake.results[1] = SceneEstimate(SceneCounts(2, 4), [(1024, 1024)])
     fake.results[2] = SceneEstimate(SceneCounts(2, 4), [(2048, 2048)])
     app.advanced_vars['page_max'].set('1024')
@@ -1338,7 +1339,7 @@ def test_two_quick_selections_show_only_the_last_result(ready_app_with_fake, mon
     assert app.memory_label['text'] == 'Calculating…'
     fake.gates[2].set()
     pump(app.root, lambda: app.estimate_state == 'fits')
-    assert app.memory_label['text'] == 'Needs about 12 GB'
+    assert app.memory_label['text'] == 'Needs about 14 GB'
     assert [c.page_max for c in fake.calls] == [512, 1024, 2048]
     assert fake.maximum_active == 1
 
@@ -1380,27 +1381,48 @@ def test_incomplete_form_starts_no_estimate(app_with_fake, tiny, monkeypatch):
     assert fake.calls[0].bsp == 'other'
 
 
-def test_bake_enabled_with_warning_when_the_level_may_not_fit(ready_app_with_fake, monkeypatch):
+def risk_text(app, fake, machine, index=1):
+    inputs = pipeline.stage_inputs(ESTIMATE_FITS, fake.calls[index].ignore_normals_mode, machine)
+    return inputs, machine
+
+
+def test_bake_button_stays_enabled_at_risk(ready_app_with_fake, monkeypatch):
     app, fake = ready_app_with_fake
-    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: 1)
+    machine = Machine(1, 1, 1)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: machine)
     app.advanced_vars['page_max'].set('1024')
     finish_estimate(app, fake)
-    assert app.memory_label['text'] == (out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, 1024, 1)
+    inputs, _ = risk_text(app, fake, machine)
+    assert app.memory_label['text'] == (out_of_memory_message(inputs, 1024, machine)
                                         + ' You can still bake, at your own risk.')
+    assert app.estimate_state == 'risk'
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_the_page_file_level_is_a_note_that_leaves_bake_enabled(ready_app_with_fake, monkeypatch):
+    app, fake = ready_app_with_fake
+    machine = Machine(1, 1, 10**12)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: machine)
+    app.advanced_vars['page_max'].set('1024')
+    finish_estimate(app, fake)
+    inputs, _ = risk_text(app, fake, machine)
+    assert app.memory_label['text'] == page_file_message(inputs, machine) + ' You can still bake, at your own risk.'
     assert app.estimate_state == 'warning'
     assert str(app.bake_button['state']) == 'normal'
 
 
 @pytest.mark.parametrize('answer', [False, True])
 @pytest.mark.parametrize('new_names', [False, True])
-def test_memory_warning_asks_before_baking(ready_app, monkeypatch, answer, new_names):
+def test_memory_risk_asks_before_baking(ready_app, monkeypatch, answer, new_names):
     app = ready_app
-    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: 1)
+    machine = Machine(1, 1, 1)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: machine)
     inputs = app.estimate_inputs()
     app.events.put(('estimate', app.generation, inputs, ESTIMATE_FITS))
     app._drain()
     app.new_names_var.set(new_names)
-    message = out_of_memory_message(ESTIMATE_FITS.counts, ESTIMATE_FITS.pages, inputs.page_max, 1)
+    stages_in = pipeline.stage_inputs(ESTIMATE_FITS, inputs.ignore_normals_mode, machine)
+    message = out_of_memory_message(stages_in, inputs.page_max, machine)
     asked, started = [], []
 
     def ask(*args):
@@ -1418,11 +1440,25 @@ def test_memory_warning_asks_before_baking(ready_app, monkeypatch, answer, new_n
     if answer:
         pump_app(app, lambda: not app.busy)
         assert len(started) == 1
-        assert [q[0] for q in asked] == (['Not enough memory'] if new_names else
-                                       ['Not enough memory', 'Replace your tags?'])
-    else:
-        assert not app.busy and started == []
-        assert len(asked) == 1
+
+
+def test_the_page_file_level_does_not_ask_before_baking(ready_app, monkeypatch):
+    app = ready_app
+    monkeypatch.setattr(app_module, 'read_machine', lambda: Machine(1, 1, 10**12))
+    app.events.put(('estimate', app.generation, app.estimate_inputs(), ESTIMATE_FITS))
+    app._drain()
+    app.new_names_var.set(True)
+    asked, started = [], []
+
+    def bake(req, emit):
+        started.append(req)
+        emit(('done', OUTCOME_DONE))
+
+    monkeypatch.setattr(app_module.messagebox, 'askyesno', lambda *args: asked.append(args) or True)
+    app._run_bake = bake
+    app.start_bake()
+    pump_app(app, lambda: not app.busy)
+    assert asked == [] and len(started) == 1
 
 
 def test_fitting_bake_does_not_ask_memory_question(ready_app, monkeypatch):
@@ -1458,10 +1494,10 @@ def test_estimate_error_leaves_bake_enabled(ready_app_with_fake):
     check_estimate_error(ready_app_with_fake, RuntimeError('broken'), 'error', 'normal')
 
 
-def test_free_memory_is_read_when_the_result_is_shown(ready_app_with_fake, monkeypatch):
+def test_the_machine_is_read_when_the_result_is_shown(ready_app_with_fake, monkeypatch):
     app, fake = ready_app_with_fake
     reads = []
-    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: reads.append(1) or None)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: reads.append(1) or None)
     app.advanced_vars['page_max'].set('1024')
     pump(app.root, lambda: len(fake.calls) == 2)
     app.advanced_vars['page_max'].set('2048')
@@ -1471,7 +1507,7 @@ def test_free_memory_is_read_when_the_result_is_shown(ready_app_with_fake, monke
     assert reads == []
     finish_estimate(app, fake, 2)
     assert reads == [1]
-    assert app.memory_label['text'] == 'Needs about 0.0 GB'
+    assert app.memory_label['text'] == 'Needs about 2.0 GB'
     assert str(app.bake_button['state']) == 'normal'
 
 
@@ -1591,7 +1627,7 @@ def test_estimate_worker_does_not_capture_app(ready_app_with_fake, monkeypatch):
 
 def test_empty_pages_estimate_ends_calculating_and_enables_bake(ready_app_with_fake, monkeypatch):
     app, fake = ready_app_with_fake
-    monkeypatch.setattr(app_module, 'free_physical_bytes', lambda: None)
+    monkeypatch.setattr(app_module, 'read_machine', lambda: None)
     fake.results[1] = SceneEstimate(SceneCounts(2, 4), [])
     app.advanced_vars['page_max'].set('1024')
     pump(app.root, lambda: len(fake.calls) == 2)
@@ -1599,7 +1635,7 @@ def test_empty_pages_estimate_ends_calculating_and_enables_bake(ready_app_with_f
     fake.gates[1].set()
     pump(app.root, lambda: app._estimate_running is None)
     assert app.estimate_state == 'fits'
-    assert app.memory_label['text'] == 'Needs about 0.0 GB'
+    assert app.memory_label['text'] == 'Needs about 2.0 GB'
     assert str(app.bake_button['state']) == 'normal'
 
 
@@ -2005,3 +2041,11 @@ def test_a_kept_lookup_error_is_logged_once_per_message(ready_app, monkeypatch):
     ready_app._inputs_changed()
     assert ready_app.log_path.read_text().count('OSError: the kept folder is unreadable') == 1
     assert ready_app._kept_folder is None and str(ready_app.write_again_button['state']) == 'disabled'
+
+
+def test_changing_the_ignore_normals_mode_estimates_again(ready_app_with_fake):
+    app, fake = ready_app_with_fake
+    other = 'Traditional' if app.ignore_normals_var.get() == 'Enhanced' else 'Enhanced'
+    app.ignore_normals_var.set(other)
+    finish_estimate(app, fake)
+    assert fake.calls[1].ignore_normals_mode == dict(presets.IGNORE_NORMALS)[other]

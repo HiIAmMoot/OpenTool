@@ -279,6 +279,22 @@ def _kept_baked(work: Path, manifest: kept.Manifest, page_count: int):
 class SceneEstimate:
     counts: memory.SceneCounts
     pages: list[tuple[int, int]]
+    # 9 * w * h over the pages with any triangle that ignores normals
+    flagged_sub_texels: int = 0
+    device: str = 'gpu'
+
+
+def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine) -> memory.StageInputs:
+    glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' else 0
+    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow)
+    return replace(inputs, whole_page_tiles=memory.whole_page_tiles(inputs, machine))
+
+
+def _scene_estimate(scene, pages, choice) -> SceneEstimate:
+    sizes = [(p.width, p.height) for p in pages]
+    return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
+                         memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes),
+                         'cpu' if choice is not None and choice.setting == 'cpu' else 'gpu')
 
 
 def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
@@ -295,7 +311,12 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     pages = _charts(input_file, geometry, radiosity, s, Path(charts))
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
-    return SceneEstimate(memory.SceneCounts.from_scene(scene), [(p.width, p.height) for p in pages])
+    try:
+        choice = gpu.probe_choice(s.device)
+    except gpu.DeviceError:
+        # (the bake itself reports a device it cannot use; the estimate only needs to know the CPU constants apply)
+        choice = None
+    return _scene_estimate(scene, pages, choice)
 
 
 def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None = None,
@@ -430,17 +451,19 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     else:
         scene, inverse, textures = _scene(tags, scenario_tag, bsp_number, geometry, pages, radiosity, classes,
                                           s.scenery_emission)
-        counts, sizes = memory.SceneCounts.from_scene(scene), [(p.width, p.height) for p in pages]
-        check = memory.check_bake_memory(counts, sizes, s.page_max)
+        sizes = [(p.width, p.height) for p in pages]
+        machine = memory.read_machine()
+        stages_in = stage_inputs(_scene_estimate(scene, pages, choice), s.ignore_normals_mode, machine)
+        check = memory.check_bake_memory(stages_in, s.page_max, machine)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)
         # (a calibration run bakes no lamps, so it neither reads nor counts them)
         lights, light_counts = scene_lights(scenario_tag, tags, bsp_number, bsp_tag) if sources == 'all' else ([], {})
-        whole_page_tiles = memory.whole_page_tiles(counts, sizes, check.free)
         write_job(work, scene, sizes, lighting.suns,
                   lighting.ambient, s, sources=sources, textures=textures.arrays(), choice=choice,
-                  vertex_pass='skip', lights=lights, whole_page_tiles=whole_page_tiles)
+                  vertex_pass='skip', lights=lights, whole_page_tiles=stages_in.whole_page_tiles,
+                  glow_sub_texels=stages_in.glow_sub_texels)
     stage('scene')
     # (decided here, not at the page assembly, because the app lays its progress bar out for the glow run before the
     # Blender stage starts)
@@ -671,9 +694,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         'lights': {**light_counts, 'baked': len(main_job['lights']), 'batches': batches},
         'whole_page_tiles': bool(main_job.get('whole_page_tiles', False)),
         'warnings': warnings, 'vertex_rays_cast': result.vertex_rays_cast,
-        'memory': None if check is None else {
-            'estimate_gb': round(check.estimate / memory.GB, 2),
-            'free_gb': round(check.free / memory.GB, 2) if check.free is not None else None},
+        'memory': None if check is None else memory.summary(stages_in, check),
         'rays': {'samples': result.samples_used, 'texel_samples': result.texel_samples_used,
                  'vertex_rays': s.vertex_rays if vertex_device != 'cpu' else s.resolved_cpu_vertex_rays()},
         'texel_samples': s.resolved_texel_samples(), 'settings': asdict(s)}, indent=2))

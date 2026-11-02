@@ -1,28 +1,37 @@
 import ctypes
 from ctypes import wintypes
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 from math import ceil
 import os
+import shutil
 
 import numpy as np
 
 
-# b40_a and bloodgulch, 512/1024/2048, 2026-10-29; triangles fit to 0 because
-# triangle and vertex counts rise together, so the vertex term carries both.
-PER_SUB_TEXEL: int = 271
-PER_PAGE_TEXEL: int = 63
-PER_TRIANGLE: int = 0
-PER_VERTEX: int = 1771
-PER_TILE_SUB_TEXEL: int = 101
-# the glow run's own tile term: timberland's glow stage peaked at 19.1 GB with whole-page tiles against 14.0 GB without,
-# 5.1 GB over two 2048 pages (9 * 2048^2 sub-texels), rounded up
-GLOW_PER_TILE_SUB_TEXEL: int = 136
+# peak process-tree commit per stage, fit to the kept bakes of 2026-11-01 (lightmapper/tests/data/memory_peaks.csv) with
+# every row between 1.0 and 1.21 times its measured peak (vertex up to 1.35, finish up to 1.55). The rows come from a GPU
+# (OptiX) machine; no CPU bake was measured, so the CPU device uses the same constants.
+BLENDER_BASE: int = 1_700_000_000
+BLENDER_PER_SUB_TEXEL: int = 270
+BLENDER_PER_PAGE_TEXEL: int = 99
+BLENDER_PER_VERTEX: int = 1205
+# the whole-page tile's own term, outside MARGIN: it is the measured difference between a tiled and an untiled bake,
+# so the margin on the other terms would count its error twice
+PER_TILE_SUB_TEXEL: int = 102
+VERTEX_BASE: int = 1_055_000_000
+VERTEX_PER_PAGE_TEXEL: int = 273
+VERTEX_PER_GLOW_SUB_TEXEL: int = 20
+GLOW_PER_GLOW_SUB_TEXEL: int = 20
+GLOW_PER_TILE_SUB_TEXEL: int = 110
+FINISH_BASE: int = 300_000_000
+FINISH_PER_SUB_TEXEL: int = 31
 # Cycles' tile limit (tile.h:120): a page whose sub-texel side is bigger cannot be one tile
 MAX_TILE = 8192
 MARGIN = 1.15
 GB = 10**9
 PAGE_SIDES = (256, 512, 1024, 2048, 4096)
+STAGES = ('blender', 'vertex', 'glow', 'finish')
 READ = object()
 logger = logging.getLogger(__name__)
 
@@ -44,43 +53,51 @@ class SceneCounts:
                        len(scene['positions']) + len(scene['occ_positions']))
 
 
-def page_term(w, h) -> int:
-    return 9 * w * h * PER_SUB_TEXEL
+@dataclass(frozen=True)
+class StageInputs:
+    counts: SceneCounts
+    pages: list[tuple[int, int]]
+    device: str = 'gpu'
+    # 9 * w * h over the pages holding a flagged triangle, only in the Enhanced ignore-normals mode
+    glow_sub_texels: int = 0
+    whole_page_tiles: bool = False
 
 
-def resident_term(pages) -> int:
-    return PER_PAGE_TEXEL * sum(w * h for w, h in pages)
+def _largest_sub_texels(pages) -> int:
+    return max((9 * w * h for w, h in pages), default=0)
 
 
-def scene_term(counts) -> int:
-    return PER_TRIANGLE * counts.triangles + PER_VERTEX * counts.vertices
+def _blender_raw(inputs: StageInputs) -> int:
+    return (BLENDER_BASE + BLENDER_PER_SUB_TEXEL * _largest_sub_texels(inputs.pages)
+            + BLENDER_PER_PAGE_TEXEL * sum(w * h for w, h in inputs.pages)
+            + BLENDER_PER_VERTEX * inputs.counts.vertices)
 
 
-def bake_bytes(counts, pages) -> int:
-    w, h = max(pages, key=lambda page: page[0] * page[1], default=(0, 0))
-    return ceil(MARGIN * (page_term(w, h) + resident_term(pages) + scene_term(counts)))
+def stage_bytes(inputs: StageInputs) -> dict[str, int]:
+    largest = _largest_sub_texels(inputs.pages)
+    tiles = inputs.whole_page_tiles
+    glow = inputs.glow_sub_texels
+    return {
+        'blender': ceil(MARGIN * _blender_raw(inputs)) + (PER_TILE_SUB_TEXEL * largest if tiles else 0),
+        'vertex': ceil(MARGIN * (VERTEX_BASE + VERTEX_PER_PAGE_TEXEL * sum(w * h for w, h in inputs.pages)
+                                 + VERTEX_PER_GLOW_SUB_TEXEL * glow)),
+        'glow': 0 if glow == 0 else (ceil(MARGIN * (_blender_raw(inputs) + GLOW_PER_GLOW_SUB_TEXEL * glow))
+                                     + (GLOW_PER_TILE_SUB_TEXEL * largest if tiles else 0)),
+        'finish': ceil(MARGIN * (FINISH_BASE + FINISH_PER_SUB_TEXEL * largest)),
+    }
 
 
-def _tile_bytes(counts, pages, per_tile) -> int | None:
-    w, h = max(pages, key=lambda page: page[0] * page[1])
-    if 3 * max(max(page) for page in pages) > MAX_TILE:
-        return None
-    # (outside MARGIN: the term is a measured difference between two bakes, so the margin on the model's other terms
-    # would count its own error twice)
-    return bake_bytes(counts, pages) + per_tile * 9 * w * h
+def peak_bytes(inputs: StageInputs) -> tuple[str, int]:
+    stages = stage_bytes(inputs)
+    stage = max(STAGES, key=stages.__getitem__)
+    return stage, stages[stage]
 
 
-def whole_page_tiles(counts, pages, free: int | None, per_tile: int | None = None) -> bool:
-    if free is None or not pages:
-        return False
-    need = _tile_bytes(counts, pages, PER_TILE_SUB_TEXEL if per_tile is None else per_tile)
-    return need is not None and need <= free
-
-
-# (the glow stage has no estimate of its own: its Blender peak without tiles matched the page stage's, 13.7 against
-# 13.1 GB on timberland, so the page stage's model is its base)
-def glow_whole_page_tiles(counts, pages, free: int | None) -> bool:
-    return whole_page_tiles(counts, pages, free, GLOW_PER_TILE_SUB_TEXEL)
+def flagged_sub_texels(tri_page, flagged, pages) -> int:
+    if flagged is None or not len(flagged):
+        return 0
+    held = {int(page) for page in np.asarray(tri_page)[np.asarray(flagged, bool)]}
+    return sum(9 * pages[page][0] * pages[page][1] for page in held)
 
 
 class MEMORYSTATUSEX(ctypes.Structure):
@@ -97,7 +114,55 @@ class MEMORYSTATUSEX(ctypes.Structure):
     ]
 
 
-def _windows_free_physical_bytes() -> int:
+@dataclass(frozen=True)
+class Machine:
+    ram: int
+    commit_limit: int
+    commit_ceiling: int | None
+
+
+@dataclass(frozen=True)
+class PagingFile:
+    drive: str
+    initial_mb: int | None
+    maximum_mb: int | None
+
+
+def parse_paging_files(value: list[str]) -> list[PagingFile]:
+    files = []
+    for entry in value:
+        parts = entry.rsplit(None, 2)
+        sizes = (0, 0)
+        if len(parts) == 3 and parts[1].isdigit() and parts[2].isdigit():
+            path, sizes = parts[0], (int(parts[1]), int(parts[2]))
+        else:
+            path = entry.strip()
+        drive = path[:1].upper()
+        if drive == '?':
+            drive = os.environ.get('SystemDrive', 'C:')[:1].upper()
+        managed = sizes == (0, 0)
+        files.append(PagingFile(drive, None if managed else sizes[0], None if managed else sizes[1]))
+    return files
+
+
+# (a system-managed file grows on demand, so what it can reach is bounded by its disk and by Windows' own cap of about
+# three times the RAM; a fixed file never grows past its configured maximum)
+def commit_ceiling(ram: int, commit_limit: int, files: list[PagingFile], free_on) -> int:
+    if not files:
+        return ram
+    reach = 0
+    for file in files:
+        if file.maximum_mb is None:
+            reach += min(3 * ram, free_on(file.drive))
+        else:
+            reach += file.maximum_mb * 2**20
+    return max(commit_limit, ram + reach)
+
+
+def _memory_status() -> tuple[int, int]:
+    if os.name != 'nt':
+        ram = os.sysconf('SC_PHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        return ram, ram
     kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
     kernel32.GlobalMemoryStatusEx.argtypes = [ctypes.POINTER(MEMORYSTATUSEX)]
     kernel32.GlobalMemoryStatusEx.restype = wintypes.BOOL
@@ -105,61 +170,130 @@ def _windows_free_physical_bytes() -> int:
     status.dwLength = ctypes.sizeof(status)
     if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
         raise ctypes.WinError(ctypes.get_last_error())
-    return status.ullAvailPhys
+    return status.ullTotalPhys, status.ullTotalPageFile
 
 
-def free_physical_bytes() -> int | None:
+def _paging_files() -> list[str] | None:
+    if os.name != 'nt':
+        return None
+    import winreg
+    with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                        r'SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management') as key:
+        value, _ = winreg.QueryValueEx(key, 'PagingFiles')
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _free_on(drive: str) -> int:
+    return shutil.disk_usage(drive + ':\\').free
+
+
+def read_machine() -> Machine | None:
     try:
-        if os.name == 'nt':
-            return _windows_free_physical_bytes()
-        return os.sysconf('SC_AVPHYS_PAGES') * os.sysconf('SC_PAGE_SIZE')
+        ram, limit = _memory_status()
     except Exception:
         return None
+    try:
+        names = _paging_files()
+        ceiling = None if names is None else commit_ceiling(ram, limit, parse_paging_files(names), _free_on)
+    except Exception:
+        # (the page file's reach only decides the second warning level, so the first still works without it)
+        ceiling = None
+    return Machine(ram, limit, ceiling)
+
+
+def whole_page_tiles(inputs: StageInputs, machine: Machine | None, stage: str = 'blender') -> bool:
+    if machine is None or not inputs.pages:
+        return False
+    if 3 * max(max(page) for page in inputs.pages) > MAX_TILE:
+        return False
+    return stage_bytes(replace(inputs, whole_page_tiles=True))[stage] <= machine.ram
 
 
 def format_gb(n: int) -> str:
     return f'{n / GB:.1f}' if n < 10 * GB else f'{n / GB:.0f}'
 
 
-def suggest_page_max(counts, pages, free: int | None) -> int | None:
-    if not pages:
+def suggest_page_max(inputs: StageInputs, limit: int | None) -> int | None:
+    if not inputs.pages:
         return None
-    largest = max(pages, key=lambda page: page[0] * page[1])
-    fixed = resident_term(pages) + scene_term(counts)
+    index = max(range(len(inputs.pages)), key=lambda i: inputs.pages[i][0] * inputs.pages[i][1])
+    w, h = inputs.pages[index]
     for side in reversed(PAGE_SIDES):
-        if side < max(largest) and (free is None or MARGIN * (page_term(side, side) + fixed) <= free):
-            return side
+        if side < max(w, h):
+            pages = list(inputs.pages)
+            pages[index] = (side, side)
+            glow = inputs.glow_sub_texels * side * side // (w * h)
+            if limit is None or peak_bytes(replace(inputs, pages=pages, glow_sub_texels=glow))[1] <= limit:
+                return side
     return None
 
 
-def out_of_memory_message(counts, pages, page_max: int, free: int | None) -> str:
-    text = f'This bake needs about {format_gb(bake_bytes(counts, pages))} GB of free memory'
-    if pages:
-        w, h = max(pages, key=lambda page: page[0] * page[1])
-        text += f' (largest page {w} x {h} at Max resolution {page_max})'
-    if free is not None:
-        text += f'; this computer has {format_gb(free)} GB free'
-    side = suggest_page_max(counts, pages, free)
+def _stage_label(stage: str) -> str:
+    from .progress import STAGE_LABELS
+    label = STAGE_LABELS[stage]
+    return label[:1].lower() + label[1:]
+
+
+def _limit(machine: Machine | None) -> int | None:
+    if machine is None:
+        return None
+    return machine.commit_limit if machine.commit_ceiling is None else machine.commit_ceiling
+
+
+def page_file_message(inputs: StageInputs, machine: Machine) -> str:
+    stage, need = peak_bytes(inputs)
+    return (f'This bake needs about {format_gb(need)} GB at its peak ({_stage_label(stage)}), more than this '
+            f"computer's {format_gb(machine.ram)} GB of memory. It will lean on the page file and slow down.")
+
+
+def out_of_memory_message(inputs: StageInputs, page_max: int, machine: Machine | None) -> str:
+    stage, need = peak_bytes(inputs)
+    limit = _limit(machine)
+    held = '' if limit is None else f' ({format_gb(limit)} GB)'
+    text = (f'This bake needs about {format_gb(need)} GB at its peak ({_stage_label(stage)}), more than this '
+            f"computer's memory and page file can hold{held}. It will likely run out of memory.")
+    side = suggest_page_max(inputs, None if machine is None else machine.ram)
     if side is None:
-        return text + '. Try a lower texel density, or close other programs.'
-    return (text + f'. Try Max resolution {side}, or close other programs. '
-            'If the level then needs too many pages or still does not fit, lower the texel density a little.')
+        text += ' Try a lower texel density, or close other programs.'
+    else:
+        text += (f' Try Max resolution {side}, or close other programs. '
+                 'If the level then needs too many pages or still does not fit, lower the texel density a little.')
+    if stage == 'glow':
+        text += ' Or set Ignore-normals lighting to Traditional.'
+    return text
 
 
 @dataclass
 class MemoryCheck:
     estimate: int
-    free: int | None
-    fits: bool = True
+    stage: str = ''
+    level: str = 'fits'
     message: str = ''
+    machine: Machine | None = None
+
+    @property
+    def fits(self) -> bool:
+        return self.level == 'fits'
 
 
-def check_bake_memory(counts, pages, page_max, free=READ) -> MemoryCheck:
-    estimate = bake_bytes(counts, pages)
-    if free is READ:
-        free = free_physical_bytes()
-    if free is None:
-        logger.warning('free memory is unknown, so the bake runs without the memory check')
-    elif estimate > free:
-        return MemoryCheck(estimate, free, False, out_of_memory_message(counts, pages, page_max, free))
-    return MemoryCheck(estimate, free)
+def check_bake_memory(inputs: StageInputs, page_max: int, machine=READ) -> MemoryCheck:
+    stage, need = peak_bytes(inputs)
+    if machine is READ:
+        machine = read_machine()
+    if machine is None:
+        logger.warning("this computer's memory is unknown, so the bake runs without the memory check")
+        return MemoryCheck(need, stage)
+    if need > _limit(machine):
+        return MemoryCheck(need, stage, 'out_of_memory', out_of_memory_message(inputs, page_max, machine), machine)
+    if need > machine.ram:
+        return MemoryCheck(need, stage, 'page_file', page_file_message(inputs, machine), machine)
+    return MemoryCheck(need, stage, machine=machine)
+
+
+def summary(inputs: StageInputs, check: MemoryCheck) -> dict:
+    machine = check.machine
+    ceiling = None if machine is None else _limit(machine)
+    return {'peak_gb': round(check.estimate / GB, 2), 'stage': check.stage, 'level': check.level,
+            'stages_gb': {stage: round(size / GB, 2) for stage, size in stage_bytes(inputs).items()},
+            'ram_gb': None if machine is None else round(machine.ram / GB, 2),
+            'ceiling_gb': None if ceiling is None else round(ceiling / GB, 2)}

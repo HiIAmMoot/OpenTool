@@ -18,24 +18,31 @@ class EstimateInputs:
     bsp: str
     texels_per_unit: float
     page_max: int
+    # (only the glow stage's estimate depends on it, but a change of mode is a change of estimate)
+    ignore_normals_mode: str = 'tool'
 
 
 def run_estimate(inputs: EstimateInputs) -> SceneEstimate:
     return pipeline.estimate_scene(
         inputs.tags, inputs.scenario, inputs.bsp,
-        Settings(texels_per_unit=inputs.texels_per_unit, page_max=inputs.page_max),
+        Settings(texels_per_unit=inputs.texels_per_unit, page_max=inputs.page_max,
+                 ignore_normals_mode=inputs.ignore_normals_mode),
         runner.chart_cache_path(inputs.tags, inputs.scenario, inputs.bsp),
     )
 
 
-def describe(result: SceneEstimate | BaseException, page_max: int,
-             free: int | None) -> tuple[str, str]:
+STATES = {'fits': 'fits', 'page_file': 'warning', 'out_of_memory': 'risk'}
+
+
+def describe(result: SceneEstimate | BaseException, page_max: int, machine: memory.Machine | None,
+             ignore_normals_mode: str = 'tool') -> tuple[str, str]:
     if isinstance(result, BaseException):
         return errors.explain(result), 'refused' if isinstance(result, CapError) else 'error'
-    need = memory.bake_bytes(result.counts, result.pages)
-    if free is not None and need > free:
-        return memory.out_of_memory_message(result.counts, result.pages, page_max, free) + RISK_SUFFIX, 'warning'
-    text = f'Needs about {memory.format_gb(need)} GB'
-    if free is not None:
-        text += f'; {memory.format_gb(free)} GB free'
+    inputs = pipeline.stage_inputs(result, ignore_normals_mode, machine)
+    check = memory.check_bake_memory(inputs, page_max, machine)
+    if not check.fits:
+        return check.message + RISK_SUFFIX, STATES[check.level]
+    text = f'Needs about {memory.format_gb(check.estimate)} GB'
+    if machine is not None:
+        text += f'; this computer has {memory.format_gb(machine.ram)} GB'
     return text, 'fits'
