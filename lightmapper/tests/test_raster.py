@@ -183,3 +183,129 @@ def test_sample_bilinear_empty_batch_and_single_texel():
     uv = np.array([[-1, 2], [0.5, 0.5], [0, 0]])
     np.testing.assert_array_equal(api().sample_bilinear(img, uv),
                                   [[0.125, 2.5], [0.125, 2.5], [0.125, 2.5]])
+
+
+# ---------- the finish stage's raster helpers keep their output (the old versions stay here as the reference)
+
+def _old_dilate(img, mask, cls, iterations):
+    img, mask, cls = img.copy(), mask.copy(), cls.copy()
+    height, width, channels = img.shape
+    for _ in range(iterations):
+        result, filled, classes = img.copy(), mask.copy(), cls.copy()
+        for y in range(height):
+            for x in range(width):
+                if mask[y, x]:
+                    continue
+                y0, y1 = max(0, y - 1), min(height - 1, y + 1)
+                x0, x1 = max(0, x - 1), min(width - 1, x + 1)
+                count = 0
+                for ny in range(y0, y1 + 1):
+                    for nx in range(x0, x1 + 1):
+                        if mask[ny, nx]:
+                            if count == 0:
+                                classes[y, x] = cls[ny, nx]
+                            count += 1
+                if count == 0:
+                    continue
+                filled[y, x] = True
+                for channel in range(channels):
+                    total = 0.0
+                    for ny in range(y0, y1 + 1):
+                        for nx in range(x0, x1 + 1):
+                            if mask[ny, nx]:
+                                total += img[ny, nx, channel]
+                    result[y, x, channel] = total / count
+        img, mask, cls = result, filled, classes
+    return img, mask, cls
+
+
+_old_dilate_compiled = None
+
+
+def old_dilate(*args):
+    global _old_dilate_compiled
+    if _old_dilate_compiled is None:
+        from numba import njit
+        _old_dilate_compiled = njit(_old_dilate)
+    return _old_dilate_compiled(*args)
+
+
+def dilate_case(seed, shape, density, dtype, iterations):
+    rng = np.random.default_rng(seed)
+    height, width = shape
+    img = rng.random((height, width, 3)).astype(dtype) * 10.0 ** rng.integers(-3, 3, (height, width, 1))
+    mask = rng.random(shape) < density
+    # (texels under the mask carry values too: the old dilate reads only masked ones, and must keep the rest)
+    cls = rng.integers(-2, 5, shape).astype(np.int16)
+    return img.astype(dtype), mask, cls, iterations
+
+
+@pytest.mark.parametrize('shape', [(1, 1), (1, 9), (9, 1), (2, 2), (17, 23), (40, 40)])
+@pytest.mark.parametrize('density', [0.0, 0.02, 0.2, 0.6, 1.0])
+@pytest.mark.parametrize('dtype', [np.float32, np.float64])
+def test_dilate_visiting_only_the_frontier_is_bit_identical_to_the_full_scan(shape, density, dtype):
+    for iterations in (0, 1, 2, 3, 7, 60):
+        img, mask, cls, _ = dilate_case(iterations + 5, shape, density, dtype, iterations)
+        want = old_dilate(img, mask, cls, iterations)
+        got = api().dilate(img, mask, cls, iterations)
+        for have, expected in zip(got, want):
+            assert have.dtype == expected.dtype
+            np.testing.assert_array_equal(have, expected)
+
+
+def test_dilate_leaves_its_inputs_alone():
+    img, mask, cls, _ = dilate_case(1, (12, 12), 0.1, np.float32, 3)
+    before = img.copy(), mask.copy(), cls.copy()
+    api().dilate(img, mask, cls, 3)
+    for kept, original in zip((img, mask, cls), before):
+        np.testing.assert_array_equal(kept, original)
+
+
+def _old_flagged_source(scene, page, width, height, rgb):
+    from scipy.ndimage import distance_transform_edt
+    rows = np.flatnonzero(scene['tri_page'] == page)
+    owner, _ = api().triangle_weights(scene['lm_uv'], scene['tris'][rows], 3 * width, 3 * height)
+    source = np.zeros((3 * height, 3 * width, 3), np.float32)
+    chosen = scene['texel_page'] == page
+    xy = scene['texel_xy'][chosen]
+    source[xy[:, 1], xy[:, 0]] = rgb[chosen]
+    if (owner >= 0).any():
+        nearest = distance_transform_edt(owner < 0, return_distances=False, return_indices=True)
+        source[owner < 0] = source[nearest[0][owner < 0], nearest[1][owner < 0]]
+    return source
+
+
+def flagged_scene():
+    """Two charts on page 0 (two triangles each, a gap between them and a margin) and one on page 1."""
+    uv = np.float32([[.1, .1], [.5, .1], [.1, .6], [.5, .6],
+                     [.6, .2], [.95, .2], [.6, .9], [.95, .9],
+                     [0, 0], [1, 0], [0, 1]])
+    tris = np.int32([[0, 1, 2], [1, 3, 2], [4, 5, 6], [5, 7, 6], [8, 9, 10]])
+    xy = np.int32([[3, 3], [4, 4], [10, 9], [20, 13], [5, 1]])
+    return dict(lm_uv=uv, tris=tris, tri_page=np.int16([0, 0, 0, 0, 1]), texel_page=np.int16([0, 0, 0, 0, 1]),
+                texel_xy=xy)
+
+
+@pytest.mark.parametrize('page', [0, 1, 2])
+def test_flagged_source_with_one_index_list_is_bit_identical(page):
+    scene = flagged_scene()
+    rgb = np.random.default_rng(2).random((5, 3)).astype(np.float32)
+    want = _old_flagged_source(scene, page, 8, 6, rgb)
+    np.testing.assert_array_equal(api().flagged_source(scene, page, 8, 6, rgb), want)
+    owner, _ = api().triangle_weights(scene['lm_uv'], scene['tris'][scene['tri_page'] == page], 24, 18)
+    np.testing.assert_array_equal(api().flagged_source(scene, page, 8, 6, rgb, owner=owner), want)
+    if page == 0:
+        assert want.any()
+
+
+def test_the_owner_map_a_caller_holds_is_not_computed_again(monkeypatch):
+    raster = api()
+    scene = flagged_scene()
+    rgb = np.random.default_rng(2).random((5, 3)).astype(np.float32)
+    owner, _ = raster.triangle_weights(scene['lm_uv'], scene['tris'][scene['tri_page'] == 0], 24, 18)
+    want = raster.texel_contribution(scene, 0, 8, 6, rgb)
+    monkeypatch.setattr(raster, 'triangle_weights', lambda *a: pytest.fail('owner map computed again'))
+    got = raster.texel_contribution(scene, 0, 8, 6, rgb, owner=owner)
+    raster.flagged_source(scene, 0, 8, 6, rgb, owner=owner)
+    for have, expected in zip(got, want):
+        np.testing.assert_array_equal(have, expected)

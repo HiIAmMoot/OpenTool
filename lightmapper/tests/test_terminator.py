@@ -665,3 +665,24 @@ def test_the_sun_independent_geometry_is_built_once_per_chunk_whatever_the_sun_c
     assert calls[0]['segment'] > 2
     assert calls[0] == calls[1]
     assert calls[1]['segment'] == calls[1]['lit']
+
+
+def test_length_is_bit_identical_to_the_norm_it_replaced():
+    from lightmapper.terminator import _length
+    rng = np.random.default_rng(3)
+    scale = 10.0 ** rng.integers(-6, 5, (400_000, 1))
+    vectors = (rng.standard_normal((400_000, 3)) * scale).astype(np.float32)
+    vectors[:1000] = 0
+    vectors[1000:2000, 1:] = 0
+    np.testing.assert_array_equal(_length(vectors), np.linalg.norm(vectors, axis=1))
+
+
+def test_a_page_grid_the_caller_holds_gives_the_same_term_and_is_not_computed_again(monkeypatch):
+    import lightmapper.terminator as terminator
+    from lightmapper.raster import triangle_weights
+    scene = terrace()
+    suns, lit, flags = several_suns(scene)
+    want = sun_term(scene, suns, lit, 0, 192, 192, 0.225, edge_sun_lit=flags)
+    grid = triangle_weights(scene.lm_uv, scene.tris[scene.tri_page == 0], 3 * 192, 3 * 192)
+    monkeypatch.setattr(terminator, 'triangle_weights', lambda *a: pytest.fail('grid computed again'))
+    np.testing.assert_array_equal(sun_term(scene, suns, lit, 0, 192, 192, 0.225, edge_sun_lit=flags, grid=grid), want)

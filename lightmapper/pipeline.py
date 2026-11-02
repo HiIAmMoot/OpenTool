@@ -33,7 +33,7 @@ from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARA
 from .pages import DenoiseWorker, finish_pages, quantise
 from .progress import GLOW_PLANNED
 from .radiosity import finalize, query_points
-from .raster import coverage, texel_contribution
+from .raster import coverage, texel_contribution, triangle_weights
 from .settings import Settings
 from .terminator import flat_light_term, flat_sun_term, prepare_boundaries, sun_term
 from .tagio.tagfile import Tag, read_tag, resolve_reference_path, write_tag
@@ -533,19 +533,28 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         warnings.append(ambiguous_warning(job['ambiguous_twin_groups']))
     boundaries = (prepare_boundaries(scene, job_suns, s.reach, result.edge_sun_lit)
                   if result.vertex_sun_lit is not None else None)
+    # (the glow scene is the bake scene's own charts: one page's owner map then serves the sun term and both gathers)
+    one_grid = texel_scene is not None and all(
+        np.array_equal(texel_scene[key], getattr(scene, name)) for key, name in
+        (('lm_uv', 'lm_uv'), ('tris', 'tris'), ('tri_page', 'tri_page')))
     for i, page in enumerate(pages):
         rows = scene.tri_page == i
         mask, cls = coverage(scene.lm_uv, scene.tris[rows], scene.tri_class[rows], page.width, page.height)
         raw = result.pages[i]
+        grid = triangle_weights(scene.lm_uv, scene.tris[rows], 3 * page.width, 3 * page.height) if one_grid else None
         if result.vertex_sun_lit is not None:
             raw = raw + sun_term(scene, job_suns, result.vertex_sun_lit, i, page.width, page.height,
-                                 s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries)
+                                 s.reach, edge_sun_lit=result.edge_sun_lit, boundaries=boundaries, grid=grid)
         if enhanced:
-            gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb)[0]
+            owner = grid[0] if one_grid else None
+            # (the weights are 450 MB on a big page and nothing below reads them)
+            grid = None
+            gathered = texel_contribution(texel_scene, i, page.width, page.height, result.texel_rgb, owner=owner)[0]
             raw = raw + gathered
             from .raster import flagged_source
             if not reuse:
-                glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb))
+                glow_pages.append(flagged_source(texel_scene, i, page.width, page.height, result.texel_rgb, owner=owner))
+            owner = None
         elif scene.tri_ignore_normals is not None and scene.tri_ignore_normals[rows].any():
             raw = raw + flat_sun_term(scene, job_suns, result.vertex_sun_throughput,
                                      i, page.width, page.height)

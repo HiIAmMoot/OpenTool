@@ -44,9 +44,9 @@ def prepare_boundaries(scene, suns, reach, edge_sun_lit=None):
     return SunBoundaries(away, None, _segment_tables(scene, suns, reach, scene.tris, edge_sun_lit, facing))
 
 
-def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
+def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None, grid=None):
     """(height, width, 3) light to add to page `page`'s raw float image; `suns` are the job's suns, `lit` the vertex
-    pass's (query, sun) result."""
+    pass's (query, sun) result. `grid` is the page's `triangle_weights` result when the caller already has it."""
     term = np.zeros((height, width, 3), np.float32)
     rows = np.flatnonzero(scene.tri_page == page)
     if not len(rows) or not len(suns):
@@ -71,7 +71,7 @@ def sun_term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, bo
     # the bake averages a texel's 3x3 sub-texels that a triangle covers, so the term is built on that grid and
     # averaged the same way: a texel on a seam takes the added light for the sub-texels of the face that lacks it
     # and the baked light for the others
-    owner, weights = triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
+    owner, weights = grid if grid is not None else triangle_weights(scene.lm_uv, tris, 3 * width, 3 * height)
     covered = owner >= 0
     count = covered.reshape(height, 3, width, 3).sum(axis=(1, 3))
     # only sub-texels of a triangle that is away for some sun can take a term; the rest would run the distance
@@ -315,7 +315,8 @@ def _segment_tables(scene, suns, reach, tris, lit, facing=None):
 
 
 def _length(vectors):
-    return np.linalg.norm(vectors, axis=1)
+    # (a third of np.linalg.norm's time, and the same bits: both add x*x, y*y, z*z in that order)
+    return np.sqrt(np.einsum('nk,nk->n', vectors, vectors))
 
 
 def _segment_geometry(point, corners, tri, table):
@@ -345,8 +346,10 @@ def _segment_nearest(edges, point, before, after):
             valid = (index >= 0) & (index < n)
             lo = index.astype(np.float32) / n32
             hi = (index + 1).astype(np.float32) / n32
-            near = a + np.clip(f, lo, hi)[:, None] * along
-            best = np.minimum(best, np.where(valid, _length(point - near), np.inf))
+            near = np.clip(f, lo, hi)[:, None] * along
+            near += a
+            np.subtract(point, near, out=near)
+            best = np.minimum(best, np.where(valid, _length(near), np.inf))
     return best
 
 

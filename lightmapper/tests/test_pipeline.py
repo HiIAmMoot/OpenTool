@@ -1383,7 +1383,7 @@ def test_pipeline_adds_the_plane_away_sun_term_to_the_raw_page(tiny, monkeypatch
         result.edge_sun_lit = np.ones((2, 0), bool)
         return result, info
 
-    def term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None):
+    def term(scene, suns, lit, page, width, height, reach, edge_sun_lit=None, boundaries=None, grid=None):
         calls.append((page, lit.shape))
         value = 0.25 if (edge_sun_lit is not None and edge_sun_lit.shape == (2, 0)
                          and len(built) == 1 and boundaries is built[0]) else 0
@@ -1980,3 +1980,18 @@ def test_batch_runs_keep_their_own_log_and_seed(tiny, fake, monkeypatch):
     assert 'lamp_batch' not in json.loads((work / 'job.json').read_text())
     assert (work / 'blender_lamps_1.log').is_file() and not (work / 'blender.log').exists()
     assert 'lamp batch 1 of 1' in seen
+
+
+def test_enhanced_pipeline_hands_each_page_owner_map_to_both_gathers(tiny, monkeypatch):
+    from lightmapper import raster
+    pipeline = api()
+    seen = []
+    real_contribution, real_source = pipeline.texel_contribution, raster.flagged_source
+    monkeypatch.setattr(pipeline, 'texel_contribution',
+                        lambda *a, **k: seen.append(('contribution', k.get('owner'))) or real_contribution(*a, **k))
+    monkeypatch.setattr(raster, 'flagged_source',
+                        lambda *a, **k: seen.append(('source', k.get('owner'))) or real_source(*a, **k))
+    run_enhanced_pipeline(tiny, monkeypatch, 'enhanced')
+    assert [name for name, _ in seen] == ['contribution', 'source']
+    assert all(owner is not None for _, owner in seen)
+    assert seen[0][1] is seen[1][1]
