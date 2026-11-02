@@ -1317,11 +1317,11 @@ def finish_estimate(app, fake, index=1):
     pump(app.root, lambda: app.estimate_state != 'calculating')
 
 
-def test_selection_starts_an_estimate_and_greys_out_bake(ready_app_with_fake):
+def test_selection_starts_an_estimate_and_leaves_bake_enabled(ready_app_with_fake):
     app, fake = ready_app_with_fake
     app.advanced_vars['page_max'].set('1024')
     assert app.memory_label['text'] == 'Calculating…'
-    assert str(app.bake_button['state']) == 'disabled'
+    assert str(app.bake_button['state']) == 'normal'
     finish_estimate(app, fake)
     assert fake.calls[1].page_max == 1024
     assert fake.threads[1] is not threading.main_thread()
@@ -2067,3 +2067,78 @@ def test_estimate_asks_for_the_users_device_and_bounces(ready_app_with_fake):
     app.advanced_vars['bounces'].set('0')
     finish_estimate(app, fake, 2)
     assert fake.calls[2].bounces == 0
+
+
+class StagedEstimate:
+    # three gated stages, as estimate.STAGES has; each call records (stage, page_max)
+    def __init__(self):
+        self.calls = []
+        self.gates = {}
+        self.threads = []
+
+    def gate(self, index):
+        return self.gates.setdefault(index, threading.Event())
+
+    def stage(self, number):
+        def run(inputs):
+            index = len(self.calls)
+            self.calls.append((number, inputs.page_max))
+            self.threads.append(threading.current_thread())
+            assert self.gate(index).wait(10), 'test did not release the stage'
+            return ESTIMATE_FITS
+        return run
+
+    def stages(self):
+        return (('Quick estimate. ', self.stage(0)), ('Rough estimate. ', self.stage(1)), ('', self.stage(2)))
+
+
+@pytest.fixture
+def staged_app(make_app, tiny):
+    fake = StagedEstimate()
+    app = make_app(estimate=fake.stages())
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: len(fake.calls) == 1 and app.blender is not None)
+    yield app, fake
+    for index in range(20):
+        fake.gate(index).set()
+    for thread in fake.threads:
+        thread.join(5)
+    app._drain()
+
+
+def test_estimate_stages_replace_each_other_from_rough_to_fine(staged_app):
+    app, fake = staged_app
+    assert app.memory_label['text'] == 'Calculating…' and str(app.bake_button['state']) == 'normal'
+    fake.gate(0).set()
+    pump(app.root, lambda: len(fake.calls) == 2 and app.memory_label['text'] != 'Calculating…')
+    assert app.memory_label['text'].startswith('Quick estimate. Needs about')
+    assert str(app.bake_button['state']) == 'normal'
+    fake.gate(1).set()
+    pump(app.root, lambda: len(fake.calls) == 3 and app.memory_label['text'].startswith('Rough'))
+    assert app.memory_label['text'].startswith('Rough estimate. Needs about')
+    assert str(app.bake_button['state']) == 'normal'
+    fake.gate(2).set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert app.memory_label['text'].startswith('Needs about') and app.estimate_state == 'fits'
+    assert [stage for stage, _ in fake.calls] == [0, 1, 2]
+    assert str(app.bake_button['state']) == 'normal'
+
+
+def test_a_setting_change_during_the_stages_drops_the_stale_ones(staged_app):
+    app, fake = staged_app
+    fake.gate(0).set()
+    pump(app.root, lambda: len(fake.calls) == 2)
+    app.advanced_vars['page_max'].set('1024')
+    assert app.memory_label['text'] == 'Calculating…' and str(app.bake_button['state']) == 'normal'
+    fake.gate(1).set()
+    # (the old run stops after the stage it was in, and its result never shows; the new one starts from stage 1)
+    pump(app.root, lambda: len(fake.calls) == 3)
+    assert fake.calls[2] == (0, 1024)
+    app._drain()
+    assert app.memory_label['text'] == 'Calculating…'
+    fake.gate(2).set()
+    pump(app.root, lambda: app.memory_label['text'].startswith('Quick'))
+    assert [call for call in fake.calls if call[1] == 'auto'] == [(0, 'auto'), (1, 'auto')]

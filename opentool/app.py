@@ -31,7 +31,7 @@ class App:
                  find_blender=blender_find.find_blender, run_bake=runner.run_bake,
                  log_path: Path | None = None, probe_gpu=gpu.probe_adapters,
                  probe_denoiser=devices.probe_denoiser,
-                 estimate=estimate_module.run_estimate, examples_dir: Path | None = None,
+                 estimate=estimate_module.STAGES, examples_dir: Path | None = None,
                  kept_root: Path | None = None):
         self.root = root
         self.window = root.winfo_toplevel()
@@ -44,7 +44,9 @@ class App:
         self._probe_denoiser = probe_denoiser
         self._denoiser = None
         self._using_stage_rows = False
-        self._estimate = estimate
+        # (a single function is one stage: the full one)
+        self._estimate_stages = estimate if isinstance(estimate, tuple) else (('', estimate),)
+        self._estimate_cancel: threading.Event | None = None
         self._examples_dir = examples_dir
         self.kept_root = Path(kept_root) if kept_root is not None else kept.kept_root()
         self._kept_folder: Path | None = None
@@ -438,12 +440,14 @@ class App:
         if inputs is None:
             if self._estimate_inputs is not None:
                 self.generation += 1
+                self._cancel_estimate()
             self._estimate_inputs = None
             self._estimate_pending = None
             self.estimate_state = 'idle'
             self.memory_label.configure(text='')
         elif inputs != self._estimate_inputs:
             self.generation += 1
+            self._cancel_estimate()
             self._estimate_inputs = inputs
             self._estimate_pending = (self.generation, inputs)
             self.estimate_state = 'calculating'
@@ -457,17 +461,29 @@ class App:
         generation, inputs = self._estimate_pending
         self._estimate_pending = None
         self._estimate_running = (generation, inputs)
-        estimate, events = self._estimate, self.events
+        stages, events = self._estimate_stages, self.events
+        cancel = self._estimate_cancel = threading.Event()
 
         def calculate():
-            try:
-                result = estimate(inputs)
-            except Exception as exc:
-                result = exc
-            events.put(('estimate', generation, inputs, result))
+            # (a setting change cancels the run between stages; the stage it is in finishes and is dropped)
+            for number, (_, run) in enumerate(stages):
+                if cancel.is_set():
+                    break
+                try:
+                    result = run(inputs)
+                except Exception as exc:
+                    result = exc
+                events.put(('estimate', generation, inputs, result, number))
+                if isinstance(result, BaseException):
+                    break
+            events.put(('estimate_done', generation, inputs))
 
         # only plain inputs and the queue cross threads; Tk-owning objects stay on the UI thread.
         threading.Thread(target=calculate, daemon=True).start()
+
+    def _cancel_estimate(self):
+        if self._estimate_cancel is not None:
+            self._estimate_cancel.set()
 
     @staticmethod
     def _set_optional_label(label, text):
@@ -565,7 +581,7 @@ class App:
     def _update_bake_state(self):
         valid_tags = self._tags is not None and form.tags_folder_problem(self._tags) is None
         valid = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and self.blender is not None
-                 and not self.busy and self.estimate_state in ('idle', 'fits', 'warning', 'risk', 'error'))
+                 and not self.busy and self.estimate_state != 'refused')
         self.bake_button.configure(state='normal' if valid else 'disabled')
         again = (valid_tags and bool(self._scenario) and bool(self.bsp_var.get()) and not self.busy
                  and self._kept_folder is not None)
@@ -835,9 +851,14 @@ class App:
                 event = self.events.get_nowait()
             except queue.Empty:
                 break
-            if event[0] == 'estimate':
-                generation, inputs, result = event[1:]
-                if self._estimate_running == (generation, inputs):
+            if event[0] == 'estimate_done':
+                if self._estimate_running == tuple(event[1:]):
+                    self._estimate_running = None
+                self._start_estimate()
+            elif event[0] == 'estimate':
+                generation, inputs, result = event[1:4]
+                number = event[4] if len(event) > 4 else len(self._estimate_stages) - 1
+                if len(event) <= 4 and self._estimate_running == (generation, inputs):
                     self._estimate_running = None
                 if generation != self.generation:
                     self._start_estimate()
@@ -848,6 +869,8 @@ class App:
                 except Exception as exc:
                     result = exc
                     text, state = errors.explain(exc), 'error'
+                if not isinstance(result, BaseException):
+                    text = self._estimate_stages[min(number, len(self._estimate_stages) - 1)][0] + text
                 self.memory_label.configure(text=text)
                 self.estimate_state = state
                 if isinstance(result, BaseException):

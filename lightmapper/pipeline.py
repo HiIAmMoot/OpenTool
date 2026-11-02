@@ -16,20 +16,22 @@ import logging
 from pathlib import Path, PureWindowsPath
 import shutil
 import tempfile
+import threading
 from time import perf_counter
 
 import numpy as np
 
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
-from .charts import CACHE_VERSION, CapError, ChartSettings, cache_version, chart_and_pack, load_charts, save_charts
+from .charts import (AUTO_PAGE_MAX, AUTO_TARGET_PAGES, CACHE_VERSION, CapError, ChartSettings, cache_version,
+                     chart_and_pack, load_charts, save_charts, step_up)
 from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, written_shape
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
-from .formats.bsp import apply_layout, point_clusters, read_geometry
+from .formats.bsp import OutMaterial, OutPage, apply_layout, point_clusters, read_geometry
 from .formats.lights import SceneLight
 from .formats.scenery import gather_lights, gather_occluders
-from .formats.vertices import ENV, unpack_uncompressed
+from .formats.vertices import ENV, LM, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
 from .progress import GLOW_PLANNED
@@ -245,13 +247,25 @@ def _estimate_cache(cache: Path) -> Path:
     return cache.with_name(cache.stem + '.estimate' + cache.suffix)
 
 
+# (the full estimate charts on a thread of its own into the bake's cache; a bake started meanwhile waits for it and
+# then loads what it made, rather than charting beside it and replacing the file under it)
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(cache: Path) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(str(Path(cache).resolve()).lower(), threading.Lock())
+
+
 def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path, nest: bool) -> list:
     chart_s = _chart_settings(s)
     key = chart_cache_key(input_file, chart_s, radiosity, nest)
-    pages = load_charts(cache, key)
-    if pages is None:
-        pages = chart_and_pack(geometry.groups, radiosity, chart_s, nest=nest)
-        save_charts(cache, pages, key)
+    with _cache_lock(cache):
+        pages = load_charts(cache, key)
+        if pages is None:
+            pages = chart_and_pack(geometry.groups, radiosity, chart_s, nest=nest)
+            save_charts(cache, pages, key)
     return pages
 
 
@@ -303,12 +317,13 @@ class SceneEstimate:
     # 9 * w * h over the pages with any triangle that ignores normals
     flagged_sub_texels: int = 0
     device: str = 'gpu'
+    scale: float = 1.0
 
 
 def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine, bounces: int = 1) -> memory.StageInputs:
     # (the glow run is skipped without bounces)
     glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' and bounces > 0 else 0
-    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow)
+    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow, scale=estimate.scale)
     return replace(inputs, whole_page_tiles=memory.whole_page_tiles(inputs, machine))
 
 
@@ -318,7 +333,7 @@ def _scene_estimate(scene, pages, device: str) -> SceneEstimate:
                          memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes), device)
 
 
-def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+def _estimate_level(tags: Path, scenario: str, bsp: str):
     tags = Path(tags)
     scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
     input_file = resolve_reference_path(tags, 'sbsp', input_path)
@@ -329,13 +344,94 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     geometry = read_geometry(bsp_tag)
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
     classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
-    # (the estimate skips the nest, which is most of the charting time on a big level, so its Auto shape can differ
-    # from the bake's: larger where the nest gets within the page target, smaller where a nested block needs a
-    # square shape the rectangles do not; owner decision)
+    return tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes
+
+
+# the quick estimate's charted texels per texel of surface area, and per triangle (padding and page waste): a fit to
+# bloodgulch, timberland and Monaco at densities 1 to 8, which it misses by -38 to +30% (owner: a rough first figure)
+QUICK_TEXELS_PER_AREA = 2.6
+QUICK_TEXELS_PER_TRIANGLE = 18
+
+
+def quick_estimate(tags: Path, scenario: str, bsp: str, s: Settings) -> SceneEstimate:
+    # no charting: the texels follow from surface area and density, the pages from the Auto page target, and the
+    # scene counts from the level as it stands (one stand-in page holding every shader group)
+    tags, scenario_tag, bsp_index, _, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
+    chart_s = _chart_settings(s)
+    texels, triangles, flagged, island = 0.0, 0, False, 0.0
+    stand_in = []
+    for index, (group, shader) in enumerate(zip(geometry.groups, radiosity)):
+        if not len(group.tris):
+            continue
+        corners = group.env['position'][group.tris].astype(np.float64)
+        area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
+                                    axis=1).sum()
+        group_texels = area * (chart_s.texels_per_unit * chart_s.density_scale(shader)) ** 2
+        texels += group_texels
+        if shader.flags & SIMPLE_PARAMETERIZATION:
+            island = max(island, group_texels)
+        triangles += len(group.tris)
+        flagged |= bool(shader.flags & IGNORE_NORMALS)
+        stand_in.append(OutMaterial(index, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids))
+    texels = QUICK_TEXELS_PER_AREA * texels + QUICK_TEXELS_PER_TRIANGLE * triangles
+    if s.page_max == 'auto':
+        # (the biggest chart sets Auto's floor; the largest simple-parameterization group is usually that chart,
+        # and a square about twice its side held the bake side on 11 of the 12 measured rows, the 12th above it)
+        floor = min(AUTO_PAGE_MAX, max(256, int(2 ** np.ceil(np.log2(max(1.0, 2 * island ** .5))))))
+        shape = (floor, floor)
+        while shape != (AUTO_PAGE_MAX, AUTO_PAGE_MAX) and texels > AUTO_TARGET_PAGES * shape[0] * shape[1]:
+            shape = step_up(shape)
+        side = shape[0]
+    else:
+        side = s.page_max
+    sizes = [(side, side)] * max(1, int(np.ceil(texels / side ** 2)))
+    scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, [OutPage(side, side, stand_in)], radiosity,
+                         classes, s.scenery_emission)
+    return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
+                         9 * side * side * len(sizes) if flagged else 0, 'cpu' if s.device == 'cpu' else 'gpu')
+
+
+# a rough estimate whose rectangles stepped up for the page count, from a shape where they needed no more than this
+# many pages, scales its figure by this much: there the nest may well have stayed a step lower (ruling R-C6)
+ROUGH_REACH = 12
+ROUGH_REDUCTION = 0.5
+
+
+def rough_pages(sizes, shape, stepped_from: int, flagged: bool):
+    # the rectangle layout's pages as a rough estimate counts them: (page sizes, flagged sub-texels, scale)
+    sizes = list(sizes)
+    if sizes and shape[0] == 2 * shape[1]:
+        # (a nested block may need the square shape where the rectangles settled on the half-height one, so the
+        # largest page is counted square)
+        largest = max(range(len(sizes)), key=lambda k: sizes[k][0] * sizes[k][1])
+        sizes[largest] = (shape[0], shape[0])
+    # (the nest can put a flagged chart on any page, so every page counts for the glow)
+    glow = 9 * sum(w * h for w, h in sizes) if flagged else 0
+    scale = ROUGH_REDUCTION if 0 < stepped_from <= ROUGH_REACH else 1.0
+    return sizes, glow, scale
+
+
+def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+    # the rough estimate: the rectangle layout, with no nest so it is fast, and margins for where the nest differs
+    tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
     pages = _charts(input_file, geometry, radiosity, s, _estimate_cache(Path(charts)), nest=False)
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission)
     # (no GPU probe: the setting alone says whether the CPU constants apply)
+    exact = _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
+    if s.page_max != 'auto' or not pages:
+        return exact
+    sizes, glow, scale = rough_pages(exact.pages, tuple(pages.page_shape), getattr(pages, 'stepped_from', 0),
+                                     bool(np.any(scene.tri_ignore_normals)))
+    return SceneEstimate(exact.counts, sizes, glow, exact.device, scale)
+
+
+def full_estimate(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+    # the bake's own layout, nest included, left in the bake's cache so the bake that follows loads it
+    tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
+    pages = _charts(input_file, geometry, radiosity, s, Path(charts), nest=True)
+    scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
+                         s.scenery_emission)
     return _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
 
 

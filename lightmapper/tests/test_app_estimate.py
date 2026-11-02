@@ -122,3 +122,41 @@ def test_describe_counts_all_127_resident_pages(result, monkeypatch):
     assert describe(result, memory.Machine(need, need, None))[1] == 'fits'
     assert describe(result, memory.Machine(need - 1, need - 1, None))[1] == 'risk'
     assert describe(result, memory.Machine(need - 1, need, need + 1))[1] == 'warning'
+
+
+def test_the_stages_run_quick_then_rough_then_full(monkeypatch, tmp_path):
+    from opentool import estimate
+    seen = []
+    for name in ('quick_estimate', 'estimate_scene', 'full_estimate'):
+        monkeypatch.setattr(pipeline, name, lambda *args, name=name: seen.append(name) or name)
+    inputs = estimate.EstimateInputs(tmp_path, 'level', 'room', 8.0, 'auto')
+    assert [run(inputs) for _, run in estimate.STAGES] == ['quick_estimate', 'estimate_scene', 'full_estimate']
+    labels = [label for label, _ in estimate.STAGES]
+    assert labels[0].startswith('Quick estimate') and labels[1].startswith('Rough estimate') and labels[2] == ''
+
+
+def test_rough_counts_the_square_when_it_lands_on_a_half_height_shape():
+    # (a nested block can need w x w where the rectangles settled on w x w/2, so the largest page is counted square)
+    sizes, flagged, scale = pipeline.rough_pages([(512, 1024), (512, 1024)], (1024, 512), 0, False)
+    assert max(w * h for w, h in sizes) == 1024 * 1024 and flagged == 0 and scale == 1.0
+    sizes, _, _ = pipeline.rough_pages([(1024, 1024)], (1024, 1024), 0, False)
+    assert sizes == [(1024, 1024)]
+
+
+def test_rough_counts_every_page_as_flagged_when_any_triangle_ignores_normals():
+    sizes, flagged, _ = pipeline.rough_pages([(256, 256), (256, 128)], (256, 256), 0, True)
+    assert flagged == 9 * (256 * 256 + 256 * 128)
+
+
+@pytest.mark.parametrize('stepped, scale', [(0, 1.0), (11, pipeline.ROUGH_REDUCTION), (pipeline.ROUGH_REACH, pipeline.ROUGH_REDUCTION),
+                                            (pipeline.ROUGH_REACH + 1, 1.0)])
+def test_rough_scales_down_when_the_page_count_stepped_up_from_within_reach(stepped, scale):
+    # (the rectangles stepped past a shape where they needed few enough pages for the nest to plausibly get in)
+    assert pipeline.rough_pages([(4096, 4096)] * 3, (4096, 2048), stepped, False)[2] == scale
+
+
+def test_the_scale_lowers_every_stage(result):
+    full = memory.stage_bytes(pipeline.stage_inputs(result, 'tool', None))
+    half = memory.stage_bytes(pipeline.stage_inputs(pipeline.SceneEstimate(result.counts, result.pages, scale=.5),
+                                                    'tool', None))
+    assert half['blender'] == full['blender'] // 2

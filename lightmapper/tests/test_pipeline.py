@@ -2189,3 +2189,58 @@ def test_enhanced_pipeline_hands_each_page_owner_map_to_both_gathers(tiny, monke
     assert [name for name, _ in seen] == ['contribution', 'source']
     assert all(owner is not None for _, owner in seen)
     assert seen[0][1] is seen[1][1]
+
+
+def test_the_quick_estimate_charts_nothing(tiny, monkeypatch, tmp_path):
+    tags, settings, _ = tiny
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('the quick estimate charted')
+    monkeypatch.setattr(api(), 'chart_and_pack', refuse)
+    estimate = api().quick_estimate(tags, 'level', 'room', settings)
+    assert estimate.pages and estimate.counts.triangles >= 2
+
+
+def test_the_bake_reuses_the_full_estimates_layout(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    cache = tmp_path / 'charts.npz'
+    nested = []
+    real = api().chart_and_pack
+
+    def spy(*args, **kwargs):
+        nested.append(kwargs.get('nest'))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', spy)
+    full = api().full_estimate(tags, 'level', 'room', settings, cache)
+    assert nested == [True] and cache.exists()
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    assert nested == [True]
+    assert json.loads((work / 'summary.json').read_text())['bake_sizes'] == [list(size) for size in full.pages]
+
+
+def test_a_bake_waits_for_a_layout_being_charted_into_its_cache(tiny, monkeypatch, tmp_path):
+    # (the full estimate runs on a thread of its own; a bake started meanwhile must not chart beside it)
+    import threading
+    tags, settings, work = tiny
+    cache = tmp_path / 'charts.npz'
+    real = api().chart_and_pack
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def slow(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(10)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', slow)
+    worker = threading.Thread(target=api().full_estimate, args=(tags, 'level', 'room', settings, cache), name='full')
+    worker.start()
+    assert started.wait(10)
+    baker = threading.Thread(target=api().bake, args=(tags, 'level', 'room', settings),
+                             kwargs={'work': work, 'charts': cache, 'dry_run': True}, name='bake')
+    baker.start()
+    baker.join(1)
+    assert baker.is_alive() and calls == ['full']
+    release.set()
+    worker.join(10)
+    baker.join(30)
+    assert calls == ['full']

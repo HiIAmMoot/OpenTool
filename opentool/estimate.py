@@ -24,14 +24,27 @@ class EstimateInputs:
     bounces: int = 1
 
 
+def _settings(inputs: EstimateInputs) -> Settings:
+    return Settings(texels_per_unit=inputs.texels_per_unit, page_max=inputs.page_max,
+                    ignore_normals_mode=inputs.ignore_normals_mode, device=inputs.device, bounces=inputs.bounces)
+
+
+def run_quick(inputs: EstimateInputs) -> SceneEstimate:
+    return pipeline.quick_estimate(inputs.tags, inputs.scenario, inputs.bsp, _settings(inputs))
+
+
 def run_estimate(inputs: EstimateInputs) -> SceneEstimate:
-    return pipeline.estimate_scene(
-        inputs.tags, inputs.scenario, inputs.bsp,
-        Settings(texels_per_unit=inputs.texels_per_unit, page_max=inputs.page_max,
-                 ignore_normals_mode=inputs.ignore_normals_mode, device=inputs.device,
-                 bounces=inputs.bounces),
-        runner.chart_cache_path(inputs.tags, inputs.scenario, inputs.bsp),
-    )
+    return pipeline.estimate_scene(inputs.tags, inputs.scenario, inputs.bsp, _settings(inputs),
+                                   runner.chart_cache_path(inputs.tags, inputs.scenario, inputs.bsp))
+
+
+def run_full(inputs: EstimateInputs) -> SceneEstimate:
+    return pipeline.full_estimate(inputs.tags, inputs.scenario, inputs.bsp, _settings(inputs),
+                                  runner.chart_cache_path(inputs.tags, inputs.scenario, inputs.bsp))
+
+
+# (label, run) from rough to fine; each figure replaces the last, and the full one is the bake's own layout
+STAGES = (('Quick estimate. ', run_quick), ('Rough estimate. ', run_estimate), ('', run_full))
 
 
 STATES = {'fits': 'fits', 'page_file': 'warning', 'out_of_memory': 'risk'}

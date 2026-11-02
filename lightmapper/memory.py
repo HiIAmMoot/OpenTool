@@ -60,6 +60,8 @@ class StageInputs:
     # 9 * w * h over the pages holding a flagged triangle, only in the Enhanced ignore-normals mode
     glow_sub_texels: int = 0
     whole_page_tiles: bool = False
+    # a rough estimate's correction for a layout it knows to be larger than the bake's
+    scale: float = 1.0
 
 
 def _largest_sub_texels(pages) -> int:
@@ -71,13 +73,16 @@ def _stages(inputs: StageInputs, largest: int, texels: int) -> dict[str, int]:
     glow = inputs.glow_sub_texels
     blender = (BLENDER_BASE + BLENDER_PER_SUB_TEXEL * largest + BLENDER_PER_PAGE_TEXEL * texels
                + BLENDER_PER_VERTEX * inputs.counts.vertices)
-    return {
+    stages = {
         'blender': ceil(MARGIN * blender) + (PER_TILE_SUB_TEXEL * largest if tiles else 0),
         'vertex': ceil(MARGIN * (VERTEX_BASE + VERTEX_PER_PAGE_TEXEL * texels + VERTEX_PER_GLOW_SUB_TEXEL * glow)),
         'glow': 0 if glow == 0 else (ceil(MARGIN * (blender + GLOW_PER_GLOW_SUB_TEXEL * glow))
                                      + (GLOW_PER_TILE_SUB_TEXEL * largest if tiles else 0)),
         'finish': ceil(MARGIN * (FINISH_BASE + FINISH_PER_SUB_TEXEL * largest)),
     }
+    if inputs.scale != 1.0:
+        stages = {name: int(value * inputs.scale) for name, value in stages.items()}
+    return stages
 
 
 def stage_bytes(inputs: StageInputs) -> dict[str, int]:
