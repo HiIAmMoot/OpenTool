@@ -16,6 +16,9 @@ from lightmapper.progress import STAGE_LABELS, fraction
 from . import devices, errors, estimate as estimate_module, examples, form, jobobject, presets, runner, usersettings
 from .estimate import EstimateInputs
 
+# how long each compared value's frame stays up in an Advanced example
+EXAMPLE_FRAME_MS = 1500
+
 
 class _BakeGate:
     # held by the bake thread's emit wrapper and by on_close, so "is a tag write under way" is
@@ -50,6 +53,9 @@ class App:
         self._kept_folder: Path | None = None
         self._kept_error: str | None = None
         self._example_images = {}
+        self._example_name = None
+        self._example_frame = 0
+        self._example_timer = None
         self._example_hover = None
         self._example_focus = None
         self.generation = 0
@@ -651,15 +657,26 @@ class App:
     def _show_example(self):
         name = self._example_hover or self._example_focus
         if name is None:
+            self._stop_example_loop()
+            self._example_name = None
             self.example_panel.place_forget()
             return
         if name not in self._example_images:
-            path = examples.example_image(name, self._examples_dir)
-            try:
-                # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
-                self._example_images[name] = tk.PhotoImage(master=self.example_panel, data=path.read_bytes()) if path else None
-            except (OSError, tk.TclError):
-                self._example_images[name] = None
+            frames = []
+            for path in examples.example_frames(name, self._examples_dir):
+                try:
+                    # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
+                    frames.append(tk.PhotoImage(master=self.example_panel, data=path.read_bytes()))
+                except (OSError, tk.TclError):
+                    pass
+            self._example_images[name] = frames
+        if name != self._example_name:
+            # (a resize shows the same row again and must not restart its loop)
+            self._stop_example_loop()
+            self._example_name = name
+            self._example_frame = 0
+            if len(self._example_images[name]) > 1:
+                self._example_timer = self.window.after(EXAMPLE_FRAME_MS, self._next_example_frame)
         x, y, width, height = self.advanced_frame.grid_bbox(2, 0, 2, len(self.row_order) - 1)
         if width < 2:
             # (a frame not mapped yet is laid out at 1px; its requested width split over the two uniform columns is the share it will get)
@@ -669,13 +686,28 @@ class App:
         self.example_panel.place(x=x + 8, y=y, width=width, height=max(height, 1))
         self.example_panel.update_idletasks()
         room = max(height - self.example_text.winfo_reqheight() - 4, 1)
-        image = self._example_images[name]
+        frames = self._example_images[name]
+        image = frames[self._example_frame % len(frames)] if frames else None
         if image is not None:
             step = max(-(-image.width() // width), -(-image.height() // room), 1)
             image = image.subsample(step) if step > 1 else image
         self._example_shown = image
         self.example_image_label.configure(image=image or '')
         self.example_panel.lift()
+
+    def _stop_example_loop(self):
+        if self._example_timer is not None:
+            self.window.after_cancel(self._example_timer)
+            self._example_timer = None
+
+    def _next_example_frame(self):
+        self._example_timer = None
+        frames = self._example_images.get(self._example_name) or []
+        if len(frames) < 2:
+            return
+        self._example_frame = (self._example_frame + 1) % len(frames)
+        self._show_example()
+        self._example_timer = self.window.after(EXAMPLE_FRAME_MS, self._next_example_frame)
 
     def _update_row_hints(self):
         adaptive = self.adaptive_var.get()
@@ -1072,6 +1104,7 @@ class App:
         self._exit_now()
 
     def _close_window(self):
+        self._stop_example_loop()
         try:
             try:
                 self.remember()

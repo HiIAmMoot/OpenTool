@@ -1846,7 +1846,7 @@ def test_showing_an_example_leaves_the_layout_alone(app):
 
 
 def test_a_corrupt_example_image_shows_text_only(make_app, tmp_path):
-    (tmp_path / 'samples.png').write_bytes(b'not a png')
+    (tmp_path / 'samples_0.png').write_bytes(b'not a png')
     app = make_app(examples_dir=tmp_path)
     app._on_example_hover('samples')
     assert app.example_text.cget('text') == examples.EXAMPLE_TEXT['samples']
@@ -2117,3 +2117,68 @@ def test_estimate_asks_for_the_users_device_and_bounces(ready_app_with_fake):
     app.advanced_vars['bounces'].set('0')
     finish_estimate(app, fake, 2)
     assert fake.calls[2].bounces == 0
+
+
+def _frames_dir(tmp_path, name, count):
+    # (distinct sizes tell the frames apart without comparing pixels)
+    for index in range(count):
+        data = tk.PhotoImage(width=10 + index, height=10)
+        data.write(str(tmp_path / f'{name}_{index}.png'), format='png')
+    return tmp_path
+
+
+def test_example_frames_advance_and_wrap(make_app, tmp_path):
+    app = make_app(examples_dir=_frames_dir(tmp_path, 'samples', 3))
+    app._on_example_hover('samples')
+    assert app._example_frame == 0
+    assert app._example_timer is not None
+    for expected in (1, 2, 0):
+        app._next_example_frame()
+        assert app._example_frame == expected
+        assert app._example_timer is not None
+
+
+def test_switching_rows_restarts_the_loop_at_frame_zero(make_app, tmp_path):
+    _frames_dir(tmp_path, 'samples', 3)
+    _frames_dir(tmp_path, 'bounces', 2)
+    app = make_app(examples_dir=tmp_path)
+    app._on_example_hover('samples')
+    app._next_example_frame()
+    old = app._example_timer
+    app._on_example_hover('bounces')
+    assert app._example_frame == 0
+    assert app._example_timer is not None and app._example_timer != old
+    assert old not in app.window.tk.call('after', 'info')
+
+
+def test_showing_the_same_row_again_keeps_its_frame(make_app, tmp_path):
+    app = make_app(examples_dir=_frames_dir(tmp_path, 'samples', 3))
+    app._on_example_focus('samples')
+    app._on_example_hover('samples')
+    app._next_example_frame()
+    app._on_example_hover(None)
+    assert app._example_frame == 1
+    assert app._example_timer is not None
+
+
+def test_leaving_the_panel_stops_the_loop(make_app, tmp_path):
+    app = make_app(examples_dir=_frames_dir(tmp_path, 'samples', 2))
+    app._on_example_hover('samples')
+    app._on_example_hover(None)
+    assert app._example_timer is None
+
+
+def test_a_single_frame_starts_no_timer(make_app, tmp_path):
+    app = make_app(examples_dir=_frames_dir(tmp_path, 'samples', 1))
+    app._on_example_hover('samples')
+    assert app._example_timer is None
+    assert app.example_image_label.cget('image')
+
+
+def test_closing_cancels_the_example_timer(make_app, tmp_path):
+    app = make_app(examples_dir=_frames_dir(tmp_path, 'samples', 2))
+    app._on_example_hover('samples')
+    timer = app._example_timer
+    app.on_close()
+    assert app._example_timer is None
+    assert timer not in app.window.tk.call('after', 'info') if app.window.winfo_exists() else True

@@ -2,8 +2,8 @@ from pathlib import Path
 
 from lightmapper import frozen
 
-# one image per Settings field, named after it, showing the compared values side by side: the
-# generator writes opentool/examples/<name>.png for each name here
+# one full frame per compared value of each Settings field, named <name>_0.png, <name>_1.png and so on
+# in opentool/examples/ (a lone <name>.png is one still frame); the app loops through them
 EXAMPLE_ROWS = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max',
                 'adaptive_sampling', 'lightmap_32bit', 'render_only_shadows')
 EXAMPLE_DIR = frozen.bundle_dir() / 'opentool' / 'examples'
@@ -20,6 +20,12 @@ EXAMPLE_TEXT = {
 }
 
 
-def example_image(name: str, folder: Path | None = None) -> Path | None:
-    path = (EXAMPLE_DIR if folder is None else Path(folder)) / f'{name}.png'
-    return path if path.is_file() else None
+def example_frames(name: str, folder: Path | None = None) -> list[Path]:
+    base = EXAMPLE_DIR if folder is None else Path(folder)
+    frames = []
+    # (a gap ends the list: a frame renamed or missed would otherwise skip silently past the rest)
+    while (base / f'{name}_{len(frames)}.png').is_file():
+        frames.append(base / f'{name}_{len(frames)}.png')
+    if not frames and (base / f'{name}.png').is_file():
+        frames.append(base / f'{name}.png')
+    return frames
