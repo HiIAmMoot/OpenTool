@@ -1,3 +1,4 @@
+import io
 import ctypes
 import os
 from pathlib import Path
@@ -8,6 +9,8 @@ import traceback
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
+
+from PIL import Image
 
 from lightmapper import blender_find, gpu, kept
 from lightmapper.errors import KeptBakeError
@@ -54,6 +57,7 @@ class App:
         self._kept_folder: Path | None = None
         self._kept_error: str | None = None
         self._example_images = {}
+        self._example_scaled = {}
         self._example_name = None
         self._example_frame = 0
         self._example_timer = None
@@ -679,8 +683,11 @@ class App:
             for path in examples.example_frames(name, self._examples_dir):
                 try:
                     # (Tk opening the file itself failed now and then on Windows, with an empty error; its bytes load every time)
-                    frames.append(tk.PhotoImage(master=self.example_panel, data=path.read_bytes()))
-                except (OSError, tk.TclError):
+                    # (Pillow resizes to the exact fit: Tk's own subsample and zoom only take whole steps)
+                    image = Image.open(io.BytesIO(path.read_bytes()))
+                    image.load()
+                    frames.append(image)
+                except (OSError, ValueError):
                     pass
             self._example_images[name] = frames
         if name is not None and not self._example_images[name]:
@@ -708,10 +715,17 @@ class App:
         self.example_panel.update_idletasks()
         room = max(height - self.example_text.winfo_reqheight() - 4, 1)
         frames = self._example_images[name]
-        image = frames[self._example_frame % len(frames)] if frames else None
-        if image is not None:
-            step = max(-(-image.width() // width), -(-image.height() // room), 1)
-            image = image.subsample(step) if step > 1 else image
+        index = self._example_frame % len(frames)
+        source = frames[index]
+        # (never enlarged past the file's own size: a small frame would only blur)
+        scale = min(width / source.width, room / source.height, 1)
+        size = (max(int(source.width * scale), 1), max(int(source.height * scale), 1))
+        image = self._example_scaled.get((name, index, size))
+        if image is None:
+            data = io.BytesIO()
+            source.convert('RGBA').resize(size, Image.LANCZOS).save(data, 'PNG')
+            image = self._example_scaled[(name, index, size)] = tk.PhotoImage(
+                master=self.example_panel, data=data.getvalue())
         self._example_shown = image
         self.example_image_label.configure(image=image or '')
         self.example_panel.lift()
@@ -735,7 +749,8 @@ class App:
         values = {'page_max': self.advanced_vars['page_max'].get()}
         for name, hint in self.row_hints.items():
             warning = presets.row_hint(name, values.get(name, ''), adaptive)
-            hint.configure(text=f'{examples.IDLE_HINTS[name]} {warning}' if warning else examples.IDLE_HINTS[name])
+            # (an active hint takes the explanation's place: both together run past two lines)
+            hint.configure(text=warning or examples.IDLE_HINTS[name])
         entry = self.advanced_entries['samples']
         state = 'disabled' if adaptive else 'normal'
         if entry in self._locked:

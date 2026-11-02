@@ -154,7 +154,7 @@ def test_row_hint():
     assert presets.row_hint('samples', '1024', False) == ''
     for name in ('texels_per_unit', 'vertex_rays', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):
         assert presets.row_hint(name, 'Enhanced', True) == ''
-    assert presets.ADAPTIVE_HINT == 'the most rays per texel while adaptive sampling is on'
+    assert presets.ADAPTIVE_HINT == 'Most rays per texel while adaptive is on.'
 
 
 @pytest.mark.parametrize('name, grid', [('Draft', 2), ('Normal', 4), ('High', 4), ('Ultra', 4)])

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 tk = pytest.importorskip('tkinter')
-from tkinter import ttk
+from tkinter import font as tkfont, ttk
 
 from test_pipeline import tiny
 from lightmapper import kept
@@ -1215,7 +1215,7 @@ def test_32bit_checkbox_reaches_the_settings_and_is_remembered(tmp_path, tiny, m
 def test_max_resolution_hint_appears_for_large_pages(app):
     for value, shown in (('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True)):
         app.advanced_vars['page_max'].set(value)
-        assert (presets.PAGE_MAX_HINT in app.page_max_hint['text']) is shown
+        assert (app.page_max_hint['text'] == presets.PAGE_MAX_HINT) is shown
         assert not any(ch.isdigit() for ch in app.page_max_hint['text'])
     app._select_preset('High')
     assert app.page_max_hint['text'] == examples.IDLE_HINTS['page_max']
@@ -1710,7 +1710,7 @@ def test_adaptive_greys_rays_per_texel(app):
     assert app.adaptive_var.get() is True
     assert app.adaptive_check['text'] == 'Adaptive sampling'
     assert str(entry['state']) == 'disabled'
-    assert presets.ADAPTIVE_HINT in app.row_hints['samples']['text']
+    assert app.row_hints['samples']['text'] == presets.ADAPTIVE_HINT
     value = app.advanced_vars['samples'].get()
     app.adaptive_var.set(False)
     assert str(entry['state']) == 'normal'
@@ -1758,6 +1758,8 @@ def _leave(app):
 
 def test_every_row_shows_a_grey_explanation_when_idle(app):
     app._toggle_advanced()
+    # (adaptive sampling's hint replaces the samples row's explanation while it is on)
+    app.adaptive_var.set(False)
     assert app.example_panel.winfo_manager() == ''
     for name in app.row_order:
         hint = app.row_hints[name]
@@ -2260,3 +2262,48 @@ def test_closing_cancels_the_example_timer(make_app, tmp_path):
     app.on_close()
     assert app._example_timer is None
     assert timer not in app.window.tk.call('after', 'info') if app.window.winfo_exists() else True
+
+
+def test_an_example_image_fills_the_panel_at_its_aspect(make_app, tmp_path):
+    from PIL import Image
+    Image.new('RGB', (800, 600), 'white').save(tmp_path / 'samples_0.png')
+    app = make_app(examples_dir=tmp_path)
+    app._toggle_advanced()
+    app.window.geometry('900x700')
+    app.window.update()
+    app._on_example_hover('samples')
+    app.window.update()
+    info = app.example_panel.place_info()
+    room = int(info['height']) - app.example_text.winfo_reqheight() - 4
+    shown = app._example_shown
+    assert shown.width() * 3 == pytest.approx(shown.height() * 4, abs=4)
+    assert shown.width() <= int(info['width']) and shown.height() <= room
+    assert shown.width() >= int(info['width']) - 1 or shown.height() >= room - 1
+
+
+def test_a_scaled_example_frame_is_cached_per_size(make_app, tmp_path):
+    from PIL import Image
+    Image.new('RGB', (800, 600), 'white').save(tmp_path / 'samples_0.png')
+    app = make_app(examples_dir=tmp_path)
+    app._toggle_advanced()
+    app.window.geometry('900x700')
+    app.window.update()
+    app._on_example_hover('samples')
+    app.window.update()
+    first = app._example_shown
+    app._on_example_hover('samples')
+    app._show_example()
+    assert app._example_shown is first
+
+
+@pytest.mark.parametrize('adaptive', [True, False])
+@pytest.mark.parametrize('page_max', ['1024', '4096'])
+def test_every_grey_explanation_is_at_most_two_lines(app, adaptive, page_max):
+    app._toggle_advanced()
+    app.window.geometry('900x700')
+    app.adaptive_var.set(adaptive)
+    app.advanced_vars['page_max'].set(page_max)
+    app.window.update()
+    for name, hint in app.row_hints.items():
+        lines = tkfont.Font(font=hint.cget('font')).metrics('linespace')
+        assert hint.winfo_reqheight() <= 2 * lines, (name, hint['text'])

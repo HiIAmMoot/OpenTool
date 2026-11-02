@@ -35,10 +35,10 @@ LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vert
 
 DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
 
-PAGE_MAX_HINT = 'bigger pages need more memory; the bake checks before it starts'
+PAGE_MAX_HINT = 'Needs more memory; checked before the bake.'
 
 
-ADAPTIVE_HINT = 'the most rays per texel while adaptive sampling is on'
+ADAPTIVE_HINT = 'Most rays per texel while adaptive is on.'
 
 
 def page_max_hint(value: str) -> str:

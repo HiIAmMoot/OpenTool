@@ -15,7 +15,7 @@ IDLE_HINTS = {
     'vertex_rays': 'Rays per vertex for bump shading. More is smoother.',
     'bounces': 'How often light bounces between surfaces.',
     'page_max': 'The largest lightmap page. Bigger fits more of the level.',
-    'render_only_shadows': 'How surfaces with no collision, like a sea plane, shadow what lies beneath.',
+    'render_only_shadows': 'Shadows of no-collision surfaces, like a sea plane.',
     'adaptive_sampling': 'Stops casting rays at a clean texel. Faster.',
     'lightmap_32bit': 'No banding, but twice the space.',
 }
