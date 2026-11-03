@@ -199,7 +199,8 @@ def plan_repack(blocks: list[Block], shape: tuple[int, int], page_min: int = 8, 
     step = next_step(shape)
     order = sorted(range(len(blocks)), key=lambda k: (-blocks[k].width * blocks[k].height,
                                                       -max(blocks[k].width, blocks[k].height), k))
-    pending = [k for k in order if not _fits((blocks[k].width, blocks[k].height), step)] +               [k for k in order if _fits((blocks[k].width, blocks[k].height), step)]
+    pending = [k for k in order if not _fits((blocks[k].width, blocks[k].height), step)] + \
+              [k for k in order if _fits((blocks[k].width, blocks[k].height), step)]
     for block in blocks:
         if len(block.materials) > max_materials:
             raise CapError(f'one chart holds {len(block.materials)} materials, over max_materials_per_page '

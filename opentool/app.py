@@ -13,6 +13,7 @@ from tkinter.scrolledtext import ScrolledText
 from PIL import Image
 
 from lightmapper import blender_find, gpu, kept
+from lightmapper.charts import CapError
 from lightmapper.errors import KeptBakeError
 from lightmapper.memory import read_machine
 from lightmapper.progress import STAGE_LABELS, fraction
@@ -468,7 +469,8 @@ class App:
         self._update_bake_state()
 
     def _start_estimate(self):
-        if self._estimate_running is not None or self._estimate_pending is None:
+        # (a bake owns the machine; _bake_done starts what waited)
+        if self.busy or self._estimate_running is not None or self._estimate_pending is None:
             return
         generation, inputs = self._estimate_pending
         self._estimate_pending = None
@@ -486,7 +488,9 @@ class App:
                 except Exception as exc:
                     result = exc
                 events.put(('estimate', generation, inputs, result, number))
-                if isinstance(result, BaseException):
+                # (a stage's error does not stop the finer ones; only a refusal the next stage would repeat does:
+                # a fixed Max resolution is charted the same without the nest, while Auto may fit once nested)
+                if isinstance(result, CapError) and inputs.page_max != 'auto':
                     break
             events.put(('estimate_done', generation, inputs))
 
@@ -938,9 +942,7 @@ class App:
                 self._start_estimate()
             elif event[0] == 'estimate':
                 generation, inputs, result = event[1:4]
-                number = event[4] if len(event) > 4 else len(self._estimate_stages) - 1
-                if len(event) <= 4 and self._estimate_running == (generation, inputs):
-                    self._estimate_running = None
+                number = event[4]
                 if generation != self.generation:
                     self._start_estimate()
                     continue
@@ -1051,6 +1053,7 @@ class App:
         self.open_button.configure(state='normal' if outcome.output_folder else 'disabled')
         self._refresh_kept_folder()
         self._unlock_form()
+        self._start_estimate()
 
     def _lock_form(self):
         self._locked = {}
@@ -1111,6 +1114,9 @@ class App:
         self.write_again_button.configure(state='disabled')
         self.open_button.configure(state='disabled')
         self._lock_form()
+        if not write_again:
+            # (the stage it is in finishes; no finer one starts beside the bake)
+            self._cancel_estimate()
         self.log_box.configure(state='normal')
         self.log_box.delete('1.0', 'end')
         self.log_box.configure(state='disabled')

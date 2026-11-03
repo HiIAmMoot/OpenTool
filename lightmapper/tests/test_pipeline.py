@@ -2249,3 +2249,18 @@ def test_a_bake_waits_for_a_layout_being_charted_into_its_cache(tiny, monkeypatc
     worker.join(10)
     baker.join(30)
     assert calls == ['full']
+
+
+def test_the_quick_and_rough_estimates_pass_the_render_only_shadows_setting(tiny, monkeypatch, tmp_path):
+    tags, settings, _ = tiny
+    settings = replace(settings, render_only_shadows='none')
+    seen = []
+    real = api()._scene
+
+    def spy(*args, **kwargs):
+        seen.append(args[8] if len(args) > 8 else kwargs.get('render_only_shadows'))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), '_scene', spy)
+    api().quick_estimate(tags, 'level', 'room', settings)
+    api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+    assert seen == ['none', 'none']

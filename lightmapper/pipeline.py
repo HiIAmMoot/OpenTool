@@ -23,7 +23,7 @@ import numpy as np
 
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
-from .charts import (AUTO_PAGE_MAX, AUTO_TARGET_PAGES, CACHE_VERSION, CapError, ChartSettings, cache_version,
+from .charts import (AUTO_PAGE_MAX, AUTO_PAGE_MIN, AUTO_TARGET_PAGES, CACHE_VERSION, CapError, ChartSettings, cache_version,
                      chart_and_pack, load_charts, save_charts, step_up)
 from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, written_shape
 from .errors import BakeError, KeptBakeError
@@ -410,7 +410,7 @@ def quick_estimate(tags: Path, scenario: str, bsp: str, s: Settings) -> SceneEst
     if s.page_max == 'auto':
         # (the biggest chart sets Auto's floor; the largest simple-parameterization group is usually that chart,
         # and a square about twice its side held the bake side on 11 of the 12 measured rows, the 12th above it)
-        floor = min(AUTO_PAGE_MAX, max(256, int(2 ** np.ceil(np.log2(max(1.0, 2 * island ** .5))))))
+        floor = min(AUTO_PAGE_MAX, max(AUTO_PAGE_MIN, int(2 ** np.ceil(np.log2(max(1.0, 2 * island ** .5))))))
         shape = (floor, floor)
         while shape != (AUTO_PAGE_MAX, AUTO_PAGE_MAX) and texels > AUTO_TARGET_PAGES * shape[0] * shape[1]:
             shape = step_up(shape)
@@ -419,7 +419,7 @@ def quick_estimate(tags: Path, scenario: str, bsp: str, s: Settings) -> SceneEst
         side = s.page_max
     sizes = [(side, side)] * max(1, int(np.ceil(texels / side ** 2)))
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, [OutPage(side, side, stand_in)], radiosity,
-                         classes, s.scenery_emission)
+                         classes, s.scenery_emission, s.render_only_shadows)
     return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
                          9 * side * side * len(sizes) if flagged else 0, 'cpu' if s.device == 'cpu' else 'gpu')
 

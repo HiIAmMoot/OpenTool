@@ -1359,7 +1359,7 @@ def test_two_quick_selections_show_only_the_last_result(ready_app_with_fake, mon
 def test_stale_estimate_is_ignored(ready_app_with_fake):
     app, fake = ready_app_with_fake
     previous = (app.memory_label['text'], app.estimate_state, str(app.bake_button['state']))
-    app.events.put(('estimate', app.generation - 1, fake.calls[0], CapError('old')))
+    app.events.put(('estimate', app.generation - 1, fake.calls[0], CapError('old'), 0))
     app._drain()
     assert (app.memory_label['text'], app.estimate_state, str(app.bake_button['state'])) == previous
 
@@ -1429,7 +1429,7 @@ def test_memory_risk_asks_before_baking(ready_app, monkeypatch, answer, new_name
     machine = Machine(1, 1, 1)
     monkeypatch.setattr(app_module, 'read_machine', lambda: machine)
     inputs = app.estimate_inputs()
-    app.events.put(('estimate', app.generation, inputs, ESTIMATE_FITS))
+    app.events.put(('estimate', app.generation, inputs, ESTIMATE_FITS, 0))
     app._drain()
     app.new_names_var.set(new_names)
     stages_in = pipeline.stage_inputs(ESTIMATE_FITS, inputs.ignore_normals_mode, machine)
@@ -1461,7 +1461,7 @@ def test_memory_risk_asks_before_baking(ready_app, monkeypatch, answer, new_name
 def test_the_page_file_level_does_not_ask_before_baking(ready_app, monkeypatch):
     app = ready_app
     monkeypatch.setattr(app_module, 'read_machine', lambda: Machine(1, 1, 10**12))
-    app.events.put(('estimate', app.generation, app.estimate_inputs(), ESTIMATE_FITS))
+    app.events.put(('estimate', app.generation, app.estimate_inputs(), ESTIMATE_FITS, 0))
     app._drain()
     app.new_names_var.set(True)
     asked, started = [], []
@@ -2444,3 +2444,78 @@ def test_a_setting_change_during_the_stages_drops_the_stale_ones(staged_app):
     fake.gate(2).set()
     pump(app.root, lambda: app.memory_label['text'].startswith('Quick'))
     assert [call for call in fake.calls if call[1] == 'auto'] == [(0, 'auto'), (1, 'auto')]
+
+
+def test_a_bake_stops_the_staged_estimate_at_the_stage_boundary(staged_app):
+    app, fake = staged_app
+    app.new_names_var.set(True)
+    fake.gate(0).set()
+    pump(app.root, lambda: len(fake.calls) == 2)
+    release = threading.Event()
+    app._run_bake = lambda req, emit: (release.wait(5), emit(('done', OUTCOME_DONE)))
+    app.start_bake()
+    assert app.busy
+    fake.gate(1).set()
+    pump(app.root, lambda: app._estimate_running is None)
+    assert [stage for stage, _ in fake.calls] == [0, 1]
+    release.set()
+    pump(app.root, lambda: not app.busy)
+
+
+def test_an_estimate_pending_when_the_bake_starts_runs_only_after_it(staged_app):
+    app, fake = staged_app
+    app.new_names_var.set(True)
+    app.advanced_vars['page_max'].set('1024')
+    release = threading.Event()
+    app._run_bake = lambda req, emit: (release.wait(5), emit(('done', OUTCOME_DONE)))
+    app.start_bake()
+    fake.gate(0).set()
+    pump(app.root, lambda: app._estimate_running is None)
+    app._drain()
+    assert len(fake.calls) == 1 and app._estimate_running is None
+    release.set()
+    pump(app.root, lambda: len(fake.calls) == 2)
+    assert fake.calls[1] == (0, 1024)
+
+
+def failing_stages(errors_at, ran):
+    def stage(number):
+        def run(inputs):
+            ran.append((number, inputs.page_max))
+            if number in errors_at:
+                raise errors_at[number]
+            return ESTIMATE_FITS
+        return run
+    return (('Quick estimate. ', stage(0)), ('Rough estimate. ', stage(1)), ('', stage(2)))
+
+
+def run_failing_stages(make_app, tiny, errors_at):
+    ran = []
+    app = make_app(estimate=failing_stages(errors_at, ran))
+    tags, *_ = tiny
+    (tags / 'globals').mkdir()
+    app.set_tags(str(tags))
+    app.set_scenario_file(tags / 'level.scenario')
+    pump(app.root, lambda: app.blender is not None and app._estimate_running is None and len(ran) > 0)
+    return app, ran
+
+
+def test_a_quick_stage_error_still_runs_the_rough_and_full_stages(make_app, tiny):
+    app, ran = run_failing_stages(make_app, tiny, {0: RuntimeError('quick broke')})
+    pump(app.root, lambda: app.memory_label['text'].startswith('Needs about'))
+    assert [number for number, _ in ran] == [0, 1, 2] and app.estimate_state == 'fits'
+
+
+def test_a_rough_stage_cap_refusal_under_auto_still_runs_the_full_stage(make_app, tiny):
+    app, ran = run_failing_stages(make_app, tiny, {1: CapError('too many pages')})
+    pump(app.root, lambda: app.memory_label['text'].startswith('Needs about'))
+    assert [number for number, _ in ran] == [0, 1, 2] and app.estimate_state == 'fits'
+
+
+def test_a_rough_stage_cap_refusal_under_a_fixed_max_resolution_ends_the_run(make_app, tiny):
+    app, ran = run_failing_stages(make_app, tiny, {1: CapError('too many pages')})
+    pump(app.root, lambda: app.memory_label['text'].startswith('Needs about'))
+    ran.clear()
+    app.advanced_vars['page_max'].set('1024')
+    pump(app.root, lambda: app.estimate_state == 'refused' and app._estimate_running is None)
+    assert [number for number, _ in ran] == [0, 1]

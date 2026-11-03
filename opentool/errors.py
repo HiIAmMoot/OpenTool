@@ -11,7 +11,9 @@ from lightmapper.pipeline import BakeError
 
 def _auto_would_help(page_max) -> str:
     # Auto reaches AUTO_PAGE_MAX, so it only adds room over a fixed Max resolution below that
-    return ', or set Max resolution to Auto under Advanced' if isinstance(page_max, int) and page_max < AUTO_PAGE_MAX         else ''
+    if isinstance(page_max, int) and page_max < AUTO_PAGE_MAX:
+        return ', or set Max resolution to Auto under Advanced'
+    return ''
 
 
 def explain(exc: BaseException, work: Path | None = None) -> str:
