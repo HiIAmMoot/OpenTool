@@ -5,19 +5,46 @@ import pytest
 from lightmapper import memory
 from lightmapper.settings import Settings
 from opentool import devices, presets
-from opentool.presets import ADVANCED, CPU_PRESETS, CUSTOM, DEVICES, GPU_NOTE, LABELS, PAGE_MAX_CHOICES, PAGE_MAX_HINT, page_max_hint, PRESETS, PRESET_HINTS, PRESET_NAMES, build_settings, parse_advanced
+from opentool.presets import ADVANCED, CPU_PRESETS, CUSTOM, DEVICES, GPU_NOTE, LABELS, PAGE_MAX_CHOICES, PRESETS, PRESET_HINTS, PRESET_NAMES, build_settings, parse_advanced
 
 
-def test_page_max_choices_are_the_memory_page_sides():
-    assert PAGE_MAX_CHOICES == memory.PAGE_SIDES == (256, 512, 1024, 2048, 4096)
+def test_page_max_choices_start_with_auto():
+    assert PAGE_MAX_CHOICES == ('Auto', '256', '512', '1024', '2048', '4096')
+
+
+def test_presets_use_auto():
+    assert [PRESETS[name]['page_max'] for name in PRESET_NAMES] == ['auto'] * 4
+
+
+def test_build_settings_from_a_preset_resolves_to_4096():
+    assert build_settings('Draft', {}, 'b').page_cap == 4096
+    assert build_settings('Ultra', {}, 'b').page_max == 'auto'
+
+
+@pytest.mark.parametrize('text', ['Auto', 'auto', 'AUTO'])
+def test_parse_advanced_accepts_auto(text):
+    assert parse_advanced({'page_max': text}) == {'page_max': 'auto'}
+
+
+def test_parse_advanced_page_max_error_names_auto():
+    with pytest.raises(ValueError) as error:
+        parse_advanced({'page_max': '300'})
+    assert str(error.value) == 'Max resolution must be Auto, 256, 512, 1024, 2048, or 4096.'
+
+
+def test_display_value():
+    assert presets.display_value('page_max', 'auto') == 'Auto'
+    assert presets.display_value('page_max', 512) == '512'
+    assert presets.display_value('texels_per_unit', 2.0) == '2'
+    assert presets.display_value('samples', 1024) == '1024'
 
 
 def test_gpu_preset_values():
     assert PRESETS == {
-        'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=256, sky_grid=2, bounces=1, page_max=512, ignore_normals_mode='tool'),
-        'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=1024, sky_grid=4, bounces=1, page_max=512, ignore_normals_mode='tool'),
-        'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=4096, sky_grid=4, bounces=1, page_max=1024, ignore_normals_mode='tool'),
-        'Ultra': dict(texels_per_unit=8.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max=2048, ignore_normals_mode='tool')}
+        'Draft': dict(texels_per_unit=1.0, samples=256, vertex_rays=256, sky_grid=2, bounces=1, page_max='auto', ignore_normals_mode='tool'),
+        'Normal': dict(texels_per_unit=2.0, samples=1024, vertex_rays=1024, sky_grid=4, bounces=1, page_max='auto', ignore_normals_mode='tool'),
+        'High': dict(texels_per_unit=4.0, samples=2048, vertex_rays=4096, sky_grid=4, bounces=1, page_max='auto', ignore_normals_mode='tool'),
+        'Ultra': dict(texels_per_unit=8.0, samples=2048, vertex_rays=16384, sky_grid=4, bounces=1, page_max='auto', ignore_normals_mode='tool')}
     assert PRESET_NAMES == ('Draft', 'Normal', 'High', 'Ultra')
 
 
@@ -45,7 +72,7 @@ def test_custom_bakes_traditional_by_default():
 def test_normal_is_the_defaults_with_gpu_counts():
     s = build_settings('Normal', {}, 'b.exe')
     assert replace(s, blender=Settings().blender, timeout_s=7200) == replace(
-        Settings(), page_max=512, samples=1024, vertex_rays=1024, cpu_samples=256, cpu_vertex_rays=None)
+        Settings(), samples=1024, vertex_rays=1024, cpu_samples=256, cpu_vertex_rays=None)
 
 
 def test_named_preset_with_the_apps_filled_fields_keeps_its_cpu_counts():
@@ -93,7 +120,7 @@ def test_exact_preset_interface_values():
     assert DEVICES == (('Auto', 'auto'), ('NVIDIA', 'nvidia'), ('AMD', 'amd'), ('CPU only', 'cpu'))
     assert GPU_NOTE == 'Ray counts are for a GPU. On the CPU, the presets use fewer rays per texel.'
     assert ADVANCED == ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max')
-    assert PAGE_MAX_CHOICES == (256, 512, 1024, 2048, 4096)
+    assert PAGE_MAX_CHOICES == ('Auto', '256', '512', '1024', '2048', '4096')
     assert LABELS == dict(texels_per_unit='Texel density', samples='Rays per texel', vertex_rays='Rays per vertex', bounces='Bounces', page_max='Max resolution')
     assert CUSTOM == 'Custom' and PRESET_HINTS['Custom'] == 'Your own values from Advanced, on any device.'
 
@@ -127,11 +154,6 @@ def test_parse_advanced_rejects_new_ranges(field, text):
         parse_advanced({field: text})
 
 
-@pytest.mark.parametrize('value,shown', [('256', False), ('512', False), ('1024', False), ('2048', True), ('4096', True), ('', False), ('x', False)])
-def test_page_max_hint(value, shown):
-    assert page_max_hint(value) == (PAGE_MAX_HINT if shown else '')
-
-
 def test_density_choices():
     assert presets.DENSITY_CHOICES == (1, 2, 4, 8, 12, 16, 24, 32)
 
@@ -150,6 +172,7 @@ def test_density_values_add_a_custom_entry():
 def test_row_hint():
     assert presets.row_hint('page_max', '2048', False) == presets.PAGE_MAX_HINT
     assert presets.row_hint('page_max', '512', True) == ''
+    assert presets.row_hint('page_max', 'Auto', True) == ''
     assert presets.row_hint('samples', '1024', True) == presets.ADAPTIVE_HINT
     assert presets.row_hint('samples', '1024', False) == ''
     for name in ('texels_per_unit', 'vertex_rays', 'bounces', 'adaptive_sampling', 'lightmap_32bit'):

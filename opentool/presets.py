@@ -1,12 +1,11 @@
-from lightmapper.memory import PAGE_SIDES
 from lightmapper.settings import Settings
 
 
 PRESETS: dict[str, dict] = {
-    'Draft': {'texels_per_unit': 1.0, 'samples': 256, 'vertex_rays': 256, 'sky_grid': 2, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
-    'Normal': {'texels_per_unit': 2.0, 'samples': 1024, 'vertex_rays': 1024, 'sky_grid': 4, 'bounces': 1, 'page_max': 512, 'ignore_normals_mode': 'tool'},
-    'High': {'texels_per_unit': 4.0, 'samples': 2048, 'vertex_rays': 4096, 'sky_grid': 4, 'bounces': 1, 'page_max': 1024, 'ignore_normals_mode': 'tool'},
-    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 2048, 'ignore_normals_mode': 'tool'},
+    'Draft': {'texels_per_unit': 1.0, 'samples': 256, 'vertex_rays': 256, 'sky_grid': 2, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'Normal': {'texels_per_unit': 2.0, 'samples': 1024, 'vertex_rays': 1024, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'High': {'texels_per_unit': 4.0, 'samples': 2048, 'vertex_rays': 4096, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
+    'Ultra': {'texels_per_unit': 8.0, 'samples': 2048, 'vertex_rays': 16384, 'sky_grid': 4, 'bounces': 1, 'page_max': 'auto', 'ignore_normals_mode': 'tool'},
 }
 CPU_PRESETS: dict[str, dict] = {
     'Draft': {'samples': 64},
@@ -31,7 +30,7 @@ PRESET_HINTS: dict[str, str] = {
 # sky_grid has no panel row, yet the presets still carry it and a settings file
 # can set it, so it stays in PRESETS
 ADVANCED = ('texels_per_unit', 'samples', 'vertex_rays', 'bounces', 'page_max')
-PAGE_MAX_CHOICES = PAGE_SIDES
+PAGE_MAX_CHOICES = ('Auto', '256', '512', '1024', '2048', '4096')
 LABELS = {'texels_per_unit': 'Texel density', 'samples': 'Rays per texel', 'vertex_rays': 'Rays per vertex', 'bounces': 'Bounces', 'page_max': 'Max resolution'}
 
 DENSITY_CHOICES = (1, 2, 4, 8, 12, 16, 24, 32)
@@ -58,6 +57,12 @@ def format_density(value: float) -> str:
     return f'{value:g}'
 
 
+def display_value(field: str, value) -> str:
+    if field == 'page_max' and value == 'auto':
+        return 'Auto'
+    return format_density(value) if field == 'texels_per_unit' else str(value)
+
+
 def density_values(current: str) -> list[str]:
     values = [str(choice) for choice in DENSITY_CHOICES]
     if current and current not in values:
@@ -76,9 +81,12 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if field == 'texels_per_unit':
                 value = float(text)
                 valid = 0.25 <= value <= 32
+            elif field == 'page_max' and text.lower() == 'auto':
+                value = 'auto'
+                valid = True
             elif field == 'page_max':
                 value = int(text)
-                valid = value in PAGE_MAX_CHOICES
+                valid = str(value) in PAGE_MAX_CHOICES
             else:
                 value = int(text)
                 low, high = ranges[field]
@@ -86,7 +94,9 @@ def parse_advanced(texts: dict[str, str]) -> dict:
             if not valid:
                 raise ValueError
         except ValueError:
-            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'bounces': '0 to 8', 'page_max': '256, 512, 1024, 2048, or 4096'}[field]
+            if field == 'page_max':
+                raise ValueError(f'{LABELS[field]} must be Auto, 256, 512, 1024, 2048, or 4096.') from None
+            allowed = {'texels_per_unit': '0.25 to 32', 'samples': '1 to 4096', 'vertex_rays': '1 to 65536', 'bounces': '0 to 8'}[field]
             raise ValueError(f'{LABELS[field]} must be a number from {allowed}.') from None
         values[field] = value
     return values

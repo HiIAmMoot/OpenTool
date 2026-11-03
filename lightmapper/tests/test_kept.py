@@ -247,14 +247,37 @@ def test_prune_logs_a_folder_it_cannot_remove(tmp_path, monkeypatch, caplog):
     assert len(caplog.messages) == 1 and str(level / 'a') in caplog.messages[0]
 
 
-def test_a_kept_bake_of_version_1_is_refused(tmp_path):
+def set_version(work, version):
+    data = json.loads((work / kept.MANIFEST).read_text())
+    data['version'] = version
+    (work / kept.MANIFEST).write_text(json.dumps(data))
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_a_kept_bake_of_an_older_version_says_bake_again(tmp_path, version):
     make_kept(tmp_path)
-    data = json.loads((tmp_path / kept.MANIFEST).read_text())
-    del data['output_path'], data['output_scenario']
-    data['version'] = 1
-    (tmp_path / kept.MANIFEST).write_text(json.dumps(data))
-    with pytest.raises(KeptBakeError):
+    set_version(tmp_path, version)
+    with pytest.raises(KeptBakeError) as raised:
         kept.read_manifest(tmp_path)
+    assert str(raised.value) == kept.OLDER_BAKE
+
+
+@pytest.mark.parametrize('version', [kept.VERSION + 1, str(kept.VERSION)])
+def test_a_kept_bake_of_an_unknown_version_is_refused(tmp_path, version):
+    make_kept(tmp_path)
+    set_version(tmp_path, version)
+    with pytest.raises(KeptBakeError, match='is not a kept bake OpenTool can write again'):
+        kept.read_manifest(tmp_path)
+
+
+def test_latest_skips_an_older_kept_bake(tmp_path):
+    level = kept.level_folder(tmp_path, tmp_path, 's', 'b')
+    make_kept(level / '20260101-000000')
+    make_kept(level / '20260102-000000')
+    set_version(level / '20260102-000000', kept.VERSION - 1)
+    assert kept.latest(tmp_path, tmp_path, 's', 'b') == level / '20260101-000000'
+    set_version(level / '20260101-000000', kept.VERSION - 1)
+    assert kept.latest(tmp_path, tmp_path, 's', 'b') is None
 
 
 def test_a_kept_bake_that_ran_the_glow_pass_needs_its_glow_file(tmp_path):

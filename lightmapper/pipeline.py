@@ -16,19 +16,22 @@ import logging
 from pathlib import Path, PureWindowsPath
 import shutil
 import tempfile
+import threading
 from time import perf_counter
 
 import numpy as np
 
 from . import cpu_vertex_job, gpu, kept, memory, vertex_gpu
 from .blender_job import Scene, run_blender, run_blender_lamp_batch, run_blender_vertex_only, run_blender_glow, with_vertex_pass, write_job
-from .charts import ChartSettings, chart_and_pack, load_charts, save_charts
+from .charts import (AUTO_PAGE_MAX, AUTO_TARGET_PAGES, CACHE_VERSION, CapError, ChartSettings, cache_version,
+                     chart_and_pack, load_charts, save_charts, step_up)
+from .combine import chart_blocks, plan_repack, repack_arrays, repack_layout, written_shape
 from .errors import BakeError, KeptBakeError
 from .formats.bitmap import write_bitmap
-from .formats.bsp import apply_layout, point_clusters, read_geometry
+from .formats.bsp import OutMaterial, OutPage, apply_layout, point_clusters, read_geometry
 from .formats.lights import SceneLight
 from .formats.scenery import gather_lights, gather_occluders
-from .formats.vertices import ENV, unpack_uncompressed
+from .formats.vertices import ENV, LM, unpack_uncompressed
 from .gather import BASE_ONLY_GROUPS, IGNORE_NORMALS, LAYOUT_GROUPS, SIMPLE_PARAMETERIZATION, TRANSPARENT_GROUPS, emission, gather_lighting, read_radiosity, surface_classes
 from .pages import DenoiseWorker, finish_pages, quantise
 from .progress import GLOW_PLANNED
@@ -69,9 +72,11 @@ def find_bsp(tags: Path, scenario: str, name: str):
     return tag, index, path
 
 
-def chart_cache_key(input_file: Path, chart_s: ChartSettings, radiosity) -> str:
+def chart_cache_key(input_file: Path, chart_s: ChartSettings, radiosity, nest: bool) -> str:
     digest = hashlib.sha256(Path(input_file).read_bytes())
     digest.update(json.dumps(asdict(chart_s), sort_keys=True).encode())
+    # (a nested layout and a rectangle one of the same level are different pages)
+    digest.update(b'nest' if nest else b'flat')
     # (the flags word is hashed whole, so a shader edit to any flag bit makes new charts; group order)
     digest.update(json.dumps([[int(r.flags), int(r.detail_level)] for r in radiosity]).encode())
     return digest.hexdigest()
@@ -270,14 +275,44 @@ def _chart_settings(s: Settings) -> ChartSettings:
     return ChartSettings(**{f.name: getattr(s, f.name) for f in fields(ChartSettings)})
 
 
-def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path) -> list:
+def _estimate_cache(cache: Path) -> Path:
+    # (a file of its own: in the bake's, the two layouts' keys would push each other out at every estimate and bake)
+    return cache.with_name(cache.stem + '.estimate' + cache.suffix)
+
+
+# (the full estimate charts on a thread of its own into the bake's cache; a bake started meanwhile waits for it and
+# then loads what it made, rather than charting beside it and replacing the file under it)
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
+
+
+def _cache_lock(cache: Path) -> threading.Lock:
+    with _CACHE_LOCKS_GUARD:
+        return _CACHE_LOCKS.setdefault(str(Path(cache).resolve()).lower(), threading.Lock())
+
+
+def _charts(input_file: Path, geometry, radiosity, s: Settings, cache: Path, nest: bool) -> list:
     chart_s = _chart_settings(s)
-    key = chart_cache_key(input_file, chart_s, radiosity)
-    pages = load_charts(cache, key)
-    if pages is None:
-        pages = chart_and_pack(geometry.groups, radiosity, chart_s)
-        save_charts(cache, pages, key)
+    key = chart_cache_key(input_file, chart_s, radiosity, nest)
+    with _cache_lock(cache):
+        pages = load_charts(cache, key)
+        if pages is None:
+            pages = chart_and_pack(geometry.groups, radiosity, chart_s, nest=nest)
+            save_charts(cache, pages, key)
     return pages
+
+
+def written_plan(pages, page_max_resolved: int, s: Settings):
+    # the repack the write applies, a function of the bake's layout and settings alone, so a write again repeats it
+    chart_s = _chart_settings(s)
+    blocks = chart_blocks(pages, chart_s.padding)
+    # (the layout carries the shape charting chose; only a layout made some other way has to work one out)
+    shape = tuple(getattr(pages, 'page_shape', ())) or written_shape(blocks, page_max_resolved, s.page_max == 'auto')
+    try:
+        return plan_repack(blocks, shape, chart_s.page_min, s.max_materials_per_page, s.max_pages), shape
+    except CapError as error:
+        error.page_max = s.page_max
+        raise
 
 
 def _kept_sources(work: Path, manifest: kept.Manifest, name: str):
@@ -315,12 +350,13 @@ class SceneEstimate:
     # 9 * w * h over the pages with any triangle that ignores normals
     flagged_sub_texels: int = 0
     device: str = 'gpu'
+    scale: float = 1.0
 
 
 def stage_inputs(estimate: SceneEstimate, ignore_normals_mode: str, machine, bounces: int = 1) -> memory.StageInputs:
     # (the glow run is skipped without bounces)
     glow = estimate.flagged_sub_texels if ignore_normals_mode == 'enhanced' and bounces > 0 else 0
-    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow)
+    inputs = memory.StageInputs(estimate.counts, estimate.pages, estimate.device, glow, scale=estimate.scale)
     return replace(inputs, whole_page_tiles=memory.whole_page_tiles(inputs, machine))
 
 
@@ -330,7 +366,7 @@ def _scene_estimate(scene, pages, device: str) -> SceneEstimate:
                          memory.flagged_sub_texels(scene.tri_page, scene.tri_ignore_normals, sizes), device)
 
 
-def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+def _estimate_level(tags: Path, scenario: str, bsp: str):
     tags = Path(tags)
     scenario_tag, bsp_index, input_path = find_bsp(tags, scenario, bsp)
     input_file = resolve_reference_path(tags, 'sbsp', input_path)
@@ -341,10 +377,94 @@ def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Pat
     geometry = read_geometry(bsp_tag)
     radiosity = [read_radiosity(tags, *group.key[:2]) for group in geometry.groups]
     classes = surface_classes(geometry, len(scenario_tag.root.block('skies')))
-    pages = _charts(input_file, geometry, radiosity, s, Path(charts))
+    return tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes
+
+
+# the quick estimate's charted texels per texel of surface area, and per triangle (padding and page waste): a fit to
+# bloodgulch, timberland and Monaco at densities 1 to 8, which it misses by -38 to +30% (owner: a rough first figure)
+QUICK_TEXELS_PER_AREA = 2.6
+QUICK_TEXELS_PER_TRIANGLE = 18
+
+
+def quick_estimate(tags: Path, scenario: str, bsp: str, s: Settings) -> SceneEstimate:
+    # no charting: the texels follow from surface area and density, the pages from the Auto page target, and the
+    # scene counts from the level as it stands (one stand-in page holding every shader group)
+    tags, scenario_tag, bsp_index, _, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
+    chart_s = _chart_settings(s)
+    texels, triangles, flagged, island = 0.0, 0, False, 0.0
+    stand_in = []
+    for index, (group, shader) in enumerate(zip(geometry.groups, radiosity)):
+        if not len(group.tris):
+            continue
+        corners = group.env['position'][group.tris].astype(np.float64)
+        area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
+                                    axis=1).sum()
+        group_texels = area * (chart_s.texels_per_unit * chart_s.density_scale(shader)) ** 2
+        texels += group_texels
+        if shader.flags & SIMPLE_PARAMETERIZATION:
+            island = max(island, group_texels)
+        triangles += len(group.tris)
+        flagged |= bool(shader.flags & IGNORE_NORMALS)
+        stand_in.append(OutMaterial(index, group.env, np.zeros(len(group.env), LM), group.tris, group.surface_ids))
+    texels = QUICK_TEXELS_PER_AREA * texels + QUICK_TEXELS_PER_TRIANGLE * triangles
+    if s.page_max == 'auto':
+        # (the biggest chart sets Auto's floor; the largest simple-parameterization group is usually that chart,
+        # and a square about twice its side held the bake side on 11 of the 12 measured rows, the 12th above it)
+        floor = min(AUTO_PAGE_MAX, max(256, int(2 ** np.ceil(np.log2(max(1.0, 2 * island ** .5))))))
+        shape = (floor, floor)
+        while shape != (AUTO_PAGE_MAX, AUTO_PAGE_MAX) and texels > AUTO_TARGET_PAGES * shape[0] * shape[1]:
+            shape = step_up(shape)
+        side = shape[0]
+    else:
+        side = s.page_max
+    sizes = [(side, side)] * max(1, int(np.ceil(texels / side ** 2)))
+    scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, [OutPage(side, side, stand_in)], radiosity,
+                         classes, s.scenery_emission)
+    return SceneEstimate(memory.SceneCounts.from_scene(scene), sizes,
+                         9 * side * side * len(sizes) if flagged else 0, 'cpu' if s.device == 'cpu' else 'gpu')
+
+
+# a rough estimate whose rectangles stepped up for the page count, from a shape where they needed no more than this
+# many pages, scales its figure by this much: there the nest may well have stayed a step lower (ruling R-C6)
+ROUGH_REACH = 12
+ROUGH_REDUCTION = 0.5
+
+
+def rough_pages(sizes, shape, stepped_from: int, flagged: bool):
+    # the rectangle layout's pages as a rough estimate counts them: (page sizes, flagged sub-texels, scale)
+    sizes = list(sizes)
+    if sizes and shape[0] == 2 * shape[1]:
+        # (a nested block may need the square shape where the rectangles settled on the half-height one, so the
+        # largest page is counted square)
+        largest = max(range(len(sizes)), key=lambda k: sizes[k][0] * sizes[k][1])
+        sizes[largest] = (shape[0], shape[0])
+    # (the nest can put a flagged chart on any page, so every page counts for the glow)
+    glow = 9 * sum(w * h for w, h in sizes) if flagged else 0
+    scale = ROUGH_REDUCTION if 0 < stepped_from <= ROUGH_REACH else 1.0
+    return sizes, glow, scale
+
+
+def estimate_scene(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+    # the rough estimate: the rectangle layout, with no nest so it is fast, and margins for where the nest differs
+    tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
+    pages = _charts(input_file, geometry, radiosity, s, _estimate_cache(Path(charts)), nest=False)
     scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
                          s.scenery_emission, s.render_only_shadows)
     # (no GPU probe: the setting alone says whether the CPU constants apply)
+    exact = _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
+    if s.page_max != 'auto' or not pages:
+        return exact
+    sizes, glow, scale = rough_pages(exact.pages, tuple(pages.page_shape), getattr(pages, 'stepped_from', 0),
+                                     bool(np.any(scene.tri_ignore_normals)))
+    return SceneEstimate(exact.counts, sizes, glow, exact.device, scale)
+
+
+def full_estimate(tags: Path, scenario: str, bsp: str, s: Settings, charts: Path) -> SceneEstimate:
+    # the bake's own layout, nest included, left in the bake's cache so the bake that follows loads it
+    tags, scenario_tag, bsp_index, input_file, geometry, radiosity, classes = _estimate_level(tags, scenario, bsp)
+    pages = _charts(input_file, geometry, radiosity, s, Path(charts), nest=True)
+    scene, _, _ = _scene(tags, scenario_tag, bsp_index, geometry, pages, radiosity, classes,
+                         s.scenery_emission)
     return _scene_estimate(scene, pages, 'cpu' if s.device == 'cpu' else 'gpu')
 
 
@@ -438,14 +558,18 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     stage('gather')
     begin('charts')
     if reuse:
-        pages = load_charts(kept.kept_dir(work) / kept.CHARTS, chart_cache_key(input_file, _chart_settings(s), radiosity))
+        kept_charts = kept.kept_dir(work) / kept.CHARTS
+        # (charts from an older layout version are an older bake, not a shader edit)
+        if cache_version(kept_charts) not in (None, CACHE_VERSION):
+            raise KeptBakeError(kept.OLDER_BAKE)
+        pages = load_charts(kept_charts, chart_cache_key(input_file, _chart_settings(s), radiosity, True))
         if pages is None:
             # (the key hashes the shaders' flags, so a shader edit since the bake leaves the kept charts not fitting)
             raise KeptBakeError("The level's shaders changed since this bake was kept, so it can't be written again. "
                                 "Bake it again.")
     else:
         pages = _charts(input_file, geometry, radiosity, s,
-                        Path(charts) if charts is not None else work / 'charts.npz')
+                        Path(charts) if charts is not None else work / 'charts.npz', nest=True)
     stage('charts')
     if keep:
         charts_file = Path(charts) if charts is not None else work / 'charts.npz'
@@ -484,7 +608,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         machine = memory.read_machine()
         stages_in = stage_inputs(_scene_estimate(scene, pages, 'cpu' if choice.setting == 'cpu' else 'gpu'),
                                  s.ignore_normals_mode, machine, s.bounces)
-        check = memory.check_bake_memory(stages_in, s.page_max, machine)
+        check = memory.check_bake_memory(stages_in, machine)
         if not check.fits:
             logger.warning('%s', check.message)
             warnings.append(check.message)
@@ -570,7 +694,7 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             kept.save_baked(work)
             kept.save_result(work, result)
     begin('glow' if glow_runs else 'finish')
-    raw_pages, glow_pages, masks, class_maps, utilisation, clipped = [], [], [], [], [], []
+    raw_pages, glow_pages, masks, class_maps = [], [], [], []
     if reuse:
         # (the job's ambient is already weighted by w_amb)
         ambient = {int(k): np.asarray(v) for k, v in job['ambient'].items()}
@@ -616,7 +740,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         raw_pages.append(raw)
         masks.append(mask)
         class_maps.append(cls)
-        utilisation.append(float(mask.mean()))
     # (nothing below reads the baked pages, and the loop's last page and gather would stay in these names)
     result = replace(result, pages=None)
     raw = gathered = texel_scene = None
@@ -679,9 +802,6 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
             denoise_seconds = denoise_worker.seconds
             denoise_device = denoise_worker.device
             warnings.extend(denoise_worker.warnings)
-    pixels = [quantise(finished, s) for finished in float_pages]
-    for finished, mask in zip(float_pages, masks):
-        clipped.append(float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.)
     vectors = finalize(result.vertex_vector, result.vertex_irradiance, scene.query_normal,
                        s.radiosity_mode, s.radiosity_scale)[inverse]
     offset = 0
@@ -689,6 +809,20 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
         for material in page.materials:
             material.lm['incident_radiosity'] = vectors[offset:offset + len(material.env)]
             offset += len(material.env)
+    # (the bake ran on its own pages; the written bitmap holds the charts repacked, and everything the write and the
+    # summary report about pages describes those)
+    page_max_resolved = getattr(pages, 'page_max', 0) or (
+        s.page_max if isinstance(s.page_max, int) else max(max(p.width, p.height) for p in pages))
+    plan, page_shape = written_plan(pages, page_max_resolved, s)
+    bake_sizes = [[p.width, p.height] for p in pages]
+    float_pages = repack_arrays(float_pages, plan)
+    # (quantised after the move: the dither follows the written position, so the bitmap is the written float page's)
+    pixels = [quantise(finished, s) for finished in float_pages]
+    masks = repack_arrays(masks, plan)
+    pages = repack_layout(pages, plan)
+    utilisation = [float(mask.mean()) for mask in masks]
+    clipped = [float(np.mean(finished[mask].max(axis=-1) > 1)) if mask.any() else 0.
+               for finished, mask in zip(float_pages, masks)]
     stage('finish')
     seconds['denoise'] = denoise_seconds
     seconds['finish'] -= denoise_seconds
@@ -716,6 +850,8 @@ def bake(tags: Path, scenario: str, bsp: str, s: Settings, out_bsp: str | None =
     seconds['total'] = perf_counter() - start
     (work / ('write_summary.json' if reuse else 'summary.json')).write_text(json.dumps({
         'pages': len(pages), 'sizes': [[p.width, p.height] for p in pages],
+        'bake_sizes': bake_sizes,
+        'page_max_resolved': page_max_resolved, 'page_shape': list(page_shape),
         'utilisation': utilisation, 'texels_per_unit': s.texels_per_unit,
         'clipped_fraction': clipped, 'device': result.device, 'seconds': seconds, 'written': written,
         'written_paths': written_paths,

@@ -8,7 +8,7 @@ from lightmapper import cpu_vertex_job as vertex_cpu, kept
 from lightmapper.errors import KeptBakeError
 from lightmapper.formats.bitmap import write_bitmap
 from lightmapper.tagio.tagfile import read_tag, resolve_reference_path, write_tag
-from test_pipeline import api, put, run_enhanced_pipeline, tiny  # noqa: F401
+from test_pipeline import api, put, run_enhanced_pipeline, tiny, two_pages  # noqa: F401
 
 
 def kept_work(tmp_path, tags, name='a'):
@@ -170,6 +170,11 @@ def tag_bytes(tag, folder):
     return (folder / 'bytes').read_bytes()
 
 
+@pytest.fixture(params=['tiny', 'two_pages'])
+def level(request):
+    return request.getfixturevalue(request.param)
+
+
 def kept_tool_bake(tiny, tmp_path):
     tags, settings, _ = tiny
     work = kept_work(tmp_path, tags)
@@ -178,12 +183,18 @@ def kept_tool_bake(tiny, tmp_path):
     return tags, settings, work
 
 
-@pytest.mark.parametrize('mode', ['tool', 'enhanced'])
-def test_write_again_writes_what_the_bake_wrote(tiny, tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('fixture, mode', [('tiny', 'tool'), ('tiny', 'enhanced'), ('two_pages', 'tool')])
+def test_write_again_writes_what_the_bake_wrote(request, tmp_path, monkeypatch, fixture, mode):
+    # (the enhanced helper brings its own one-page charts and blender, so it cannot run on the two-page fixture)
+    tiny = request.getfixturevalue(fixture)
     tags, settings, _ = tiny
     work = kept_work(tmp_path, tags)
-    run_enhanced_pipeline(tiny, monkeypatch, mode,
-                          bake_kwargs={'work': work, 'dry_run': False, 'out_bsp': 'copy', 'keep': True})
+    if fixture == 'tiny':
+        run_enhanced_pipeline(tiny, monkeypatch, mode,
+                              bake_kwargs={'work': work, 'dry_run': False, 'out_bsp': 'copy', 'keep': True})
+    else:
+        settings = replace(settings, ignore_normals_mode=mode, stitch_seams=False, bounces=1)
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, keep=True)
     first = [path.read_bytes() for path in written(tags)]
     for path in written(tags):
         path.unlink()
@@ -225,8 +236,8 @@ def test_write_again_ignores_the_tags_as_they_are_now(tiny, tmp_path, monkeypatc
     assert tag_bytes(read_tag(resolve_reference_path(tags, 'bitm', 'copy2')), tmp_path) == first_bitmap
 
 
-def test_write_again_switches_32bit(tiny, tmp_path, monkeypatch):
-    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+def test_write_again_switches_32bit(level, tmp_path, monkeypatch):
+    tags, settings, work = kept_tool_bake(level, tmp_path)
     forbid_baking(monkeypatch)
     api().bake(tags, 'level', 'room', replace(settings, lightmap_32bit=True), out_bsp='copy', work=work, reuse=True)
     bitmap = read_tag(resolve_reference_path(tags, 'bitm', 'copy'))
@@ -477,3 +488,32 @@ def test_write_again_falls_back_to_the_cpu_denoiser_without_the_required_gpu(tin
     api().bake(tags, 'level', 'room', replace(settings, device='nvidia'), out_bsp='copy', work=work, reuse=True)
     summary = json.loads((work / 'write_summary.json').read_text())
     assert any('CPU denoiser' in warning for warning in summary['warnings'])
+
+
+def test_write_again_repeats_the_auto_page_shape(tiny, tmp_path, monkeypatch):
+    tags, settings, _ = tiny
+    work = kept_work(tmp_path, tags)
+    settings = replace(tool(settings), page_max='auto')
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, keep=True)
+    baked = json.loads((work / 'summary.json').read_text())
+    forbid_baking(monkeypatch)
+    api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)
+    again = json.loads((work / 'write_summary.json').read_text())
+    assert baked['page_shape'] and again['page_shape'] == baked['page_shape']
+    assert again['sizes'] == baked['sizes']
+
+
+def test_write_again_of_a_kept_bake_with_an_older_chart_cache_says_it_is_older(tiny, tmp_path, monkeypatch):
+    import numpy as _np
+    from lightmapper import charts
+    tags, settings, work = kept_tool_bake(tiny, tmp_path)
+    path = kept.kept_dir(work) / kept.CHARTS
+    with _np.load(path, allow_pickle=False) as data:
+        arrays = {name: data[name] for name in data.files}
+    meta = json.loads(str(arrays['meta']))
+    meta['version'] = charts.CACHE_VERSION - 1
+    arrays['meta'] = json.dumps(meta)
+    _np.savez(path, **arrays)
+    forbid_baking(monkeypatch)
+    with pytest.raises(KeptBakeError, match='older OpenTool'):
+        api().bake(tags, 'level', 'room', settings, out_bsp='copy', work=work, reuse=True)

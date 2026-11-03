@@ -157,7 +157,8 @@ def test_simple_param_overlap_falls_back(caplog):
     group = make_group(pos, [[0, 1, 2], [3, 4, 5]], uvs=uvs, name='overlapper')
     with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
         pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
-    assert 'overlapper' in caplog.text and 'overlap' in caplog.text
+    # (both triangles share their uv values, so they are one island that overlaps itself)
+    assert 'overlapper' in caplog.text and '1 island(s) split where they overlap themselves, 0 island(s) charted normally (none)' in caplog.text
     assert sum(len(m.tris) for p in pages for m in p.materials) == 2
     for page in pages:
         assert rasterise(page).max() <= 1
@@ -191,7 +192,7 @@ def test_mixed_groups_share_a_page():
 
 def test_large_chart_split_keeps_density_on_one_page():
     pos, tris = grid(100, size=3)
-    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(texels_per_unit=1))
+    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(texels_per_unit=1, page_max=512))
     assert len(pages) == 1
     assert sum(p.width * p.height for p in pages) <= 512 * 512
     assert len(pages[0].materials) == 1
@@ -206,7 +207,7 @@ def test_rectangle_repack_preserves_each_triangle_area():
     from lightmapper.charts import _finish, _packing_areas, _pack_rectangles, _run_atlas
     pos, tris = scattered_quads(12)
     group = make_group(pos, tris)
-    s = ChartSettings()
+    s = ChartSettings(page_max=1024)
     atlas_pages, extent = _run_atlas([(0, group, None, 1.0)], False, s)
     before = _finish(atlas_pages, extent, s)
     after = _pack_rectangles([piece for page in atlas_pages for piece in page], s)
@@ -265,11 +266,21 @@ def test_extent_on_power_of_two():
     assert np.all(texels >= s.padding)
 
 
-def test_oversized_chart_refuses_instead_of_losing_density():
+def test_oversized_chart_still_hits_the_page_count_cap():
     pos, tris = grid(20, 1.0)
-    s = ChartSettings(page_max=16, padding=4)
-    with pytest.raises(CapError, match='page_max'):
+    s = ChartSettings(page_max=16, padding=4, max_pages=32)
+    with pytest.raises(CapError, match=r'max_pages \(32\)'):
         chart_and_pack([make_group(pos, tris)], [radiosity()], s)
+
+
+def test_oversized_grid_now_packs_at_16():
+    # bisected into parts that fit a 16 texel page, instead of refused for exceeding it
+    pos, tris = grid(20, 1.0)
+    pages = chart_and_pack([make_group(pos, tris)], [radiosity()], ChartSettings(page_max=16, padding=4))
+    assert all(max(p.width, p.height) <= 16 for p in pages)
+    areas = np.array([area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m)])
+    assert len(areas) == 800
+    np.testing.assert_allclose(areas, 2.0, rtol=1e-5)
 
 
 @pytest.mark.parametrize('factors,accepted', [([0.998] * 10, True), ([0.99] * 10, False),
@@ -304,9 +315,12 @@ def test_density_selection_checks_median_and_total(monkeypatch, factors, accepte
 
 
 def test_unsplittable_oversized_triangle_refuses_instead_of_shrinking():
+    # (a triangle cannot be cut, so it is refused by name rather than shrunk)
+    from lightmapper.charts import TriangleTooWide
     group = make_group([[0, 0, 0], [100, 0, 0], [0, 100, 0]], [[0, 1, 2]])
-    with pytest.raises(CapError, match='page_max'):
+    with pytest.raises(TriangleTooWide) as caught:
         chart_and_pack([group], [radiosity()], ChartSettings(page_max=16, padding=1))
+    assert caught.value.shader == 'shader'
 
 
 def quad_group(origin, size, uv_min, uv_size, name, sid0):
@@ -353,19 +367,6 @@ def test_huge_tiling_uvs_are_bounded():
     tracemalloc.stop()
     assert elapsed < 5 and peak < 100e6
     assert sum(len(m.tris) for p in pages for m in p.materials) == 2
-
-
-def test_zero_uv_area_falls_back(caplog):
-    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0]], np.float32)
-    uvs = [[0, 0], [1, 0], [2, 0], [0, 1]]
-    group = make_group(pos, [[0, 1, 2], [0, 2, 3]], uvs=uvs, name='flat')
-    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
-        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
-    assert 'flat' in caplog.text and 'no texture area' in caplog.text
-    for page in pages:
-        for m in page.materials:
-            for tri in texel_triangles(page, m):
-                assert area(*tri) > 0.5
 
 
 def test_chart_settings_validation():
@@ -759,3 +760,1053 @@ def test_simple_parameterization_fallback_stays_joined_across_a_hard_crease():
     pages = chart_and_pack([simple, plain], [radiosity(SIMPLE_PARAMETERIZATION), radiosity()], ChartSettings())
     assert chart_count(pages, group=0) == 1
     assert chart_count(pages, group=1) == 2
+
+
+def cells_piece(cells, cell=10, offset=(0, 0), name='shader'):
+    # one quad of two triangles per (x, y) cell, each with its own vertices, so only uv values join neighbours
+    positions, tris = [], []
+    for x, y in cells:
+        base = len(positions)
+        positions += [[x, y, 0], [x + 1, y, 0], [x + 1, y + 1, 0], [x, y + 1, 0]]
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return piece_from_group(make_group(np.array(positions, np.float32), tris, name=name), cell, offset)
+
+
+def piece_from_group(group, cell, offset=(0, 0)):
+    return (0, group, np.arange(len(group.env)), group.env['position'][:, :2].astype(np.float64) * cell + offset,
+            group.tris, group.surface_ids)
+
+
+def piece_from_grid(n, cell, offset=(0, 0), name='shader'):
+    return piece_from_group(make_group(*grid(n), name=name), cell, offset)
+
+
+def test_components_follow_shared_uv_values():
+    from lightmapper.charts import _components
+    quad = np.array([[0, 0], [1, 0], [1, 1], [0, 1]], float)
+    tris = np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7], [8, 9, 10], [8, 10, 11]])
+    uv = np.concatenate([quad, quad + [1, 0], quad + [10, 10]])
+    found = _components(uv, tris, np.arange(6))
+    assert [list(part) for part in found] == [[0, 1, 2, 3], [4, 5]]
+    # the second quad could sit at the first one's positions, but its uvs touch nothing
+    uv = np.concatenate([quad, quad + [5, 0]])
+    assert [list(part) for part in _components(uv, tris[:4], np.arange(4))] == [[0, 1], [2, 3]]
+
+
+def test_bisection_keeps_uvs_and_areas():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    piece = cells_piece([(x, 0) for x in range(40)])
+    parts = _bisect_piece(piece, 128, 4)
+    assert len(parts) > 1
+    assert all(_padded_size(p[3], 4).max() <= 128 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+    rows = np.concatenate([p[5] for p in parts])
+    corners = np.concatenate([p[3][p[4]] for p in parts])[np.argsort(rows)]
+    source = piece[3][piece[4]]
+    np.testing.assert_array_equal(corners, source)
+    for p in parts:
+        np.testing.assert_array_equal(p[3], piece[3][p[2]])
+
+    def areas(c):
+        return 0.5 * np.abs((c[:, 1, 0] - c[:, 0, 0]) * (c[:, 2, 1] - c[:, 0, 1])
+                            - (c[:, 1, 1] - c[:, 0, 1]) * (c[:, 2, 0] - c[:, 0, 0]))
+    np.testing.assert_allclose(areas(corners), areas(source), atol=1e-9)
+
+
+def test_bisection_parts_are_uv_connected():
+    from lightmapper.charts import _bisect_piece, _components
+    # a U of 10-texel cells, 5 wide and 14 tall: a bar along y=0 and arms up x=0 and x=4.
+    # The median cut on y leaves the bar and the arms' lower rows below it and, above it, the two arms
+    # joined only through the bar; each arm alone is under 12 cells tall, so the recursion would stop there
+    cells = [(x, 0) for x in range(5)] + [(x, y) for x in (0, 4) for y in range(1, 14)]
+    parts = _bisect_piece(cells_piece(cells), 128, 4)
+    assert len(parts) > 1
+    for part in parts:
+        assert len(_components(part[3], part[4], np.arange(len(part[4])))) == 1
+
+
+def test_pieces_that_fit_are_untouched():
+    from lightmapper.charts import _split_oversized
+    piece = cells_piece([(0, 0), (1, 0)])
+    parts, split, made = _split_oversized([piece], 128, 4)
+    assert len(parts) == 1 and parts[0] is piece
+    assert (split, made) == (0, 0)
+
+
+def test_oversized_pieces_are_counted():
+    from lightmapper.charts import _split_oversized
+    fits, wide = cells_piece([(0, 0)]), cells_piece([(x, 0) for x in range(40)])
+    parts, split, made = _split_oversized([fits, wide], 128, 4)
+    assert parts[0] is fits
+    assert (split, made) == (1, len(parts) - 1)
+
+
+def test_widest_triangle_names_its_shader():
+    from lightmapper.charts import _widest_triangle
+    narrow = cells_piece([(0, 0)], name='narrow')
+    wide = piece_from_group(make_group(np.array([[0, 0, 0], [600, 0, 0], [0, 5, 0]], np.float32), [[0, 1, 2]], name='wide'), 1)
+    assert _widest_triangle([narrow, wide], 4) == (608, 'wide')
+    assert _widest_triangle([], 4) == (0, '')
+
+
+def test_bisection_with_a_degenerate_triangle_terminates():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    index, group, xref, uv, tris, sid = cells_piece([(x, 0) for x in range(40)], offset=(100, 100))
+    n = len(uv)
+    piece = (index, group, np.r_[xref, np.arange(n, n + 3)], np.concatenate([uv, np.zeros((3, 2))]),
+             np.concatenate([tris, [[n, n + 1, n + 2]]]).astype(np.int32), np.r_[sid, len(sid)])
+    start = time.perf_counter()
+    parts = _bisect_piece(piece, 64, 4)
+    assert time.perf_counter() - start < 10
+    assert all(_padded_size(p[3], 4).max() <= 64 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+
+
+def test_bisection_of_a_large_island_is_fast():
+    from lightmapper.charts import _bisect_piece, _padded_size
+    piece = piece_from_grid(64, 8)
+    start = time.perf_counter()
+    parts = _bisect_piece(piece, 32, 4)
+    assert time.perf_counter() - start < 20
+    assert all(_padded_size(p[3], 4).max() <= 32 for p in parts)
+    assert sum(len(p[4]) for p in parts) == len(piece[4])
+
+
+def quad_texels(cells, cell=10):
+    texels, tris = [], []
+    for x, y in cells:
+        base = len(texels)
+        texels += [[x * cell, y * cell], [(x + 1) * cell, y * cell], [(x + 1) * cell, (y + 1) * cell], [x * cell, (y + 1) * cell]]
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return np.array(texels, float), np.array(tris)
+
+
+def test_mirrored_island_splits_into_two_pieces():
+    from lightmapper.charts import _components, _island_overlaps, _split_self_overlap
+    # the right half folds back over the left: quad 2 lies on quad 1 and quad 3 on quad 0
+    texels, tris = quad_texels([(0, 0), (1, 0), (2, 0), (3, 0)])
+    texels[:, 0] = np.where(texels[:, 0] > 20, 40 - texels[:, 0], texels[:, 0])
+    found = _split_self_overlap(texels, tris)
+    assert len(found) == 2
+    assert sorted(np.concatenate(found)) == list(range(len(tris)))
+    for rows in found:
+        assert not _island_overlaps(texels, np.unique(tris[rows]), tris[rows])
+        assert len(_components(texels, tris, rows)) == 1
+
+
+def test_self_overlap_split_keeps_non_colliding_neighbours_together():
+    from lightmapper.charts import _split_self_overlap
+    # a ring of eight cells round a 3x3 block, then one triangle laid over the first cell's second triangle
+    ring = [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (1, 2), (0, 2), (0, 1)]
+    texels, tris = quad_texels(ring)
+    n = len(texels)
+    texels = np.concatenate([texels, [[0, 0], [10, 10], [0, 10]]])
+    tris = np.concatenate([tris, [[n, n + 1, n + 2]]])
+    found = _split_self_overlap(texels, tris)
+    assert sorted(len(rows) for rows in found) == [1, 16]
+
+
+def island_fit_residual(pages, low, high):
+    # worst deviation of the vertices whose world x lies in [low, high) from one affine map of their texture uvs to the page texels
+    source, target = [], []
+    for page in pages:
+        for m in page.materials:
+            pick = (m.env['position'][:, 0] >= low) & (m.env['position'][:, 0] < high)
+            source.append(m.env['texcoord'][pick].astype(np.float64))
+            target.append(m.lm['texcoord'][pick].astype(np.float64) * [page.width, page.height])
+    source, target = np.concatenate(source), np.concatenate(target)
+    design = np.hstack([source, np.ones((len(source), 1))])
+    fit, *_ = np.linalg.lstsq(design, target, rcond=None)
+    return np.abs(design @ fit - target).max()
+
+
+def two_strips_group(name):
+    # three islands: a quad at texture u 0-1, two world-apart strips whose texture uvs coincide (one island
+    # that overlaps itself) at u 10-11, and a quad at u 20-21
+    pos, uvs, tris = [], [], []
+
+    def quad(x0, y0, w, h, u0, v0):
+        base = len(pos)
+        pos.extend([[x0, y0, 0], [x0 + w, y0, 0], [x0 + w, y0 + h, 0], [x0, y0 + h, 0]])
+        uvs.extend([[u0, v0], [u0 + 1, v0], [u0 + 1, v0 + 1], [u0, v0 + 1]])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    quad(0, 0, 4, 4, 0, 0)
+    quad(20, 0, 4, 4, 10, 0)
+    quad(20, 10, 4, 4, 10, 0)
+    quad(40, 0, 4, 4, 20, 0)
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name)
+
+
+def test_only_the_self_overlapping_island_is_split(caplog):
+    group = two_strips_group('threeway')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert island_fit_residual(pages, 40, 50) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == list(range(8))
+    warnings = [r.getMessage() for r in caplog.records if r.name == 'lightmapper.charts' and r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and 'threeway' in warnings[0] and '1 island(s) split' in warnings[0]
+    for page in pages:
+        assert rasterise(page).max() <= 1
+
+
+def test_overlapping_islands_keep_their_stitching(caplog):
+    # two islands whose texture uvs overlap each other, with no uv value in common, are two islands
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [14, 0, 0], [14, 4, 0], [10, 4, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [1, 1], [0, 1], [0.5, 0.5], [1.5, 0.5], [1.5, 1.5], [0.5, 1.5]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], uvs=uvs, name='nested')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert caplog.text == ''
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert island_fit_residual(pages, 5, 20) < 1e-3
+
+
+def test_split_worse_than_a_rechart_is_recharted(caplog):
+    # twelve triangles of one flat strip, every one with the same three uvs: the split makes twelve pieces
+    pos, uvs, tris = [], [], []
+    for x in range(6):
+        for corners in ([[x, 0], [x + 1, 0], [x + 1, 1]], [[x, 0], [x + 1, 1], [x, 1]]):
+            tris.append([len(pos), len(pos) + 1, len(pos) + 2])
+            pos.extend([[cx, cy, 0] for cx, cy in corners])
+            uvs.extend([[0, 0], [1, 0], [0, 1]])
+    good = len(pos)
+    pos.extend([[20, 0, 0], [24, 0, 0], [24, 4, 0], [20, 4, 0]])
+    uvs.extend([[10, 0], [11, 0], [11, 1], [10, 1]])
+    tris.extend([[good, good + 1, good + 2], [good, good + 2, good + 3]])
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs, name='stack')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert '1 island(s) charted normally (it overlaps itself)' in caplog.text
+    assert '0 island(s) split' in caplog.text
+    assert island_fit_residual(pages, 15, 30) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == list(range(14))
+
+
+def test_zero_texture_area_island_is_recharted_alone(caplog):
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [14, 0, 0], [14, 4, 0], [10, 4, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [2, 0], [0, 1], [10, 0], [11, 0], [11, 1], [10, 1]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6], [4, 6, 7]], uvs=uvs, name='flat')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert '0 island(s) split' in caplog.text and '1 island(s) charted normally (no texture area)' in caplog.text
+    assert island_fit_residual(pages, 5, 20) < 1e-3
+    for page in pages:
+        for m in page.materials:
+            for tri in texel_triangles(page, m):
+                assert area(*tri) > 0.5
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2, 3]
+
+
+def test_page_max_auto_is_capped_at_4096():
+    s = ChartSettings()
+    assert s.page_max == 'auto' and s.page_cap == 4096
+    assert ChartSettings(page_max=512).page_cap == 512
+
+
+@pytest.mark.parametrize('bad', ['Auto', 'big', '512', 100, 0])
+def test_page_max_refuses_other_strings(bad):
+    with pytest.raises(ValueError, match='page_max'):
+        ChartSettings(page_max=bad)
+
+
+def island_group(sizes, tpu, name='shader'):
+    # separate quads, each `size` world units on a side with its own texture uvs: an island `size * tpu` texels wide
+    pos, uvs, tris = [], [], []
+    for i, size in enumerate(sizes):
+        base = len(pos)
+        pos.extend([[i * 100, 0, 0], [i * 100 + size, 0, 0], [i * 100 + size, size, 0], [i * 100, size, 0]])
+        uvs.extend([[i * 2, 0], [i * 2 + 1, 0], [i * 2 + 1, 1], [i * 2, 1]])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name)
+
+
+def test_bake_side_is_the_smallest_that_fits():
+    group = island_group([4] * 6, 50)
+    pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max=1024))
+    assert len(pages) == 2
+    assert all(max(p.width, p.height) <= 512 for p in pages)
+    # (auto's Max resolution is the biggest island's size, 208 texels with padding, so 256: one island to a page)
+    pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max='auto'))
+    assert pages.page_max == 256 and all(max(p.width, p.height) <= 256 for p in pages)
+
+
+def test_one_triangle_forces_the_side_up():
+    pos = np.array([[0, 0, 0], [12, 0, 0], [0, 12, 0]], np.float32)
+    triangle = make_group(pos, [[0, 1, 2]], uvs=[[0, 0], [1, 0], [0, 1]], name='wide')
+    pages = chart_and_pack([island_group([4] * 6, 50), triangle], [radiosity(SIMPLE_PARAMETERIZATION)] * 2,
+                           ChartSettings(texels_per_unit=50))
+    assert all(max(p.width, p.height) <= 1024 for p in pages)
+    assert any(max(p.width, p.height) == 1024 for p in pages)
+
+
+def test_triangle_wider_than_max_resolution_names_the_shader():
+    from lightmapper.charts import TriangleTooWide
+    # (599 texels of triangle, and xatlas starts a uv chart half a texel in: 600 wide, 608 with padding)
+    pos = np.array([[0, 0, 0], [11.98, 0, 0], [0, 11.98, 0]], np.float32)
+    triangle = make_group(pos, [[0, 1, 2]], uvs=[[0, 0], [1, 0], [0, 1]], name='wide')
+    with pytest.raises(TriangleTooWide) as caught:
+        chart_and_pack([island_group([4] * 6, 50), triangle], [radiosity(SIMPLE_PARAMETERIZATION)] * 2,
+                       ChartSettings(texels_per_unit=50, page_max=512))
+    error = caught.value
+    assert (error.shader, error.width, error.page_max) == ('wide', 608, 512)
+    assert 'wide' in str(error) and '608' in str(error) and '512' in str(error)
+    assert isinstance(error, CapError)
+
+
+def big_island():
+    pos, tris = grid(14, 1.0)
+    return make_group(pos, tris, uvs=pos[:, :2] / 14, name='big')
+
+
+def test_oversized_island_is_bisected_not_refused():
+    pages = chart_and_pack([big_island()], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max='auto'))
+    # (700 texels and padding fit a 1024 page whole, so auto settles there and the island is not cut)
+    assert pages.page_max == 1024 and all(max(p.width, p.height) <= 1024 for p in pages)
+    areas = np.array([area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m)])
+    assert len(areas) == 392
+    np.testing.assert_allclose(areas, 1250.0, rtol=1e-5)
+
+
+def test_fixed_256_never_exceeds_256():
+    pages = chart_and_pack([big_island()], [radiosity(SIMPLE_PARAMETERIZATION)],
+                           ChartSettings(texels_per_unit=50, page_max=256))
+    assert all(max(p.width, p.height) <= 256 for p in pages)
+    assert sum(len(m.tris) for p in pages for m in p.materials) == 392
+
+
+def test_charting_does_not_depend_on_page_max(monkeypatch):
+    from lightmapper import charts
+    seen = []
+    real = charts.xatlas_c.PackSettings
+
+    def recorder(**kwargs):
+        seen.append(kwargs['resolution'])
+        return real(**kwargs)
+    monkeypatch.setattr(charts.xatlas_c, 'PackSettings', recorder)
+    pos, tris = grid(8, 1.0)
+    group = make_group(pos, tris)
+    results = {}
+    for page_max in (256, 'auto'):
+        seen.clear()
+        pages = chart_and_pack([group], [radiosity()], ChartSettings(page_max=page_max))
+        assert {r for r in seen if r} == {4096 - 2 * 4}
+        results[page_max] = sorted(area(*t) for p in pages for m in p.materials for t in texel_triangles(p, m))
+    np.testing.assert_allclose(results[256], results['auto'], rtol=1e-5)
+
+
+def test_island_with_no_world_area_is_recharted_alone(caplog):
+    # the second island has texture area but its three positions are on a line
+    pos = np.array([[0, 0, 0], [4, 0, 0], [4, 4, 0], [0, 4, 0], [10, 0, 0], [12, 0, 0], [14, 0, 0]], np.float32)
+    uvs = [[0, 0], [1, 0], [1, 1], [0, 1], [10, 0], [11, 0], [10, 1]]
+    group = make_group(pos, [[0, 1, 2], [0, 2, 3], [4, 5, 6]], uvs=uvs, name='sliver')
+    with caplog.at_level(logging.WARNING, logger='lightmapper.charts'):
+        pages = chart_and_pack([group], [radiosity(SIMPLE_PARAMETERIZATION)], ChartSettings())
+    assert '0 island(s) split' in caplog.text and '1 island(s) charted normally (no texture or world area)' in caplog.text
+    assert island_fit_residual(pages, 0, 5) < 1e-3
+    assert sorted(np.concatenate([m.surface_ids for p in pages for m in p.materials])) == [0, 1, 2]
+
+
+def rect_group(sizes, name='shader', sid0=0):
+    # separate quads w x h texels at texels_per_unit 1, each with its own texture uvs (uniform scale, so no stretch)
+    pos, uvs, tris = [], [], []
+    for i, (w, h) in enumerate(sizes):
+        base = len(pos)
+        for x, y in ((0, 0), (w, 0), (w, h), (0, h)):
+            pos.append([i * 1000 + x, y, 0])
+            uvs.append([i * 2 + x / 1000, y / 1000])
+        tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs, name=name, sid0=sid0)
+
+
+def nest_settings(**options):
+    return ChartSettings(texels_per_unit=1.0, page_max='auto', **options)
+
+
+def simple(count=1):
+    return [radiosity(SIMPLE_PARAMETERIZATION)] * count
+
+
+def scattered_islands():
+    sizes = np.random.default_rng(1).uniform(6, 60, (30, 2))
+    return rect_group([tuple(size) for size in sizes])
+
+
+def total_area(pages):
+    return sum(p.width * p.height for p in pages)
+
+
+def same_layout(a, b):
+    assert [(p.width, p.height) for p in a] == [(p.width, p.height) for p in b]
+    for page_a, page_b in zip(a, b):
+        assert len(page_a.materials) == len(page_b.materials)
+        for m, n in zip(page_a.materials, page_b.materials):
+            np.testing.assert_array_equal(m.lm, n.lm)
+            np.testing.assert_array_equal(m.tris, n.tris)
+            np.testing.assert_array_equal(m.surface_ids, n.surface_ids)
+
+
+class NestSpy:
+    def __init__(self, monkeypatch):
+        from lightmapper import charts
+        self.calls = []
+        real = charts._nest_pack
+
+        def spy(parts, s, *margin):
+            result = real(parts, s, *margin)
+            self.calls.append((parts, s, result))
+            return result
+        monkeypatch.setattr(charts, '_nest_pack', spy)
+
+
+def corners_by_surface(pages):
+    found = {}
+    for page in pages:
+        for m in page.materials:
+            texels = m.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            for tri, sid in zip(m.tris, m.surface_ids):
+                found[int(sid)] = texels[tri]
+    return found
+
+
+def test_hollow_chart_holds_a_smaller_chart():
+    # a frame island (100 texels out, a 60 texel hole) and a 20 texel island, as one group
+    pos, uvs, tris = [], [], []
+    edges = [0, 20, 80, 100]
+    for y in edges:
+        for x in edges:
+            pos.append([x, y, 0])
+            uvs.append([x / 1000, y / 1000])
+    for cy in range(3):
+        for cx in range(3):
+            if (cx, cy) != (1, 1):
+                a = cy * 4 + cx
+                tris.extend([[a, a + 1, a + 5], [a, a + 5, a + 4]])
+    base = len(pos)
+    for x, y in ((0, 0), (20, 0), (20, 20), (0, 20)):
+        pos.append([2000 + x, y, 0])
+        uvs.append([2 + x / 1000, y / 1000])
+    tris.extend([[base, base + 1, base + 2], [base, base + 2, base + 3]])
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs)
+    nested = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    rects = chart_and_pack([group], simple(), nest_settings(), nest=False)
+    assert [(p.width, p.height) for p in nested] == [(128, 128)]
+    assert total_area(rects) > total_area(nested)
+    corners = corners_by_surface(nested)
+    frame = np.concatenate([corners[i] for i in range(16)])
+    small = np.concatenate([corners[16], corners[17]])
+    assert np.all(small.min(axis=0) > frame.min(axis=0)) and np.all(small.max(axis=0) < frame.max(axis=0))
+
+
+def nesting_wins_group():
+    return rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
+
+
+def test_nested_charts_keep_the_full_gap(monkeypatch):
+    from lightmapper.charts import _charts_separated
+    s = nest_settings()
+    spy = NestSpy(monkeypatch)
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    units, _, pages = spy.calls[0]
+    assert pages is not None
+    assert _charts_separated(pages, s, units)
+    for page in pages:
+        assert rasterise(page).max() <= 1
+
+
+def test_rectangle_layout_passes_the_gap_check():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=256)
+    # (integer extents put every edge on a texel boundary)
+    pieces = [piece_from_grid(2, 10), piece_from_grid(1, 7), piece_from_grid(3, 9), piece_from_grid(4, 5)]
+    pieces = [(i, *piece[1:]) for i, piece in enumerate(pieces)]
+    assert _charts_separated(_pack_rectangles(pieces, s), s, pieces)
+
+
+def test_charts_closer_than_the_gap_are_not_separated():
+    from lightmapper.charts import _charts_separated
+    s = nest_settings()
+    pages = chart_and_pack([rect_group([(20, 20), (20, 20)])], simple(), s)
+    page = pages[0]
+    material = page.materials[0]
+    labels = connected_components_of(material)
+    quads = [(material.group, None, None, None, None, material.surface_ids[labels[material.tris[:, 0]] == k])
+             for k in (0, 1)]
+    assert _charts_separated(pages, s, quads)
+    texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+    centres = [texels[labels == k].mean(axis=0) for k in (0, 1)]
+    axis = int(np.argmax(np.abs(centres[1] - centres[0])))
+    moved = material.lm.copy()
+    step = np.sign(centres[0][axis] - centres[1][axis]) / [page.width, page.height][axis]
+    moved['texcoord'][labels == 1, axis] += step
+    squeezed = [type(page)(page.width, page.height, [type(material)(material.group, material.env, moved,
+                                                                    material.tris, material.surface_ids)])]
+    assert not _charts_separated(squeezed, s, quads)
+
+
+def connected_components_of(material):
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    n = len(material.env)
+    edges = np.concatenate([material.tris[:, [0, 1]], material.tris[:, [1, 2]]])
+    return connected_components(coo_matrix((np.ones(len(edges)), (edges[:, 0], edges[:, 1])), shape=(n, n)), directed=False)[1]
+
+
+def test_nested_pack_keeps_texel_areas(monkeypatch):
+    from lightmapper.charts import _piece_areas, _packing_areas
+    spy = NestSpy(monkeypatch)
+    group = rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)
+    chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, _, pages = spy.calls[0]
+    assert pages is not None
+    np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
+
+
+def test_nested_pack_keeps_the_areas_of_parts_with_fractional_extents():
+    # (charts xatlas made already have whole-texel extents, but a bisected part's cut edge does not, and xatlas
+    # stretches such a chart to whole texels when it packs it again)
+    from lightmapper.charts import _nest_pack, _packing_areas, _piece_areas
+    s = ChartSettings(page_max=256)
+    parts = [piece_from_grid(2, 18.65), piece_from_grid(3, 7.3), piece_from_grid(1, 33.45)]
+    pages = _nest_pack(parts, s)
+    assert pages is not None
+    np.testing.assert_allclose(_packing_areas(pages), _piece_areas(parts), rtol=1e-5)
+
+
+def test_nested_pack_only_translates_or_swaps(monkeypatch):
+    spy = NestSpy(monkeypatch)
+    chart_and_pack([rect_group([(37.3, 21.7)] * 6 + [(15.2, 44.6)] * 4)], simple(), nest_settings(), nest=True)
+    parts, s, pages = spy.calls[0]
+    assert pages is not None
+    new = corners_by_surface(pages)
+    for part in parts:
+        old = part[3][part[4]]
+        sids = [int(i) for i in part[5]]
+        moved = np.array([new[i] - s.padding for i in sids])
+        shift = moved - old
+        swapped_shift = moved - old[:, :, ::-1]
+        assert min(np.ptp(shift.reshape(-1, 2), axis=0).max(), np.ptp(swapped_shift.reshape(-1, 2), axis=0).max()) < 1e-3
+
+
+def test_a_turned_chart_is_read_back_swapped(monkeypatch):
+    spy = NestSpy(monkeypatch)
+    # (found by search: thin charts of both orientations, where xatlas turns some to fit them in)
+    group = rect_group([(87, 17), (72, 12), (8, 84), (22, 88), (66, 6), (53, 8), (6, 95), (9, 89), (17, 105), (8, 90),
+                        (50, 14), (99, 13), (78, 16)])
+    chart_and_pack([group], simple(), nest_settings(), nest=True)
+    parts, s, pages = spy.calls[0]
+    assert pages is not None
+    new = corners_by_surface(pages)
+    turned = 0
+    for part in parts:
+        old = part[3][part[4]]
+        moved = np.array([new[int(i)] - s.padding for i in part[5]])
+        straight = np.ptp((moved - old).reshape(-1, 2), axis=0).max()
+        swapped = np.ptp((moved - old[:, :, ::-1]).reshape(-1, 2), axis=0).max()
+        assert min(straight, swapped) < 1e-3
+        if swapped < straight:
+            turned += 1
+            np.testing.assert_allclose(_tri_area(moved), _tri_area(old), rtol=1e-5)
+    assert turned > 0
+
+
+def _tri_area(corners):
+    ab, ac = corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]
+    return np.abs(ab[:, 0] * ac[:, 1] - ab[:, 1] * ac[:, 0])
+
+
+def test_nest_with_a_degenerate_triangle_keeps_every_triangle(monkeypatch):
+    from lightmapper.charts import _charts_separated, _packing_areas
+    pos, tris = grid(4)
+    pos = np.vstack([pos, [[20, 0, 0], [21, 0, 0], [22, 0, 0]]]).astype(np.float32)
+    tris = np.vstack([tris, [[25, 26, 27], [0, 0, 1]]])
+    group = make_group(pos, tris)
+    s = ChartSettings(page_max='auto')
+    spy = NestSpy(monkeypatch)
+    chart_and_pack([group], [radiosity()], s, nest=True)
+    nested = spy.calls[0][2]
+    assert nested is not None
+    rects = chart_and_pack([group], [radiosity()], s)
+    assert sorted(np.concatenate([m.surface_ids for p in nested for m in p.materials])) == list(range(len(tris)))
+    np.testing.assert_allclose(_packing_areas(nested), _packing_areas(rects), atol=1e-6)
+    assert _charts_separated(nested, s, spy.calls[0][0])
+
+
+def test_nesting_is_deterministic(monkeypatch):
+    s = nest_settings()
+    spy = NestSpy(monkeypatch)
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    chart_and_pack([nesting_wins_group()], simple(), s, nest=True)
+    first, second = spy.calls[0][2], spy.calls[-1][2]
+    assert first is not None and len(spy.calls) == 2
+    same_layout(first, second)
+
+
+def test_nesting_is_never_worse_than_rectangles():
+    s = nest_settings()
+    nested = chart_and_pack([scattered_islands()], simple(), s, nest=True)
+    rects = chart_and_pack([scattered_islands()], simple(), s, nest=False)
+    assert (len(nested), total_area(nested)) <= (len(rects), total_area(rects))
+
+
+def test_a_nested_layout_without_the_gap_falls_back_to_rectangles(monkeypatch):
+    from lightmapper import charts
+    s = nest_settings()
+    group = rect_group([(20, 20), (20, 20)])
+    rects = chart_and_pack([group], simple(), s)
+
+    def squeezed(parts, settings, *margin):
+        page = rects[0]
+        material = page.materials[0]
+        labels = connected_components_of(material)
+        texels = material.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+        centres = [texels[labels == k].mean(axis=0) for k in (0, 1)]
+        axis = int(np.argmax(np.abs(centres[1] - centres[0])))
+        moved = material.lm.copy()
+        moved['texcoord'][labels == 1, axis] += np.sign(centres[0][axis] - centres[1][axis]) / [page.width, page.height][axis]
+        return [type(page)(page.width, page.height, [type(material)(material.group, material.env, moved,
+                                                                    material.tris, material.surface_ids)])]
+    monkeypatch.setattr(charts, '_nest_pack', squeezed)
+    same_layout(chart_and_pack([group], simple(), s, nest=True), rects)
+
+
+def test_a_nested_layout_over_the_material_cap_falls_back(monkeypatch):
+    from lightmapper.charts import _check_caps
+    s = nest_settings(max_materials_per_page=2)
+    groups = [rect_group([(20, 20)], name=f'g{i}', sid0=2 * i) for i in range(3)]
+    spy = NestSpy(monkeypatch)
+    nested = chart_and_pack(groups, simple(3), s, nest=True)
+    rects = chart_and_pack(groups, simple(3), s)
+    assert spy.calls[0][2] is not None and len(spy.calls[0][2]) == 1
+    _check_caps(nested, s)
+    same_layout(nested, rects)
+
+
+def test_a_rectangle_layout_never_nests(monkeypatch):
+    from lightmapper import charts
+
+    def refuse(parts, settings):
+        raise AssertionError('nest=False must not nest')
+    monkeypatch.setattr(charts, '_nest_pack', refuse)
+    assert chart_and_pack([scattered_islands()], simple(), nest_settings(), nest=False)
+
+
+def test_pack_rectangles_accepts_an_auto_page_max():
+    from lightmapper.charts import _pack_rectangles
+    pages = _pack_rectangles(rectangle_pieces([(8, 8)] * 2), ChartSettings(padding=0, page_max='auto'))
+    assert len(pages) == 1
+
+
+def test_a_chart_over_the_auto_page_max_is_refused_not_a_type_error():
+    from lightmapper.charts import AUTO_PAGE_MAX, _pack_rectangles
+    with pytest.raises(CapError, match='exceeds page_max'):
+        _pack_rectangles(rectangle_pieces([(AUTO_PAGE_MAX + 1, 8)]), ChartSettings(padding=0, page_max='auto'))
+
+
+def test_nest_pack_accepts_an_auto_page_max():
+    from lightmapper.charts import _nest_pack
+    pages = _nest_pack([piece_from_grid(2, 18.65), piece_from_grid(3, 7.3)], ChartSettings(page_max='auto'))
+    assert pages is not None
+
+
+def loose_piece(index, quads):
+    # one piece of quads with uvs (x, y, w, h); every triangle has its own vertices, as a part of a chart whose
+    # source vertices differ across an edge (a normal seam), so its triangles only touch by uv value
+    pos, uvs, tris = [], [], []
+    for x, y, w, h in quads:
+        for corners in (((x, y), (x + w, y), (x + w, y + h)), ((x, y), (x + w, y + h), (x, y + h))):
+            tris.append([len(pos), len(pos) + 1, len(pos) + 2])
+            for u, v in corners:
+                pos.append([u, v, 0])
+                uvs.append([u, v])
+    group = make_group(np.array(pos, np.float32), tris)
+    return (index, group, np.arange(len(pos)), np.array(uvs, np.float64), group.tris, group.surface_ids)
+
+
+def frame_piece(index, outer, hole):
+    edges = [0, (outer - hole) / 2, (outer + hole) / 2, outer]
+    pos = [[x, y, 0] for y in edges for x in edges]
+    tris = []
+    for cy in range(3):
+        for cx in range(3):
+            if (cx, cy) != (1, 1):
+                a = cy * 4 + cx
+                tris += [[a, a + 1, a + 5], [a, a + 5, a + 4]]
+    group = make_group(np.array(pos, np.float32), tris)
+    return (index, group, np.arange(16), group.env['position'][:, :2].astype(np.float64), group.tris, group.surface_ids)
+
+
+def quad_piece(index, w, h):
+    group = make_group(np.array([[0, 0, 0], [w, 0, 0], [w, h, 0], [0, h, 0]], np.float32), [[0, 1, 2], [0, 2, 3]])
+    return (index, group, np.arange(4), group.env['position'][:, :2].astype(np.float64), group.tris, group.surface_ids)
+
+
+def test_triangles_of_one_chart_that_share_no_vertex_still_nest():
+    # (a chart whose triangles meet only by uv value is still one chart: its own texels may touch)
+    from lightmapper.charts import _charts_separated, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (14, 0, 14, 14)])]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, parts)
+
+
+def test_a_part_of_separate_uv_islands_nests_island_by_island():
+    # (a bounded or bisected part can be several uv islands; xatlas places each island as its own chart)
+    from lightmapper.charts import _charts_separated, _nest_units, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (36, 0, 14, 14)])]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, _nest_units(parts))
+    np.testing.assert_allclose(_packing_areas_of(pages), _piece_areas_of(parts), rtol=1e-5)
+
+
+def _packing_areas_of(pages):
+    from lightmapper.charts import _packing_areas
+    return _packing_areas(pages)
+
+
+def _piece_areas_of(parts):
+    from lightmapper.charts import _piece_areas
+    return _piece_areas(parts)
+
+
+def test_separation_tells_charts_apart_by_their_triangles_not_their_vertices():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [loose_piece(0, [(0, 0, 10, 10), (10, 0, 10, 10)]), loose_piece(1, [(0, 0, 10, 10)])]
+    pages = _pack_rectangles(parts, s)
+    assert _charts_separated(pages, s, parts)
+    # the same triangles, claimed as one chart each: the two halves of the first piece now touch
+    split = [(0, None, None, None, None, parts[0][5][:2]), (0, None, None, None, None, parts[0][5][2:]), parts[1]]
+    assert not _charts_separated(pages, s, split)
+
+
+def test_separation_refuses_triangles_it_cannot_assign():
+    from lightmapper.charts import _charts_separated, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = [quad_piece(0, 10, 10), quad_piece(1, 10, 10)]
+    pages = _pack_rectangles(parts, s)
+    assert not _charts_separated(pages, s, parts[:1])
+    # (two charts claiming one triangle cannot be told apart either)
+    assert not _charts_separated(pages, s, parts + [parts[0]])
+
+
+def stretched_nest_parts():
+    # (found by search: frames and quads of fractional extents, which xatlas stretches to whole texels before it
+    # places a chart; at xatlas's own padding our unstretched copies end 7 texels apart)
+    spec = [('f', 81.76, 46.78), ('f', 43.01, 31.97), ('f', 81.75, 57.03), ('f', 103.72, 69.71), ('q', 5.85, 17.72),
+            ('q', 7.27, 12.44), ('q', 11.72, 12.0), ('q', 11.03, 17.94), ('q', 10.53, 14.57), ('q', 10.41, 17.97),
+            ('q', 17.68, 8.9), ('q', 7.83, 15.93), ('q', 14.99, 13.37), ('q', 9.13, 8.85), ('q', 4.97, 12.38),
+            ('q', 4.24, 7.12), ('q', 12.84, 3.22), ('q', 15.52, 4.09), ('q', 10.86, 11.2), ('q', 6.41, 17.34),
+            ('q', 8.11, 10.57)]
+    return [frame_piece(i, a, b) if kind == 'f' else quad_piece(i, a, b) for i, (kind, a, b) in enumerate(spec)]
+
+
+def test_nesting_widens_the_xatlas_margin_when_the_stretch_closes_the_gap():
+    from lightmapper.charts import _charts_separated, _nest_pack, _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    parts = stretched_nest_parts()
+    assert not _charts_separated(_nest_pack(parts, s), s, parts)
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert _charts_separated(pages, s, parts)
+    np.testing.assert_allclose(_packing_areas_of(pages), _piece_areas_of(parts), rtol=1e-5)
+
+
+def test_the_wider_margin_covers_the_stretch():
+    # xatlas places a chart stretched by under a texel; one more texel of its padding on each chart keeps our
+    # unstretched copies 2 x padding apart
+    from lightmapper.charts import _charts_separated, _nest_pack
+    s = ChartSettings(page_max=256)
+    for seed in range(20):
+        rng = np.random.default_rng(seed)
+        parts = [frame_piece(0, rng.uniform(40, 60), rng.uniform(20, 30))]
+        parts += [quad_piece(i, *rng.uniform(3, 18, 2)) for i in range(1, 12)]
+        pages = _nest_pack(parts, s, s.padding + 1)
+        assert pages is not None and _charts_separated(pages, s, parts)
+
+
+# ---------- auto Max resolution
+
+def auto_wall(texels, density=1.0, name='wall'):
+    # one simple-parameterization island of `texels` texels on a side at the density
+    size = texels / density
+    pos, tris = grid(2, size / 2)
+    return make_group(pos, tris, uvs=pos[:, :2] / size, name=name)
+
+
+def simple_shader():
+    return [radiosity(SIMPLE_PARAMETERIZATION)]
+
+
+def test_auto_is_the_smallest_side_the_biggest_chart_needs():
+    # 500 texels and 8 of padding fit 512, and no written page is bigger
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 512
+    assert all(max(p.width, p.height) <= 512 for p in pages)
+
+
+def test_auto_never_goes_below_256():
+    pages = chart_and_pack([auto_wall(20)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 256
+
+
+def test_a_denser_setting_raises_auto():
+    sizes = [chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=d, page_max='auto')).page_max
+             for d in (1, 2)]
+    assert sizes == [512, 1024]
+
+
+def test_auto_cuts_what_is_over_4096_then_fits_the_rest():
+    # 5000 texels of wall cannot be one page; the halves (about 2500, 2508 with padding) need 4096
+    pages = chart_and_pack([auto_wall(5000)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max == 4096
+    assert all(max(p.width, p.height) <= 4096 for p in pages)
+    # 8000 texels cut into pieces of about 2000 each, which fit 2048
+    pages = chart_and_pack([auto_wall(8000)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    assert pages.page_max <= 4096
+
+
+def test_auto_rises_when_the_page_count_cap_fails_at_the_chart_size():
+    # four 200-texel walls fit one 512 page, but not one page of the 256 side the chart alone would allow
+    groups = [auto_wall(200, name=f'w{i}') for i in range(4)]
+    pages = chart_and_pack(groups, simple_shader() * 4, ChartSettings(texels_per_unit=1, page_max='auto', max_pages=1))
+    assert pages.page_max == 512 and len(pages) == 1
+
+
+def test_fixed_values_stay_hard_caps():
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max=1024))
+    assert pages.page_max == 1024
+    with pytest.raises(CapError):
+        chart_and_pack([auto_wall(2000, name='a'), auto_wall(2000, name='b')], simple_shader() * 2,
+                       ChartSettings(texels_per_unit=1, page_max=256, max_pages=1))
+
+
+def test_the_charts_cache_keeps_the_resolved_page_max(tmp_path):
+    from lightmapper.charts import load_charts, save_charts
+    pages = chart_and_pack([auto_wall(500)], simple_shader(), ChartSettings(texels_per_unit=1, page_max='auto'))
+    save_charts(tmp_path / 'c.npz', pages, 'key')
+    assert load_charts(tmp_path / 'c.npz', 'key').page_max == 512
+
+
+def test_the_estimate_and_the_bake_agree_on_auto(monkeypatch):
+    groups = [auto_wall(500, name='a'), auto_wall(300, name='b')]
+    s = ChartSettings(texels_per_unit=1, page_max='auto')
+    estimate = chart_and_pack(groups, simple_shader() * 2, s, nest=False)
+    baked = chart_and_pack(groups, simple_shader() * 2, s, nest=True)
+    assert estimate.page_max == baked.page_max == 512
+    assert max(max(p.width, p.height) for p in baked) <= 512
+
+
+def test_a_tie_keeps_the_rectangle_layout(monkeypatch, caplog):
+    from lightmapper import charts
+    s = ChartSettings(page_max=128)
+    parts = [quad_piece(0, 20, 20), quad_piece(1, 20, 20)]
+    rects = charts._pack_rectangles(parts, s)
+    # (a separated layout of the same pages and texels, as a nest of these charts would be)
+    monkeypatch.setattr(charts, '_nest_pack', lambda units, settings, *margin: charts._pack_rectangles(units, settings))
+    with caplog.at_level(logging.INFO, logger='lightmapper.charts'):
+        assert charts._nested_or(rects, parts, s) is rects
+    assert 'ties with the rectangle layout' in caplog.text
+
+
+def test_islands_of_one_part_too_close_fall_back(monkeypatch, caplog):
+    # (xatlas places a part's islands apart, so they need the full gap between them like any two charts)
+    from dataclasses import replace
+    from lightmapper import charts
+    s = ChartSettings(page_max=128)
+    parts = [frame_piece(0, 100, 60), loose_piece(1, [(0, 0, 14, 14), (36, 0, 14, 14)])]
+    rects = charts._pack_rectangles(parts, s)
+    frame, left, right = charts._nest_units(parts)
+    placed = [frame, (*left[:3], left[3] - left[3].min(axis=0) + 30, *left[4:]),
+              (*right[:3], right[3] - right[3].min(axis=0) + [47, 30], *right[4:])]
+    squeezed = charts._finish([placed], np.array([[100.0, 100.0]]), replace(s, page_max=128))
+    assert total_area(squeezed) < total_area(rects)
+    monkeypatch.setattr(charts, '_nest_pack', lambda units, settings, *margin: squeezed)
+    with caplog.at_level(logging.INFO, logger='lightmapper.charts'):
+        assert charts._nested_or(rects, parts, s) is rects
+    assert 'charts too close' in caplog.text
+
+
+def area_change_bound_ratio(pages, parts):
+    # the largest |change of a triangle's doubled texel area| over ulp(page side) x its perimeter
+    old = {(p[0], int(sid)): p[3][tri].astype(np.float64) for p in parts for tri, sid in zip(p[4], p[5])}
+    worst = 0.0
+    for page in pages:
+        ulp = float(np.spacing(np.float32(max(page.width, page.height))))
+        for m in page.materials:
+            texels = m.lm['texcoord'].astype(np.float64) * [page.width, page.height]
+            for tri, sid in zip(m.tris, m.surface_ids):
+                before = old[(m.group, int(sid))]
+                perimeter = sum(np.hypot(*(before[k] - before[(k + 1) % 3])) for k in range(3))
+                change = abs(_tri_area(texels[tri][None])[0] - _tri_area(before[None])[0])
+                worst = max(worst, change / (ulp * perimeter))
+    return worst
+
+
+def test_texel_areas_stay_within_the_float32_rounding_of_a_large_page():
+    # texcoords are stored as float32 fractions of the page, so a triangle's area can only be kept to the rounding
+    # of a coordinate near the page side; real levels measured up to 0.3 of this bound, for both layouts
+    from lightmapper.charts import _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=4096)
+    rng = np.random.default_rng(3)
+    parts = [frame_piece(0, 4070.37, 3000.61)]
+    parts += [quad_piece(i, *rng.uniform(0.3, 40, 2)) for i in range(1, 40)]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and len(pages) < len(rects)
+    assert max(p.width for p in pages) == 4096
+    for layout in (rects, pages):
+        assert area_change_bound_ratio(layout, parts) <= 1.0
+
+
+def test_islands_split_on_the_values_xatlas_gets():
+    # (far from the part's origin float32 joins two corners 1e-3 apart; in the island's own frame, where xatlas
+    # gets it, they are apart again, so they are two islands)
+    from lightmapper.charts import _components, _nest_input, _nest_units
+    far = 1e6
+    quad = [(0, 0, 4, 4)]
+    near = loose_piece(1, [(far, far, 4, 4), (far + 4.001, far, 4, 4)])
+    origin = loose_piece(1, quad)
+    uv = np.vstack([origin[3], near[3]])
+    tris = np.vstack([origin[4], near[4] + len(origin[3])])
+    part = (1, None, np.arange(len(uv)), uv, tris, np.arange(len(tris)))
+    assert len(_components(_nest_input(part), tris, np.arange(len(tris)))) == 2
+    units = _nest_units([part])
+    assert len(units) == 3
+    for unit in units:
+        assert len(_components(_nest_input(unit), unit[4], np.arange(len(unit[4])))) == 1
+    assert sorted(int(i) for unit in units for i in unit[5]) == list(range(len(tris)))
+
+
+def test_an_island_of_only_zero_area_triangles_does_not_block_nesting():
+    # (xatlas does not place a zero-area island; it rides along at the first chart, and holds no texel there)
+    from lightmapper.charts import _nested_or, _pack_rectangles
+    s = ChartSettings(page_max=128)
+    pos = [[0, 0, 0], [14, 0, 0], [14, 14, 0], [0, 14, 0], [60, 60, 0], [70, 60, 0], [80, 60, 0]]
+    group = make_group(np.array(pos, np.float32), [[0, 1, 2], [0, 2, 3], [4, 5, 6]])
+    part = (1, group, np.arange(7), np.array(pos, np.float64)[:, :2], group.tris, group.surface_ids)
+    parts = [frame_piece(0, 100, 60), part]
+    rects = _pack_rectangles(parts, s)
+    pages = _nested_or(rects, parts, s)
+    assert pages is not rects and total_area(pages) < total_area(rects)
+    assert sorted(int(i) for p in pages for m in p.materials for i in m.surface_ids) == sorted(list(range(16)) + [0, 1, 2])
+
+
+def test_auto_never_cuts_a_chart_that_needs_the_full_shape():
+    # (a 700 x 200 chart of 50-texel cells needs 1024 x 512; a page a step down would cut it)
+    pos, uvs, tris = [], [], []
+    for y in range(5):
+        for x in range(15):
+            pos.append([50 * x, 50 * y, 0])
+            uvs.append([50 * x / 1000, 50 * y / 1000])
+    for y in range(4):
+        for x in range(14):
+            a = 15 * y + x
+            tris += [[a, a + 1, a + 16], [a, a + 16, a + 15]]
+    group = make_group(np.array(pos, np.float32), tris, uvs=uvs)
+    pages = chart_and_pack([group], simple(), nest_settings())
+    corners = corners_by_surface(pages)
+    where = {int(sid): k for k, p in enumerate(pages) for m in p.materials for sid in m.surface_ids}
+    assert len(set(where.values())) == 1
+    quad = np.concatenate([corners[i] for i in range(len(tris))])
+    assert sorted(np.round(np.ptp(quad, axis=0))) == [200, 700]
+
+
+def written_count(pages, shape):
+    from lightmapper.charts import written_pages
+    return written_pages(pages, shape, nest_settings())
+
+
+def test_auto_steps_the_shape_up_until_ten_pages_or_fewer():
+    # 75 charts of 68 padded texels: three to a 256 x 128 page would be 25 pages, nine to a 256 x 256 page are 9
+    pages = chart_and_pack([rect_group([(60, 60)] * 75)], simple(), nest_settings())
+    assert pages.page_shape == (256, 256)
+    assert written_count(pages, (256, 128)) == 25
+    assert written_count(pages, pages.page_shape) <= 10
+
+
+def test_auto_within_the_page_target_keeps_the_shape_the_biggest_chart_needs():
+    pages = chart_and_pack([rect_group([(60, 60)] * 9)], simple(), nest_settings())
+    assert pages.page_shape == (256, 128)
+
+
+def test_auto_at_the_cap_may_stay_above_ten_pages(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 512)
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MIN', 256)
+    pages = chart_and_pack([rect_group([(400, 400)] * 12)], simple(), nest_settings())
+    assert pages.page_shape == (512, 512) and written_count(pages, (512, 512)) == 12
+
+
+def frames_and_quads(count, outer, hole, quad):
+    # count hollow frames and as many quads, each quad small enough to nest in a frame
+    pos, uvs, tris = [], [], []
+    for i in range(count):
+        edges = [0, (outer - hole) / 2, (outer + hole) / 2, outer]
+        base = len(pos)
+        for y in edges:
+            for x in edges:
+                pos.append([i * 1000 + x, y, 0])
+                uvs.append([i * 2 + x / 1000, y / 1000])
+        for cy in range(3):
+            for cx in range(3):
+                if (cx, cy) != (1, 1):
+                    a = base + cy * 4 + cx
+                    tris += [[a, a + 1, a + 5], [a, a + 5, a + 4]]
+        base = len(pos)
+        for x, y in ((0, 0), (quad, 0), (quad, quad), (0, quad)):
+            pos.append([i * 1000 + 500 + x, y, 0])
+            uvs.append([i * 2 + 1 + x / 1000, y / 1000])
+        tris += [[base, base + 1, base + 2], [base, base + 2, base + 3]]
+    return make_group(np.array(pos, np.float32), tris, uvs=uvs)
+
+
+def test_auto_counts_the_nested_layout_it_will_write():
+    # (found by search: 20 frames with a quad each; as rectangles 256 x 128 pages hold too few, nested they hold 10)
+    group = frames_and_quads(20, 100, 70, 40)
+    nested = chart_and_pack([group], simple(), nest_settings(), nest=True)
+    rectangles = chart_and_pack([group], simple(), nest_settings(), nest=False)
+    assert nested.page_shape == (256, 128) and rectangles.page_shape == (256, 256)
+    assert written_count(nested, nested.page_shape) <= 10
+
+
+def test_a_fixed_max_refuses_before_the_bake_when_the_write_needs_too_many_pages(monkeypatch):
+    # (the bake pages fit, but the write would need more pages than a bitmap holds: that must fail before the bake)
+    from lightmapper import charts
+    shapes = []
+
+    def too_many(pages, shape, s, blocks=None):
+        shapes.append(shape)
+        return s.max_pages + 1
+    monkeypatch.setattr(charts, 'written_pages', too_many)
+    with pytest.raises(CapError) as caught:
+        chart_and_pack([rect_group([(60, 60)] * 3)], simple(), ChartSettings(texels_per_unit=1.0, page_max=256))
+    assert shapes == [(256, 256)] * len(shapes) and len(shapes) >= 1 and caught.value.page_max == 256
+
+
+def test_auto_at_the_cap_refuses_when_the_write_needs_too_many_pages(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MIN', 256)
+    monkeypatch.setattr(charts, 'written_pages', lambda pages, shape, s, blocks=None: s.max_pages + 1)
+    with pytest.raises(CapError) as caught:
+        chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings())
+    assert caught.value.page_max == 'auto'
+
+
+def test_a_nested_block_at_the_cap_does_not_step_past_it(monkeypatch):
+    from lightmapper import charts
+    monkeypatch.setattr(charts, 'AUTO_PAGE_MAX', 256)
+    monkeypatch.setattr(charts, '_blocks_fit', lambda pages, shape, s, blocks=None: False)
+    monkeypatch.setattr(charts, '_nested_or', lambda rects, parts, s, *lowest: list(rects))
+    pages = chart_and_pack([rect_group([(60, 60)] * 4)], simple(), nest_settings(), nest=True)
+    assert pages.page_shape == (256, 256)

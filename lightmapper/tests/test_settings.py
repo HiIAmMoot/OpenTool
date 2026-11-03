@@ -11,7 +11,7 @@ def test_defaults_come_from_calibration_json():
     assert (s.w_sun, s.w_emit, s.w_amb, s.gamma, s.radiosity_scale) == (1, 1, 1, 1, 1)
     assert s.radiosity_mode == 'coherence'
     assert (s.samples, s.bounces, s.vertex_rays, s.device, s.timeout_s) == (256, 1, 4096, 'auto', 7200)
-    assert s.page_max == 1024 and s.denoise and s.dither
+    assert s.page_max == 'auto' and s.denoise and s.dither
 
 
 def test_seed_defaults_to_zero_and_stays_in_range():
@@ -201,3 +201,10 @@ def test_cpu_vertex_backend_is_not_on_the_cli():
     root = Path(__file__).resolve().parents[2]
     for name in ('presets.py', 'usersettings.py'):
         assert 'cpu_vertex_backend' not in (root / 'opentool' / name).read_text()
+
+
+def test_settings_file_accepts_auto(tmp_path):
+    path = tmp_path / 's.json'
+    path.write_text('{"page_max": "auto"}')
+    s = load_settings(path)
+    assert s.page_max == 'auto' and s.page_cap == 4096

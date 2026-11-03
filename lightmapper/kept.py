@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 KEPT_FOLDER = 'kept bakes'
 MANIFEST = 'kept.json'
-VERSION = 2
+VERSION = 3
+OLDER_BAKE = 'This kept bake was made by an older OpenTool; bake again.'
 # these cannot change what was baked: the Blender path and its time limit are not used by a write again, 32-bit only
 # changes how the tags are written, and the device only picks the denoiser's backend, which already varies under an
 # unchanged "auto" (another machine, or the CPU fallback), so it is no reason to refuse
@@ -116,7 +117,11 @@ def read_manifest(work: Path) -> Manifest:
         data = json.loads((work / MANIFEST).read_text())
         if not isinstance(data, dict):
             raise refused
-        if data.pop('version', None) != VERSION:
+        version = data.pop('version', None)
+        # (a bool is an int, but no OpenTool wrote one)
+        if isinstance(version, int) and not isinstance(version, bool) and version < VERSION:
+            raise KeptBakeError(OLDER_BAKE)
+        if version != VERSION:
             raise refused
         manifest = Manifest(**data)
     except (OSError, ValueError, TypeError) as exc:

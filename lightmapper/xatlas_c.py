@@ -84,6 +84,7 @@ class PackSettings:
     padding: int = 4
     bilinear: bool = True
     rotate_charts: bool = True
+    rotate_charts_to_axis: bool = True
     brute_force: bool = False
     max_chart_area: float = 0.0
     max_boundary_length: float = 0.0
@@ -232,6 +233,7 @@ class Atlas:
         options.padding = pack.padding
         options.bilinear = pack.bilinear
         options.rotateCharts = pack.rotate_charts
+        options.rotateChartsToAxis = pack.rotate_charts_to_axis
         options.bruteForce = pack.brute_force
         self._dll.xatlasGenerate(self._handle, C.byref(chart), C.byref(options))
         self._keep.clear()

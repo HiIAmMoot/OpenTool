@@ -111,6 +111,28 @@ def tiny(tmp_path, monkeypatch):
     return tags, Settings(texels_per_unit=.25, page_max=64, denoise=False), tmp_path / 'work'
 
 
+@pytest.fixture
+def two_pages(tiny, monkeypatch):
+    from lightmapper.charts import ChartSettings, chart_and_pack, save_charts
+    from lightmapper.formats.bsp import SourceGroup
+    pipeline = api()
+    chart_s = ChartSettings(page_max=8, padding=1, texels_per_unit=.75, detail_level_scale=(1, 1, 1, 1))
+
+    def charts(input_file, geometry, radiosity, s, cache, nest):
+        group = geometry.groups[0]
+        pages = []
+        for i in range(2):
+            single = SourceGroup(group.key, group.template, group.env, group.tris[i:i + 1], group.surface_ids[i:i + 1])
+            pages += chart_and_pack([single], radiosity, chart_s)
+        assert len(pages) == 2 and (pages[0].width, pages[0].height) == (pages[1].width, pages[1].height) == (8, 8)
+        # (a kept bake copies the cache file, and a write again loads it back under the real key)
+        save_charts(cache, pages, pipeline.chart_cache_key(input_file, pipeline._chart_settings(s), radiosity, nest))
+        return pages
+
+    monkeypatch.setattr(pipeline, '_charts', charts)
+    return tiny
+
+
 TINY_MACHINE = memory.Machine(1, 1, 1)
 BIG_MACHINE = memory.Machine(64 * memory.GB, 64 * memory.GB, 128 * memory.GB)
 
@@ -130,7 +152,7 @@ def test_memory_guard_warns_and_starts_blender(tiny, monkeypatch, caplog):
     assert len(calls) == 1 and (work / 'job.json').exists()
     summary = json.loads((work / 'summary.json').read_text())
     message = memory.out_of_memory_message(
-        memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']]), settings.page_max,
+        memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']]),
         TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
@@ -157,19 +179,18 @@ def test_memory_guard_sees_the_scenery(tiny, monkeypatch):
     check = memory.check_bake_memory
     monkeypatch.setattr(memory, 'read_machine', lambda: BIG_MACHINE)
 
-    def spy(inputs, page_max, machine):
-        seen.append((inputs.counts, inputs.pages, page_max))
-        return check(inputs, page_max, machine)
+    def spy(inputs, machine):
+        seen.append((inputs.counts, inputs.pages))
+        return check(inputs, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     assert len(seen) == 1
-    seen_counts, pages, page_max = seen[0]
+    seen_counts, pages = seen[0]
     assert seen_counts.triangles == 2 + 1
     assert seen_counts.vertices == 6 + 3
     job = json.loads((work / 'job.json').read_text())
     assert pages == [tuple(page) for page in job['pages']]
-    assert page_max == settings.page_max
 
 
 def place_scenery(tags):
@@ -196,9 +217,9 @@ def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     seen = []
     check = memory.check_bake_memory
 
-    def spy(inputs, page_max, machine):
+    def spy(inputs, machine):
         seen.append((inputs.counts, inputs.pages))
-        return check(inputs, page_max, machine)
+        return check(inputs, machine)
 
     monkeypatch.setattr(memory, 'check_bake_memory', spy)
     api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
@@ -206,15 +227,134 @@ def test_estimate_matches_what_the_bake_sees(tiny, monkeypatch, tmp_path):
     assert estimate.counts == memory.SceneCounts(3, 9)
 
 
-def test_estimate_leaves_a_chart_cache_the_bake_reuses(tiny, monkeypatch, tmp_path):
+def test_the_estimate_charts_rectangles_and_keeps_its_own_cache(tiny, monkeypatch, tmp_path):
+    # (the estimate skips the nest for speed; a cache of its own keeps an estimate after a bake, and a bake after
+    # an estimate, from charting again each time)
     tags, settings, work = tiny
-    api().estimate_scene(tags, 'level', 'room', settings, tmp_path / 'charts.npz')
+    cache = tmp_path / 'charts.npz'
+    estimate_file = tmp_path / 'charts.estimate.npz'
+    nested = []
+    real = api().chart_and_pack
 
-    def refuse(*args, **kwargs):
-        raise AssertionError('charted again')
+    def spy(*args, **kwargs):
+        nested.append(kwargs.get('nest'))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', spy)
+    api().estimate_scene(tags, 'level', 'room', settings, cache)
+    assert nested == [False] and estimate_file.exists() and not cache.exists()
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    assert nested == [False, True] and cache.exists()
+    api().estimate_scene(tags, 'level', 'room', settings, cache)
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    assert nested == [False, True]
 
-    monkeypatch.setattr(api(), 'chart_and_pack', refuse)
-    api().bake(tags, 'level', 'room', settings, work=work, charts=tmp_path / 'charts.npz')
+def test_chart_cache_key_carries_auto_and_nest(tmp_path):
+    from lightmapper.charts import ChartSettings
+    bsp = tmp_path / 'room.bsp'
+    bsp.write_bytes(b'tag bytes')
+    keys = {api().chart_cache_key(bsp, ChartSettings(page_max=page_max), [], nest)
+            for page_max in ('auto', 4096) for nest in (True, False)}
+    assert len(keys) == 4
+
+
+def test_bake_repacks_the_charts_at_write(two_pages):
+    tags, settings, work = two_pages
+    out = api().bake(tags, 'level', 'room', settings, work=work)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['pages'] == 1 and summary['sizes'] == [[16, 8]]
+    assert summary['bake_sizes'] == [[8, 8], [8, 8]] and len(summary['utilisation']) == 1
+    assert summary['page_max_resolved'] == 64
+    assert len(summary['clipped_fraction']) == 1
+    with np.load(work / 'float_pages.npz') as data:
+        assert data.files == ['page_0'] and data['page_0'].shape == (8, 16, 3)
+    assert [p.shape for p in out.float_pages] == [(8, 16, 3)]
+    bsp = read_tag(resolve_reference_path(tags, 'sbsp', 'room'))
+    assert len(bsp.root.block('lightmaps')) == 2
+    bitmap = read_tag(resolve_reference_path(tags, 'bitm', 'room'))
+    assert [(b.get('width'), b.get('height')) for b in bitmap.root.block('bitmaps')] == [(16, 8)]
+    from lightmapper.diff import bitmap_pages
+    from lightmapper.formats.vertices import decode_r5g6b5
+    from lightmapper.pages import quantise
+    for image, pixels in zip(out.float_pages, bitmap_pages(out.bitmap_tag)):
+        np.testing.assert_array_equal(pixels, decode_r5g6b5(quantise(image, settings)))
+
+
+def test_the_repack_is_capped_at_the_layouts_resolved_max(two_pages, monkeypatch):
+    from lightmapper.charts import PackedPages
+    real = api()._charts
+
+    def resolved(*args, **kwargs):
+        pages = PackedPages(real(*args, **kwargs))
+        pages.page_max = 8
+        return pages
+
+    monkeypatch.setattr(api(), '_charts', resolved)
+    tags, settings, work = two_pages
+    api().bake(tags, 'level', 'room', settings, work=work)
+    summary = json.loads((work / 'summary.json').read_text())
+    assert summary['page_max_resolved'] == 8 and summary['sizes'] == [[8, 8], [8, 8]]
+
+
+def test_written_layout_samples_the_baked_light(two_pages, monkeypatch, tmp_path):
+    from lightmapper import combine
+    tags, settings, work = two_pages
+    # (a different light on each page, so a page put in the wrong place shows)
+    def blender(work_dir, s):
+        job = json.loads((work_dir / 'job.json').read_text())
+        with np.load(work_dir / 'scene.npz') as scene:
+            vectors = scene['query_normal'] * .25
+        pages = [np.full((h, w, 3), .1 * (i + 1), np.float32) + np.linspace(0, .05, w, dtype=np.float32)[None, :, None]
+                 for i, (w, h) in enumerate(job['pages'])]
+        return BakeResult(pages, vectors, np.ones(len(vectors), np.float32), 'test CPU',
+                          [np.ones((h, w), bool) for w, h in job['pages']],
+                          stages={'start': 0, 'scene': 2, 'pages': 3, 'vertex': 0}, diffuse_pages=pages)
+
+    monkeypatch.setattr(api(), 'run_blender', blender)
+    combined = api().bake(tags, 'level', 'room', settings, work=work / 'a', out_bsp='combined')
+    plan = api().written_plan
+    moved = []
+
+    def spy(pages, *args):
+        found = plan(pages, *args)
+        moved.extend(found[0])
+        return found
+    monkeypatch.setattr(api(), 'written_plan', spy)
+    api().bake(tags, 'level', 'room', settings, work=work / 'c', out_bsp='combined2')
+    # (each bake page is one block here; the second moves off its own page's origin)
+    assert len(moved) == 1 and len(moved[0].moves) == 2
+    assert any((m.to_x, m.to_y) != (m.x, m.y) for m in moved[0].moves)
+    monkeypatch.setattr(api(), 'written_plan', lambda pages, *a: ([combine.WrittenPage(
+        p.width, p.height, (combine.Move(i, 0, 0, p.width, p.height, 0, 0, False),)) for i, p in enumerate(pages)],
+        (64, 64)))
+    plain = api().bake(tags, 'level', 'room', settings, work=work / 'b', out_bsp='plain')
+    assert len(plain.float_pages) == 2 and len(combined.float_pages) == 1
+
+    def per_input(out, name):
+        tag = read_tag(resolve_reference_path(tags, 'sbsp', name))
+        by_input = {}
+        position = 0
+        for page_index, page in enumerate(tag.root.block('lightmaps')[:len(out.float_pages)]):
+            image = out.float_pages[page_index]
+            h, w = image.shape[:2]
+            for material in page.block('materials'):
+                lm = unpack_uncompressed(material.data('uncompressed_vertices'), material.get('rendered_vertices.vertex_count'),
+                                         material.get('lightmap_vertices.vertex_count'))[1]
+                for surface in range(material.get('surface_count')):
+                    values = []
+                    for x, y in lm['texcoord'][3 * surface:3 * surface + 3].astype(np.float64) * (w, h) - .5:
+                        x0, y0 = int(np.clip(np.floor(x), 0, w - 1)), int(np.clip(np.floor(y), 0, h - 1))
+                        x1, y1 = min(x0 + 1, w - 1), min(y0 + 1, h - 1)
+                        fx, fy = np.clip(x - x0, 0, 1), np.clip(y - y0, 0, 1)
+                        values.append(image[y0, x0] * (1 - fx) * (1 - fy) + image[y0, x1] * fx * (1 - fy)
+                                      + image[y1, x0] * (1 - fx) * fy + image[y1, x1] * fx * fy)
+                    by_input[int(out.new_to_input[position])] = np.array(values)
+                    position += 1
+        return by_input
+
+    a, b = per_input(combined, 'combined'), per_input(plain, 'plain')
+    assert a.keys() == b.keys() and len(a) == 2
+    for key in a:
+        np.testing.assert_allclose(a[key], b[key], atol=1e-4)
 
 
 def test_estimate_starts_no_blender(tiny, monkeypatch, tmp_path):
@@ -253,8 +393,8 @@ def test_dry_run_warns_instead_of_refusing(tiny, monkeypatch, caplog):
     monkeypatch.setattr(memory, 'read_machine', lambda: TINY_MACHINE)
     out = api().bake(tags, 'level', 'room', settings, work=work, dry_run=True)
     summary = json.loads((work / 'summary.json').read_text())
-    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']])
-    message = memory.out_of_memory_message(inputs, settings.page_max, TINY_MACHINE)
+    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']])
+    message = memory.out_of_memory_message(inputs, TINY_MACHINE)
     assert message in summary['warnings']
     assert ('WARNING', message) in [(r.levelname, r.getMessage()) for r in caplog.records]
     assert out.work == work
@@ -279,7 +419,7 @@ def test_summary_records_the_memory_check(tiny, monkeypatch, machine):
     monkeypatch.setattr(memory, 'read_machine', lambda: machine)
     api().bake(tags, 'level', 'room', settings, work=work)
     summary = json.loads((work / 'summary.json').read_text())
-    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['sizes']],
+    inputs = memory.StageInputs(memory.SceneCounts(2, 6), [tuple(p) for p in summary['bake_sizes']],
                                 whole_page_tiles=summary['whole_page_tiles'])
     peak, size = memory.peak_bytes(inputs)
     assert summary['memory'] == {
@@ -346,8 +486,9 @@ def test_dry_run_records_no_written_sizes(tiny):
     assert json.loads((work / 'summary.json').read_text())['written'] == {}
 
 
-def test_pipeline_outputs(tiny):
-    tags, settings, work = tiny
+@pytest.mark.parametrize('fixture', ['tiny', 'two_pages'])
+def test_pipeline_outputs(request, fixture):
+    tags, settings, work = request.getfixturevalue(fixture)
     out = api().bake(tags, 'level', 'room', settings, out_bsp='copy', out_scenario='copy_level', work=work)
     assert validate_bsp(out.bsp_tag, out.bitmap_tag, strict_compression=True) == []
     np.testing.assert_array_equal(np.sort(out.new_to_input), [0, 1])
@@ -759,7 +900,7 @@ def test_device_probe_failure_precedes_charting_and_tag_writes(tiny, monkeypatch
         raise gpu.DeviceError('nvidia: unavailable')
 
     monkeypatch.setattr(gpu, 'probe_choice', fail)
-    monkeypatch.setattr(api(), 'chart_and_pack', lambda *a: pytest.fail('charted before probe'))
+    monkeypatch.setattr(api(), 'chart_and_pack', lambda *a, **k: pytest.fail("charted before probe"))
     with pytest.raises(gpu.DeviceError, match='unavailable'):
         api().bake(tags, 'level', 'room', settings, work=work)
 
@@ -845,7 +986,7 @@ def test_pipeline_stitches_before_quantisation(tiny, monkeypatch):
     for page in pages:
         page.materials[0].group = 0
     module = api()
-    monkeypatch.setattr(module, 'chart_and_pack', lambda *args: pages)
+    monkeypatch.setattr(module, 'chart_and_pack', lambda *args, **kwargs: pages)
     original = module.run_blender
 
     def with_step(work, s):
@@ -933,7 +1074,7 @@ def test_surface_cap_refuses(tiny, monkeypatch, caplog):
     module = api()
     monkeypatch.setattr(module, 'MAX_BSP_SURFACES', 1)
 
-    def no_chart(*args):
+    def no_chart(*args, **kwargs):
         raise AssertionError('charted before refusing stock cap')
 
     with monkeypatch.context() as patch:
@@ -951,7 +1092,7 @@ def test_charts_cache(tiny, monkeypatch):
     cache = work / 'charts.npz'
     first = module.bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
 
-    def no_chart(*args):
+    def no_chart(*args, **kwargs):
         raise AssertionError('recharted')
 
     monkeypatch.setattr(module, 'chart_and_pack', no_chart)
@@ -978,7 +1119,7 @@ def test_charts_cache_follows_chart_shader_inputs(tiny, monkeypatch, field, valu
     shader.root.set(field, value)
     write_tag(shader, shader_path)
 
-    def no_chart(*args):
+    def no_chart(*args, **kwargs):
         raise AssertionError('recharted')
 
     monkeypatch.setattr(module, 'chart_and_pack', no_chart)
@@ -1462,7 +1603,7 @@ def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatc
     original_scene = pipeline._scene
     original_write = pipeline.write_job
 
-    def chart(groups, shaders, s):
+    def chart(groups, shaders, s, nest=False):
         lm = np.zeros(6, LM)
         lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
         return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
@@ -1493,7 +1634,7 @@ def test_pipeline_adds_flat_sun_without_rescaling_mixed_diffuse(tiny, monkeypatc
     out = pipeline.bake(tags, 'level', 'room', replace(settings, stitch_seams=False, ignore_normals_mode='tool'), work=work, dry_run=True)
     # flagged samples are dark, unflagged samples have diffuse 1; only the independent sun term is added here
     want = np.array([[0.3, 1 / 3 + 0.3 * 2 / 3], [1 / 3 + 0.3 * 2 / 3, 1]])
-    np.testing.assert_allclose(out.float_pages[0], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2], np.repeat(want[:, :, None], 3, axis=2), rtol=1e-6)
 
 
 def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny, monkeypatch):
@@ -1509,7 +1650,7 @@ def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny,
     material.set_data('compressed_vertices', compress(env, lm))
     put(tags, 'sbsp', 'room', bsp)
 
-    def chart(groups, shaders, s):
+    def chart(groups, shaders, s, nest=False):
         group = groups[0]
         pages = []
         for i in range(2):
@@ -1534,7 +1675,9 @@ def test_two_page_bake_preserves_page_order_and_expands_seam_query_inverse(tiny,
     monkeypatch.setattr(api(), 'chart_and_pack', chart)
     monkeypatch.setattr(api(), 'run_blender', blender)
     monkeypatch.setattr(vertex_cpu, 'run_in_child', compiled)
-    out = api().bake(tags, 'level', 'room', replace(settings, dither=False, stitch_seams=False), work=work, dry_run=True)
+    # (page_max 8 keeps the two 8 x 8 bake pages from combining, so these checks stay on bake pages)
+    out = api().bake(tags, 'level', 'room', replace(settings, dither=False, stitch_seams=False, page_max=8), work=work,
+                     dry_run=True)
     expected = [[0.1, 0.2, 0.3], [0.1, 0.3, 0.4]]
     for i, page in enumerate(out.bsp_tag.root.block('lightmaps')[:-1]):
         m = page.block('materials')[0]
@@ -1602,7 +1745,7 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     pipeline = api()
     original_scene = pipeline._scene
 
-    def chart(groups, shaders, s):
+    def chart(groups, shaders, s, nest=False):
         lm = np.zeros(6, LM)
         lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
         return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
@@ -1657,7 +1800,8 @@ def run_enhanced_pipeline(tiny, monkeypatch, mode, emit=0., bounces=1, flagged=T
     if mode == 'enhanced' and not bounces:
         want = np.array([[.3, 1/3 + .3*2/3], [1/3 + .3*2/3, 1.]])
     if not emit:
-        np.testing.assert_allclose(out.float_pages[0][..., 0], want, rtol=1e-6)
+        # (the 2 x 2 bake page is one block, written at the corner of a page no smaller than page_min)
+        np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], want, rtol=1e-6)
     return summary
 
 
@@ -1695,7 +1839,9 @@ def test_glow_run_starts_with_no_pages_held(tiny, monkeypatch):
 
 def test_bake_after_the_glow_run_is_unchanged(tiny, monkeypatch):
     # data/enhanced_bake.bitmap is copy.bitmap of the bake of 1347400, before the pages were freed, made with the
-    # same call: run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
+    # same call: run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'}).
+    # (remade when the repack began writing the 2 x 2 page into an 8 x 8 one: its 2 x 2 corner is the old page's
+    # pixels exactly, and the rest is black)
     run_enhanced_pipeline(tiny, monkeypatch, 'enhanced', bake_kwargs={'dry_run': False, 'out_bsp': 'copy'})
     want = (Path(__file__).parent / 'data' / 'enhanced_bake.bitmap').read_bytes()
     assert (tiny[0] / 'copy.bitmap').read_bytes() == want
@@ -1903,7 +2049,7 @@ def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=(), route='cpu'):
     pipeline = api()
     original_scene = pipeline._scene
 
-    def chart(groups, shaders, s):
+    def chart(groups, shaders, s, nest=False):
         lm = np.zeros(6, LM)
         lm['texcoord'] = [[0, 0], [1, 0], [0, 1], [1, 0], [1, 1], [0, 1]]
         return [OutPage(2, 2, [OutMaterial(0, groups[0].env, lm,
@@ -1937,7 +2083,7 @@ def flat_lamp_bake(tiny, monkeypatch, light_flat, lamps=(), route='cpu'):
 def test_flat_light_term_lights_flagged_texels_once_in_tool_mode(tiny, monkeypatch):
     out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32))
     flagged = np.array([[1, 2/3], [2/3, 0]])
-    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * flagged, rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], .5 * flagged, rtol=1e-6)
     assert out.float_pages[0][1, 1].max() == 0
 
 
@@ -1964,7 +2110,7 @@ def test_light_flat_reaches_the_finish_on_every_route(tiny, monkeypatch, route):
 
         batch_runs(monkeypatch, nothing)
     out = flat_lamp_bake(tiny, monkeypatch, np.full((6, 3), .5, np.float32), lamps, route)
-    np.testing.assert_allclose(out.float_pages[0][..., 0], .5 * np.array([[1, 2/3], [2/3, 0]]), rtol=1e-6)
+    np.testing.assert_allclose(out.float_pages[0][:2, :2, 0], .5 * np.array([[1, 2/3], [2/3, 0]]), rtol=1e-6)
 
 
 def test_dark_lamps_change_nothing(tiny, monkeypatch):
@@ -2048,3 +2194,58 @@ def test_enhanced_pipeline_hands_each_page_owner_map_to_both_gathers(tiny, monke
     assert [name for name, _ in seen] == ['contribution', 'source']
     assert all(owner is not None for _, owner in seen)
     assert seen[0][1] is seen[1][1]
+
+
+def test_the_quick_estimate_charts_nothing(tiny, monkeypatch, tmp_path):
+    tags, settings, _ = tiny
+
+    def refuse(*args, **kwargs):
+        raise AssertionError('the quick estimate charted')
+    monkeypatch.setattr(api(), 'chart_and_pack', refuse)
+    estimate = api().quick_estimate(tags, 'level', 'room', settings)
+    assert estimate.pages and estimate.counts.triangles >= 2
+
+
+def test_the_bake_reuses_the_full_estimates_layout(tiny, monkeypatch, tmp_path):
+    tags, settings, work = tiny
+    cache = tmp_path / 'charts.npz'
+    nested = []
+    real = api().chart_and_pack
+
+    def spy(*args, **kwargs):
+        nested.append(kwargs.get('nest'))
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', spy)
+    full = api().full_estimate(tags, 'level', 'room', settings, cache)
+    assert nested == [True] and cache.exists()
+    api().bake(tags, 'level', 'room', settings, work=work, charts=cache, dry_run=True)
+    assert nested == [True]
+    assert json.loads((work / 'summary.json').read_text())['bake_sizes'] == [list(size) for size in full.pages]
+
+
+def test_a_bake_waits_for_a_layout_being_charted_into_its_cache(tiny, monkeypatch, tmp_path):
+    # (the full estimate runs on a thread of its own; a bake started meanwhile must not chart beside it)
+    import threading
+    tags, settings, work = tiny
+    cache = tmp_path / 'charts.npz'
+    real = api().chart_and_pack
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def slow(*args, **kwargs):
+        calls.append(threading.current_thread().name)
+        started.set()
+        assert release.wait(10)
+        return real(*args, **kwargs)
+    monkeypatch.setattr(api(), 'chart_and_pack', slow)
+    worker = threading.Thread(target=api().full_estimate, args=(tags, 'level', 'room', settings, cache), name='full')
+    worker.start()
+    assert started.wait(10)
+    baker = threading.Thread(target=api().bake, args=(tags, 'level', 'room', settings),
+                             kwargs={'work': work, 'charts': cache, 'dry_run': True}, name='bake')
+    baker.start()
+    baker.join(1)
+    assert baker.is_alive() and calls == ['full']
+    release.set()
+    worker.join(10)
+    baker.join(30)
+    assert calls == ['full']

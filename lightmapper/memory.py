@@ -30,7 +30,6 @@ FINISH_PER_SUB_TEXEL: int = 31
 MAX_TILE = 8192
 MARGIN = 1.15
 GB = 10**9
-PAGE_SIDES = (256, 512, 1024, 2048, 4096)
 STAGES = ('blender', 'vertex', 'glow', 'finish')
 READ = object()
 logger = logging.getLogger(__name__)
@@ -61,6 +60,8 @@ class StageInputs:
     # 9 * w * h over the pages holding a flagged triangle, only in the Enhanced ignore-normals mode
     glow_sub_texels: int = 0
     whole_page_tiles: bool = False
+    # a rough estimate's correction for a layout it knows to be larger than the bake's
+    scale: float = 1.0
 
 
 def _largest_sub_texels(pages) -> int:
@@ -72,13 +73,16 @@ def _stages(inputs: StageInputs, largest: int, texels: int) -> dict[str, int]:
     glow = inputs.glow_sub_texels
     blender = (BLENDER_BASE + BLENDER_PER_SUB_TEXEL * largest + BLENDER_PER_PAGE_TEXEL * texels
                + BLENDER_PER_VERTEX * inputs.counts.vertices)
-    return {
+    stages = {
         'blender': ceil(MARGIN * blender) + (PER_TILE_SUB_TEXEL * largest if tiles else 0),
         'vertex': ceil(MARGIN * (VERTEX_BASE + VERTEX_PER_PAGE_TEXEL * texels + VERTEX_PER_GLOW_SUB_TEXEL * glow)),
         'glow': 0 if glow == 0 else (ceil(MARGIN * (blender + GLOW_PER_GLOW_SUB_TEXEL * glow))
                                      + (GLOW_PER_TILE_SUB_TEXEL * largest if tiles else 0)),
         'finish': ceil(MARGIN * (FINISH_BASE + FINISH_PER_SUB_TEXEL * largest)),
     }
+    if inputs.scale != 1.0:
+        stages = {name: int(value * inputs.scale) for name, value in stages.items()}
+    return stages
 
 
 def stage_bytes(inputs: StageInputs) -> dict[str, int]:
@@ -240,19 +244,6 @@ def format_gb(n: int) -> str:
     return f'{n / GB:.1f}' if n < 10 * GB else f'{n / GB:.0f}'
 
 
-# (a smaller Max resolution caps the largest page, but the level repacks into more pages of about the same total texels
-# and the same flagged texels, so only the largest-page terms shrink)
-def suggest_page_max(inputs: StageInputs, limit: int | None) -> int | None:
-    if not inputs.pages:
-        return None
-    texels = sum(w * h for w, h in inputs.pages)
-    largest = max(max(page) for page in inputs.pages)
-    for side in reversed(PAGE_SIDES):
-        if side < largest and (limit is None or max(_stages(inputs, 9 * side * side, texels).values()) <= limit):
-            return side
-    return None
-
-
 def _stage_label(stage: str) -> str:
     from .progress import STAGE_LABELS
     label = STAGE_LABELS[stage]
@@ -271,18 +262,13 @@ def page_file_message(inputs: StageInputs, machine: Machine) -> str:
             f"computer's {format_gb(machine.ram)} GB of memory. It will lean on the page file and slow down.")
 
 
-def out_of_memory_message(inputs: StageInputs, page_max: int, machine: Machine | None) -> str:
+def out_of_memory_message(inputs: StageInputs, machine: Machine | None) -> str:
     stage, need = peak_bytes(inputs)
     limit = _limit(machine)
     held = '' if limit is None else f' ({format_gb(limit)} GB)'
     text = (f'This bake needs about {format_gb(need)} GB at its peak ({_stage_label(stage)}), more than this '
-            f"computer's memory and page file can hold{held}. It will likely run out of memory.")
-    side = suggest_page_max(inputs, None if machine is None else machine.ram)
-    if side is None:
-        text += ' Try a lower texel density, or close other programs.'
-    else:
-        text += (f' Try Max resolution {side}, or close other programs. '
-                 'If the level then needs too many pages or still does not fit, lower the texel density a little.')
+            f"computer's memory and page file can hold{held}. It will likely run out of memory."
+            ' Try a lower texel density, or close other programs.')
     if stage == 'glow':
         text += ' Or set "ignore_normals_mode" to "tool" in the --settings file.'
     return text
@@ -301,7 +287,7 @@ class MemoryCheck:
         return self.level == 'fits'
 
 
-def check_bake_memory(inputs: StageInputs, page_max: int, machine=READ) -> MemoryCheck:
+def check_bake_memory(inputs: StageInputs, machine=READ) -> MemoryCheck:
     stage, need = peak_bytes(inputs)
     if machine is READ:
         machine = read_machine()
@@ -309,7 +295,7 @@ def check_bake_memory(inputs: StageInputs, page_max: int, machine=READ) -> Memor
         logger.warning("this computer's memory is unknown, so the bake runs without the memory check")
         return MemoryCheck(need, stage)
     if need > _limit(machine):
-        return MemoryCheck(need, stage, 'out_of_memory', out_of_memory_message(inputs, page_max, machine), machine)
+        return MemoryCheck(need, stage, 'out_of_memory', out_of_memory_message(inputs, machine), machine)
     if need > machine.ram:
         return MemoryCheck(need, stage, 'page_file', page_file_message(inputs, machine), machine)
     return MemoryCheck(need, stage, machine=machine)

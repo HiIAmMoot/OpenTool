@@ -25,7 +25,7 @@ EXAMPLE_TEXT = {
     'samples': 'Rays per lightmap texel. More rays give less noise.',
     'vertex_rays': 'Rays per vertex, for the light direction bump maps use. More give smoother bump shading.',
     'bounces': 'How often light bounces between surfaces. More light reaches the shade.',
-    'page_max': 'The largest lightmap page. Bigger pages fit more of the level on each.',
+    'page_max': 'The largest lightmap page, for the bake and the written map. Auto picks the smallest size (256 to 4096) that fits the biggest surface at your texel density, so a surface that does not fit raises it. If the level would need more than 10 pages, Auto picks a larger size.',
     'adaptive_sampling': 'Stops casting rays at a texel once it is clean enough. Faster; off casts every ray.',
     'lightmap_32bit': '32-bit pages show no banding but take twice the file size and texture memory.',
     'render_only_shadows': "How surfaces with no collision under them, such as a sea plane, shadow what lies beneath. By bump alpha tests them by their shader's bump map, Solid blocks all light, None lets it all through as tool does.",
