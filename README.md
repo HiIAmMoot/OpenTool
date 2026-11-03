@@ -32,11 +32,15 @@ Each column is one view in game in HCEEK: tool's own lightmaps on top, OpenTool'
 - Static scenery lights
 - Ignore-normals shaders lit like tool (an experimental Enhanced mode is available through a `--settings` file)
 - Accurate shadows from alpha-tested shader environments and other transparent shaders
+- Render-only surfaces (such as sea planes) shadow through their bump map's alpha; water never blocks light
 - Automatic scene set-up from scenario, sky tag and shaders like tool.
-- Memory estimate and warning before a bake
+- Bakes on small lightmap pages and combines them when it writes, so large levels need far less memory
+- Memory estimate per bake stage, with a warning when a bake will use the page file or is likely to run out of memory (it never refuses)
 - Shows which device (GPU or CPU) each bake stage uses
 - Writes stock HCEEK tags, to new tag names or in place with backups
-- Lighting presets
+- Keeps a finished bake so it can be written to the tags again without baking
+- A bake report in the log at the end of each bake
+- Lighting presets from Draft to Ultra, and an Advanced panel with an example image for each setting
 
 ## Roadmap
 
@@ -52,7 +56,7 @@ The quickest way to use OpenTool is the Windows app. It needs nothing installed 
 1. Download `OpenTool-<version>-windows-x64.zip` from the [releases page](https://github.com/HiIAmMoot/OpenTool/releases) and unzip it anywhere.
 2. Install [Blender 5.2](https://www.blender.org/download/) or newer if you don't have it. The app finds it on its own.
 3. Double-click `OpenTool.exe`.
-4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset, and press Bake. Auto uses the GPU the app found; choose NVIDIA, AMD or CPU only under Device to override that. More options are under Advanced.
+4. Pick your HCEK tags folder, the scenario and its BSP, choose a quality preset (Draft, Normal, High or Ultra), and press Bake. Auto uses the GPU the app found; choose NVIDIA, AMD or CPU only under Device to override that. More options are under Advanced; hover a setting to see what it does and an example of its effect.
 
 With "Write to new tag names" ticked, the lit level is saved as `<name>_lit` and your own tags stay as they are. Unticked, the bake asks first and then replaces your level's tags, keeping the old ones in a `backups` folder next to them (untick "Keep backups" to skip that). Build the lit level with the editing kit as usual. Tick "Keep the bake to write it again" to keep the finished bake in the app's folder; Write again then writes it to the tags again without baking, for example with 32-bit lightmaps or to other tag names.
 
@@ -143,6 +147,9 @@ lightmapper/              the lightmapper
   formats/                BSP geometry, vertices, bitmaps and scenery
   gather.py               sky lights, ambient and shader emission
   charts.py, seams.py     UV charting, packing and seam stitching
+  combine.py              joining the small bake pages into the written pages
+  memory.py               the memory estimate per bake stage
+  kept.py                 kept bakes, for writing again without baking
   blender/bake.py         the script Blender runs to render the light
   pages.py                denoising, ambient, tone and 16-bit encoding
   radiosity.py            per-vertex incident light vectors
